@@ -1,0 +1,81 @@
+{
+  "manifest_version": 3,
+  "minimum_chrome_version": "116",
+  "name": "ApplyFill",
+  "version": "0.5.0",
+  "description": "求职网申表单填写助手：把简历模板里的信息一键填入招聘网站表单。",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAtIC8SdF6acgCEHsQqUmjmzNXLxSWmbrmkvZdUrYXug0HOCzENmxSwa31/Yozo11mSNQx+CXezTFczftXBEzp5QXrqD2RWTVbWYpIrwEcEM6y9fmnhMSokFC2Z5r7sbhpsvNYmfWgnMy+LInbNzEY80N57l+eFg1UCBl5IKAoTOOZRKvwIHJOum0T2cro7WMcz5UUN9hUCgfwdWFiPnFSlEdmGddO72JIQSC3fgzELU43HiWZQ47js12c5WtibKW9fYhdKCnRLR4QPVnYFYKMZIvfGezvsqcLTKs4ko1ezWYwqdf8irQQWFkNlbLOSKuUVkL2niUxsgzhMoKXedJRfQIDAQAB",
+  "permissions": [
+    "offscreen",
+    "storage",
+    "scripting",
+    "activeTab",
+    "tabs",
+    "nativeMessaging",
+    "alarms"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "ApplyFill",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "link/copy.mjs",
+        "link/extract.mjs",
+        "link/fillrecords.mjs",
+        "link/limits.mjs",
+        "link/redact.mjs",
+        "link/secret-fields.mjs",
+        "link/snapshot.mjs",
+        "link/protocol/schema-data.mjs",
+        "link/protocol/schema-lite.mjs",
+        "link/protocol/time.mjs",
+        "link/protocol/validate.mjs",
+        "content.css"
+      ],
+      "matches": [
+        "<all_urls>"
+      ]
+    }
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "ai-client.js",
+        "ai-helpers.js",
+        "profile-fields.js",
+        "form-structure.js",
+        "platform-seeds.js",
+        "form-agent.js",
+        "sidebar-state.js",
+        "content.js"
+      ],
+      "css": [
+        "content.css"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}

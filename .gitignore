@@ -1,0 +1,11 @@
+# 扩展 ID 的私钥：只在本机保留，上传商店时才需要，绝不能提交
+*.pem
+*.der
+
+# 打包产物与本地快照
+*.zip
+*.tar.gz
+
+node_modules/
+.DS_Store
+Thumbs.db
