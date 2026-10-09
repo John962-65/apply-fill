@@ -1,0 +1,30 @@
+<!doctype html><meta charset="utf-8"><title>匿名公开组件兼容性测试</title>
+<style>
+body{padding:24px;font:16px sans-serif}.record{padding:14px;border:1px solid #aaa;margin:14px;width:580px}
+.form-item--phoenix,.ant-form-item,.el-form-item,.ivu-form-item{margin:18px 0;max-width:420px}
+.ant-form-item-label,.el-form-item__label,.ivu-form-item-label{display:block;margin:6px 0}
+.ant-picker{display:inline-flex;position:relative;border:1px solid #aaa;padding:8px}.ant-picker-input input{width:220px}
+.ant-picker-dropdown{position:absolute;background:white;border:1px solid #aaa;z-index:30}
+.ant-picker-header{display:flex;gap:8px;padding:8px}.ant-picker-header-view{flex:1}.ant-picker-content td{padding:5px;cursor:pointer}
+.ant-picker-cell:not(.ant-picker-cell-in-view){color:#aaa}.ant-picker-cell-disabled{color:#aaa}
+</style>
+<main id="vue-fixture">
+ <section><h2>项目经历</h2>
+  <article class="record">
+   <div class="form-item--phoenix"><div class="form-item__title">项目名称</div><input id="el-project"></div>
+   <div class="el-form-item" data-test="element-month"><div class="el-form-item__label">开始时间</div><el-date-picker v-model="values.start" type="month" placeholder="YYYY-MM" value-format="yyyy-MM" @change="save('element-month',$event)"></el-date-picker></div>
+   <div class="el-form-item" data-test="element-day"><div class="el-form-item__label">结束时间</div><el-date-picker v-model="values.end" type="date" placeholder="YYYY-MM-DD" value-format="yyyy-MM-dd" @change="save('element-day',$event)"></el-date-picker></div>
+   <div class="el-form-item" data-test="element-year"><div class="el-form-item__label">获奖时间</div><el-date-picker v-model="values.year" type="year" placeholder="YYYY" value-format="yyyy" @change="save('element-year',$event)"></el-date-picker></div>
+   <div class="el-form-item" data-test="element-language"><div class="el-form-item__label">语言</div><el-select v-model="values.language" placeholder="请选择" @change="save('element-language',$event)"><el-option label="英语" value="英语"></el-option><el-option label="法语" value="法语"></el-option></el-select></div>
+  </article>
+  <article class="record">
+   <div class="form-item--phoenix"><div class="form-item__title">项目名称</div><input id="iview-project"></div>
+   <div class="ivu-form-item" data-test="iview-month"><div class="ivu-form-item-label">开始时间</div><ivu-date-picker v-model="values.ivustart" type="month" format="yyyy-MM" placeholder="YYYY-MM" transfer @on-change="save('iview-month',$event)"></ivu-date-picker></div>
+   <div class="ivu-form-item" data-test="iview-day"><div class="ivu-form-item-label">结束时间</div><ivu-date-picker v-model="values.ivuend" type="date" format="yyyy-MM-dd" placeholder="YYYY-MM-DD" transfer @on-change="save('iview-day',$event)"></ivu-date-picker></div>
+   <div class="ivu-form-item" data-test="iview-year"><div class="ivu-form-item-label">获奖时间</div><ivu-date-picker v-model="values.ivuyear" type="year" format="yyyy" placeholder="YYYY" transfer @on-change="save('iview-year',$event)"></ivu-date-picker></div>
+   <div class="ivu-form-item" data-test="iview-language"><div class="ivu-form-item-label">语言</div><ivu-select v-model="values.ivulanguage" placeholder="请选择" transfer @on-change="save('iview-language',$event)"><i-option value="英语">英语</i-option><i-option value="法语">法语</i-option></ivu-select></div>
+  </article>
+ </section>
+</main>
+<div id="react-fixture"></div>
+<script>window.values={};window.untrusted=0;window.clicks=[];document.addEventListener('click',e=>{if(!e.isTrusted)window.untrusted++;window.clicks.push({tag:e.target.tagName,cls:e.target.className,text:e.target.textContent.trim().slice(0,35)});},true);</script>

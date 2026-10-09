@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ApplyFill</title>
     <link rel="stylesheet" href="popup.css">
+    <link rel="stylesheet" href="tree-editor.css">
   </head>
   <body>
     <main class="popup-shell">
@@ -13,7 +14,7 @@
           <p class="eyebrow">ApplyFill</p>
           <h1>简历填表助手</h1>
         </div>
-        <p class="header-note">Excel 维护数据，插件负责导入与填写。</p>
+        <p class="header-note">把经历整理成资料树，让每次网申少重复填写。</p>
         <div class="version-row">
           <span id="current-version">当前版本</span>
           <button id="check-update-button" class="text-button" type="button">检查更新</button>
@@ -33,7 +34,7 @@
       </section>
 
       <nav class="tab-nav" aria-label="功能分区">
-        <button class="tab-button is-active" type="button" data-tab="templates">模板管理</button>
+        <button class="tab-button is-active" type="button" data-tab="templates">简历资料</button>
         <button class="tab-button" type="button" data-tab="profile">我的信息</button>
         <button class="tab-button" type="button" data-tab="ai">AI 配置</button>
       </nav>
@@ -42,12 +43,12 @@
         <div class="panel-card">
           <div class="panel-toolbar">
             <div>
-              <h2>模板列表</h2>
-              <p>支持多套简历模板，填表前切换对应模板即可。</p>
+              <h2>我的资料树</h2>
+              <p>按分类和经历维护资料，网页补充信息确认后再合并。</p>
             </div>
             <div class="toolbar-actions">
               <button class="secondary-button" id="parse-toggle-button" type="button">AI 解析简历</button>
-              <button class="secondary-button" id="clean-template-button" type="button">清理别名行</button>
+              <button class="secondary-button" id="clean-template-button" type="button" hidden>清理别名行</button>
               <button class="primary-button" id="import-template-button" type="button">导入 Excel</button>
             </div>
           </div>
@@ -55,23 +56,24 @@
           <input id="template-file-input" type="file" accept=".xlsx,.csv" hidden>
 
           <div class="parse-section" id="parse-section">
-            <div class="parse-section__desc">上传 PDF / Word / TXT，AI 提取后直接存为模板</div>
+            <div class="parse-section__desc">上传简历 → AI 按标准资料树提取 → 人工核对与补充 → 确认保存后用于填写。支持 PDF / Word / TXT。</div>
             <div class="parse-drop-zone" id="parse-drop-zone">
               <span id="parse-drop-label">拖拽简历文件到此处，或点击选择</span>
               <input type="file" id="parse-file-input" accept=".pdf,.docx,.txt" hidden>
             </div>
             <button class="primary-button is-full" id="parse-resume-button" type="button" disabled>
-              开始解析
+              按资料树提取
             </button>
             <button class="secondary-button is-full" id="parse-download-button" type="button" hidden>
-              下载 Excel 核对
+              下载 AI 提取结果 Excel（未核对）
             </button>
             <div class="status-message" id="parse-status" aria-live="polite"></div>
           </div>
 
           <div class="status-message" id="template-status" aria-live="polite"></div>
 
-          <div class="template-list" id="template-list"></div>
+          <div class="template-list" id="template-list" hidden></div>
+          <div id="resume-workbench"></div>
 
           <div class="backup-row">
             <div class="backup-row__actions">
@@ -231,6 +233,11 @@
     <script src="profile-fields.js"></script>
     <script src="ai-client.js"></script>
     <script src="ai-models.js"></script>
+    <script src="collection-ai.js"></script>
+    <script src="resume-tree.js"></script>
+    <script src="resume-schema.js"></script>
+    <script src="resume-import.js"></script>
+    <script src="tree-editor.js"></script>
     <script src="popup.js"></script>
   </body>
 </html>

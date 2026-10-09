@@ -176,6 +176,18 @@ test("快照只含结构，任何填写内容都不会被序列化出去", () =>
   assert.equal(parsed.kind, "resume-pro/form-structure");
 });
 
+test("当前控件家族更新并随结构导出；未识别时清掉旧家族，映射身份保持不变", () => {
+  const original=field("开始时间",{control:"date-picker",drive:"click-focus-type-enter",controlFamily:"element",controlEvidence:"published-source",resumeKey:"开始时间"});
+  const current=field("开始时间",{control:"date-picker",drive:"open-calendar-pick",controlFamily:"iview",controlEvidence:"published-source"});
+  const merged=fs.mergeFields([original],[current]);
+  assert.equal(merged[0].controlFamily,"iview");assert.equal(merged[0].drive,"open-calendar-pick");assert.equal(merged[0].resumeKey,"开始时间");
+  const exported=JSON.parse(fs.serialize([{fields:merged}])).snapshots[0].fields[0];
+  assert.equal(exported.controlEvidence,"published-source");assert.equal(exported.controlFamily,"iview");
+  assert.equal(fs.fieldIdentity(original),fs.fieldIdentity(current));
+  const unknown=fs.mergeFields(merged,[{...current,controlFamily:"",controlEvidence:""}]);
+  assert.equal(unknown[0].controlFamily,"");assert.equal(unknown[0].controlEvidence,"");
+});
+
 test("控件 id 里的数字打码，候选人编号不会进快照", () => {
   assert.equal(fs.maskIdentifier("candidate_20260921_field12"), "candidate_#_field#");
   assert.equal(fs.maskIdentifier(undefined), "");

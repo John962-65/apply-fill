@@ -1,0 +1,73 @@
+<!doctype html><meta charset="utf-8"><title>Anonymous UD shell reproduction</title>
+<!-- Input/selector classes and pointer-events are from the user's capture.
+     Formily outer labels and calendar behaviors below are synthetic test cases,
+     not a saved private recruitment page or a claim of its popup DOM. -->
+<style>
+body{font:16px sans-serif;padding:20px}main{width:620px}.ud-formily-item{margin:14px 0;display:flex;gap:20px}
+.ud-formily-item-label{width:100px}.ud-formily-item-control{flex:1}.ud__select{display:inline-block;width:180px;border:1px solid #888}
+.ud__select__selector{padding:8px;min-height:24px;cursor:pointer;position:relative}.ud__select__selector__search{position:absolute;pointer-events:none}
+.ud__select__selector__search__input{pointer-events:none;width:140px}.ud__select__selector__content{pointer-events:auto}
+input{width:150px;height:24px}.throne-biz-date-range-picker{display:flex;gap:18px}.throne-biz-date-range-picker-input{display:inline-block}
+.anonymous-calendar,.anonymous-options{position:fixed;top:160px;left:350px;background:white;border:1px solid #777;padding:10px;z-index:20}
+.anonymous-date-cell{display:inline-block;padding:10px;cursor:pointer}.anonymous-options li{padding:12px;cursor:pointer;list-style:none}
+button{margin:5px}header{display:flex;align-items:center;justify-content:space-between}
+</style>
+<main id="form"></main>
+<script>
+const mode=new URL(location.href).searchParams.get('mode')||'success';
+window.stats={trusted:0,untrusted:0,selections:0,confirmations:0,submissions:0};
+const shell=(id,options)=>`<div id="${id}" class="ud__select select__45922b" data-options="${options.join('|')}"><div class="ud__select__selector ud__select__selector-lg ud__select__selector-readOnly ud__select__selector-border-normal"><div class="ud__select__selector__content"><div class="ud__select__selector__search"><input class="ud__select__selector__search__input ud__native-input" type="search" role="combobox" readonly></div><span class="caption"></span><span aria-hidden="true">▾</span></div></div></div>`;
+const field=(label,html)=>`<div class="ud-formily-item"><div class="ud-formily-item-label"><span>${label}</span></div><div class="ud-formily-item-control"><div class="ud-formily-item-control-content"><div class="ud-formily-item-control-content-component">${html}</div></div></div></div>`;
+const endpoint=id=>`<div class="throne-biz-date-range-picker-input"><div class="ud__input ud__input--size-lg"><label class="ud__input-input-wrap"><div class="ud__input-input__placeholder__wrapper"><input class="ud__native-input" id="${id}"></div></label></div></div>`;
+document.getElementById('form').innerHTML=field('姓名','<input id="name">')+field('手机号',shell('calling-code',['+86','+33'])+'<input id="phone" type="tel">')
+ +field('性别',shell('gender',['男','女']))+field('出生日期','<div class="ud__picker ud__picker--size-lg"><div class="ud__picker-dateInput ud__picker-inputWrapper"><div class="ud__picker-inputWrapper-inner"><input id="birth" class="ud__picker-input ud__native-input" placeholder="YYYY-MM"></div></div></div>')
+ +field('学校名称','<input id="school">')+field('学历',shell('degree',['本科','硕士研究生']))
+ +field('起止时间',`<div class="throne-biz-date-range-picker">${endpoint('start')}${endpoint('end')}</div>`)
+ +field('缺失标签','<input id="missing">');
+document.getElementById('missing').closest('.ud-formily-item').querySelector('.ud-formily-item-label').remove();
+if(mode.startsWith('day'))document.getElementById('start').placeholder='YYYY-MM-DD';
+const accepted=e=>{stats[e.isTrusted?'trusted':'untrusted']++;return e.isTrusted;};
+document.querySelectorAll('.ud__select').forEach(root=>{
+ const selector=root.querySelector('.ud__select__selector'),input=root.querySelector('input');
+ selector.onclick=e=>{
+  if(!accepted(e))return;
+  document.querySelectorAll('.anonymous-options').forEach(n=>n.remove());
+  const menu=document.createElement('ul');menu.className='anonymous-options';menu.id=root.id+'-options';menu.setAttribute('role','listbox');selector.setAttribute('aria-controls',menu.id);selector.setAttribute('aria-expanded','true');
+  for(const value of root.dataset.options.split('|')){const item=document.createElement('li');item.setAttribute('role','option');item.textContent=value;
+   item.onclick=e=>{if(!accepted(e))return;stats.selections++;if(mode==='select-discard')return;
+    root.querySelector('.caption').textContent=value;input.value='';menu.remove();selector.setAttribute('aria-expanded','false');};menu.append(item);}
+  document.body.append(menu);
+ };
+ if(root.id==='calling-code')root.querySelector('.caption').textContent='+86';
+ selector.addEventListener('keydown',e=>{if(e.key==='Escape'){document.getElementById(root.id+'-options')?.remove();selector.setAttribute('aria-expanded','false');}});
+});
+document.querySelectorAll('#birth,#start,#end').forEach(input=>{
+ input.onclick=e=>{
+  if(!accepted(e))return;
+  document.querySelectorAll('.anonymous-calendar').forEach(n=>n.remove());
+  const panel=document.createElement('div');panel.className='anonymous-calendar';panel.setAttribute('role','dialog');panel.id=input.id+'-calendar';input.setAttribute('aria-controls',panel.id);
+  let year=2026,month=1,draft='';const original=input.value;
+  const render=()=>{
+   const dayMode=mode.startsWith('day');
+   panel.innerHTML=`<header><button type="button" aria-label="上一年">‹</button><span role="heading">${year}年${dayMode?month+'月':''}</span><button type="button" aria-label="下一年">›</button>${dayMode?'<button type="button" aria-label="上一月">‹</button><button type="button" aria-label="下一月">›</button>':''}</header><div role="grid"></div><button type="button" class="confirm">确定</button>`;
+   panel.querySelector('[aria-label="上一年"]').onclick=e=>{if(accepted(e)){year--;render();}};
+   panel.querySelector('[aria-label="下一年"]').onclick=e=>{if(accepted(e)){year++;render();}};
+   if(dayMode){panel.querySelector('[aria-label="上一月"]').onclick=e=>{if(accepted(e)){month--;render();}};panel.querySelector('[aria-label="下一月"]').onclick=e=>{if(accepted(e)){month++;render();}};}
+   for(let number=1;number<=(dayMode?30:12);number++){
+    const cell=document.createElement('span');cell.className='anonymous-date-cell';cell.setAttribute('role','gridcell');cell.textContent=number+(dayMode?'':'月');
+    const canonical=`${year}-${String(dayMode?month:number).padStart(2,'0')}`+(dayMode?'-'+String(number).padStart(2,'0'):'');
+    if(mode!=='unknown'&&mode!=='day-bare')cell.setAttribute('aria-label',canonical);
+    cell.onclick=e=>{if(!accepted(e))return;stats.selections++;draft=canonical;input.value=mode==='day-bare'?`${year}年${month}月${number}日`:draft;cell.setAttribute('aria-selected','true');
+     if(mode==='peer-change')document.getElementById('end').value='2099-01';};panel.querySelector('[role="grid"]').append(cell);
+   }
+   panel.querySelector('.confirm').onclick=e=>{if(!accepted(e)||!draft)return;stats.confirmations++;if(mode==='date-discard')return;
+    input.dataset.committed=draft;panel.remove();
+    if(mode==='rerender'){const copy=input.cloneNode(true);input.replaceWith(copy);}
+   };
+  };
+  render();document.body.append(panel);
+  if(mode==='ambiguous'){const another=panel.cloneNode(true);another.id+='-other';document.body.append(another);input.setAttribute('aria-owns',another.id);}
+  input.addEventListener('keydown',e=>{if(e.key==='Escape'){if(!input.dataset.committed)input.value=original;panel.remove();}}, {once:false});
+ };
+});
+</script>

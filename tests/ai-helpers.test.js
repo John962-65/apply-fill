@@ -129,3 +129,57 @@ test("本地规则不把姓名填进「项目名称」——id 里带 name 不�
   assert.equal(matched.length, 1, "真·姓名字段照常走本地规则");
   assert.equal(matched[0].value, "张三");
 });
+
+test("区间时间拆成开始/结束，奖项名补成可引用字段", () => {
+  const fields = [
+    { group: "教育背景", key: "硕士时间", value: "2024.9.1-2027.6.1", fieldId: "t1" },
+    { group: "项目经历", recordId: "r0", recordName: "甲项目", key: "甲项目-开始时间", value: "2026-1-1", fieldId: "t3" },
+    { group: "奖励", recordId: "r1", recordName: "研究生学业奖学金一等奖", key: "研究生学业奖学金一等奖-获奖时间", value: "2024-9-1", fieldId: "a1" },
+    { group: "奖励", recordId: "r1", recordName: "研究生学业奖学金一等奖", key: "研究生学业奖学金一等奖-获奖时间 (2)", value: "2025-9-1", fieldId: "a2" }
+  ];
+
+  const expanded = ai.expandResumeFields(fields);
+  const added = expanded.slice(fields.length);
+  assert.deepEqual(added.map((item) => [item.key, item.value]), [
+    ["硕士时间-开始时间", "2024-9"],
+    ["硕士时间-结束时间", "2027-6"],
+    ["研究生学业奖学金一等奖-获奖名称", "研究生学业奖学金一等奖"]
+  ]);
+  assert.equal(added[2].recordId, "r1", "合成的获奖名称要带记录 id，guard 的锚点才建得起来");
+  assert.ok(added.every((item) => item.synthetic === true));
+  assert.equal(ai.expandResumeFields([{ key: "姓名", value: "张三" }]).length, 1, "没有可合成的就原样返回");
+
+  // 单日期、缺分隔符、解析不出的都不拆。
+  assert.deepEqual(ai.splitDateRange("2026-1-1"), null);
+  assert.deepEqual(ai.splitDateRange("2024.9.1-2027.6.1"), ["2024-9", "2027-6"]);
+  assert.deepEqual(ai.splitDateRange("2024-2027"), null);
+  assert.deepEqual(ai.splitDateRange("至今"), null);
+});
+
+test("描述由同一条经历的多段原文拼成时算可验证，夹一句编造或跨经历拼贴仍算无出处", () => {
+  const resume = [
+    { key: "甲项目-内容概述", value: "面向多机械臂共享空间协同操作及机械臂连续重复任务，研究几何路径多样化。", recordId: "r1", fieldId: "c1" },
+    { key: "甲项目-主要工作", value: "设计基于优先顺序与端点预留的多策略并行规划框架，结合按需修复生成互补多臂路径。", recordId: "r1", fieldId: "c2" },
+    { key: "乙项目-内容概述", value: "面向灵巧手接触崩塌与掉落问题，构建动作后果预测与风险预警闭环。", recordId: "r2", fieldId: "c3" }
+  ];
+  // 连接词单独成句（不足 8 字会被过滤）：逐句回查要求每一句都是某字段值的子句。
+  // 也不能让目标以某字段值的前 24 字起头，否则先被 rewritten 接住，测不到逐句回查。
+  const composed = "在该项目中。设计基于优先顺序与端点预留的多策略并行规划框架，结合按需修复生成互补多臂路径。面向多机械臂共享空间协同操作及机械臂连续重复任务，研究几何路径多样化。";
+
+  const source = ai.findResumeSource(composed, resume);
+  assert.equal(source.relation, "composed");
+  assert.deepEqual(source.keys, ["甲项目-主要工作", "甲项目-内容概述"]);
+
+  assert.equal(ai.findResumeSource(`${composed}并获得国际大奖。`, resume).relation, "none", "夹一句编造的不能算可验证");
+  const cross = "在该项目中。设计基于优先顺序与端点预留的多策略并行规划框架，结合按需修复生成互补多臂路径。面向灵巧手接触崩塌与掉落问题，构建动作后果预测与风险预警闭环。";
+  assert.equal(ai.findResumeSource(cross, resume).relation, "none", "跨经历拼贴不算可验证");
+});
+
+
+test("显式奖项名称优先，资料树占位记录名不能生成获奖事实", () => {
+  const H = require('../ai-helpers.js');
+  const fields = [{group:'获奖经历',key:'获奖 1-获奖名称',value:'示例奖项',recordId:'r',recordName:'获奖 1'},
+    {group:'获奖经历',key:'获奖 1-获奖时间',value:'2024',recordId:'r',recordName:'获奖 1'}];
+  assert.deepEqual(H.expandResumeFields(fields),fields);
+  assert.deepEqual(H.expandResumeFields(fields.slice(1)),fields.slice(1));
+});

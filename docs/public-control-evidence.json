@@ -1,0 +1,98 @@
+{
+  "kind": "apply-fill/public-control-evidence",
+  "version": 1,
+  "collectedOn": "2026-10-02",
+  "method": "Public search, anonymous HTTP GET of recruitment portal entries and publicly loaded JavaScript, published npm source inspection, pinned component browser tests.",
+  "containsCandidateData": false,
+  "privateFormDOMValidated": false,
+  "publicEntrySamples": [
+    {
+      "url": "https://wecruit.hotjob.cn/SU6013d14e5d83dc11e4a8ae4d/pb/index.html",
+      "error": "HTTPError",
+      "scope": "public-portal-entry-only"
+    },
+    {
+      "url": "https://xiaopeng.jobs.feishu.cn/campus/",
+      "error": "HTTPError",
+      "scope": "public-portal-entry-only"
+    },
+    {
+      "url": "https://csc108.zhiye.com/campus/jobs",
+      "status": 200,
+      "publicHtmlBytes": 48900,
+      "scripts": [
+        "//acdn.bstatics.com/ux/beisen-common/ux-outdated-browser/ie-blocker.zhCN-1488188331766.js",
+        "//acdn.bstatics.com/ux/beisen-common/@beisen/analysis-pms/udcpc-79fc557c-2.0.15.min.js",
+        "//acdn.bstatics.com/ux/beisen-common/upaas-static/recruitment-portal/jquery-3.6.0.min.js",
+        "//acdn.bstatics.com/ux/ux-recruitment-portal-2022/release/dist/pc-e2be192404257687c4d1.chunk.min.js"
+      ],
+      "markers": [
+        "beisen",
+        "beisen-common",
+        "italent"
+      ],
+      "scope": "public-portal-entry-only"
+    },
+    {
+      "url": "https://hr-campus.vivo.com/form?fromPage=editMyResume",
+      "status": 200,
+      "publicHtmlBytes": 33950,
+      "scripts": [
+        "//acdn.bstatics.com/ux/beisen-common/ux-outdated-browser/ie-blocker.zhCN-1488188331766.js",
+        "//acdn.bstatics.com/ux/beisen-common/@beisen/analysis-pms/udcpc-3c8f0a15-2.0.13.min.js",
+        "//acdn.bstatics.com/ux/ux-recruitment-portal-2022-form-pc/release/dist/pcform-e1944db80b7bd4c43439.chunk.min.js",
+        "https://cdn.wul.ai/IMLib-3.30.0.min.js"
+      ],
+      "markers": [
+        "beisen",
+        "beisen-common",
+        "italent"
+      ],
+      "scope": "public-portal-entry-only"
+    }
+  ],
+  "publicAssets": [
+    {
+      "source": "https://acdn.bstatics.com/ux/ux-recruitment-portal-2022-form-pc/release/dist/pcform-e1944db80b7bd4c43439.chunk.min.js",
+      "bytes": 65199,
+      "sha256": "58092e4d075f453ab40707c41f21b050f5d9f192d41e95ef0218f19b008edf59",
+      "scope": "public-webpack-entry; dynamic chunk manifest inspected"
+    },
+    {
+      "source": "https://acdn.bstatics.com/ux/ux-recruitment-portal-2022-form-pc/release/dist/beisen-phoenix-part2-502f98f31630e64ee05b.chk.js",
+      "bytes": 968031,
+      "sha256": "601c6d6822be687de67c8dc69ffb4fccec5aca4c78699860175fa46c11304992",
+      "markers": [
+        "phoenix-calendar",
+        "phoenix-calendar-clear-btn",
+        "phoenix-calendar-input-wrap",
+        "phoenix-select__inputWrapper",
+        "phoenix-select__tagItem"
+      ],
+      "scope": "public-published-javascript; DOM contract inspected; not a logged-in form snapshot"
+    },
+    {
+      "source": "https://acdn.bstatics.com/ux/ux-recruitment-portal-2022-form-pc/release/dist/beisen-phoenix-part1-b1e69e1c8b76b958d13b.chk.js",
+      "bytes": 561196,
+      "sha256": "7593e2540a1aedc28da6a02ca96bfda0d37e08f4c95c04e066f1928b49fa5853",
+      "markers": [
+        "form-item__control",
+        "form-item__control_has-error",
+        "form-item__explain"
+      ],
+      "scope": "public-published-javascript; DOM contract inspected; not a logged-in form snapshot"
+    },
+    {
+      "source": "https://acdn.bstatics.com/ux/ux-recruitment-portal-2022-form-pc/release/dist/app-f10b1e3560b453f96ad2.chk.js",
+      "bytes": 503798,
+      "sha256": "ce3d15dc301ebd9316c477a3c0693e86b1a1e506cefbcb662c29b88e2fcde466",
+      "markers": [],
+      "scope": "public-published-javascript; DOM contract inspected; not a logged-in form snapshot"
+    }
+  ],
+  "notes": [
+    "A platform domain or bundle does not prove that all employer customizations use the same controls.",
+    "No original bundle is shipped in the extension. Catalog selectors and controllers are independently implemented.",
+    "HTTPError on a public entry is not evidence of its private form structure."
+  ]
+}

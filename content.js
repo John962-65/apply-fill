@@ -56,7 +56,7 @@
     statusTimer: null,
     lastFocusedField: null,
     chipAction: null,
-    collectTemplateId: null
+    lastCaptureTargets: []
   };
 
   // Read-modify-write must not interleave with the manager page's own per-key diff write,
@@ -70,7 +70,6 @@
     };
   }
 
-  const queueTemplateWrite = makeWriteQueue();
   const queueStructureWrite = makeWriteQueue();
 
   const StorageService = {
@@ -97,35 +96,6 @@
 
     async setActiveTemplate(templateId) {
       await chrome.storage.local.set({ activeTemplateId: templateId });
-    },
-
-    addTemplateFields(templateId, entries) {
-      return queueTemplateWrite(async () => {
-        const api = self.ResumeProProfile;
-        if (!api) {
-          throw new Error("简历字段组件没有加载出来，刷新页面再试。");
-        }
-        const stored = await chrome.storage.local.get(["templates"]);
-        if (!Array.isArray(stored.templates)) {
-          throw new Error("模板数据读不出来，没有改动。");
-        }
-        const template = stored.templates.find((item) => item?.id === templateId);
-        if (!template) {
-          throw new Error("当前模板已经不在列表里，请重新采集一次。");
-        }
-        if (!Array.isArray(template.groups)) {
-          throw new Error("当前模板的分组结构不认识，没有改动。");
-        }
-
-        const before = countTemplateFields(template);
-        const added = api.addFieldsToTemplate(template, entries);
-        if (!added.length) {
-          return { name: String(template.name || ""), before, after: before, added: 0 };
-        }
-
-        await chrome.storage.local.set({ templates: stored.templates });
-        return { name: String(template.name || ""), before, after: before + added.length, added: added.length };
-      });
     },
 
     recordFormStructure(snapshot) {
@@ -233,9 +203,10 @@
           <span>当前模板</span>
           <select class="resume-pro__select" id="resume-pro-template-select"></select>
         </label>
+        <label style="display:block;margin:8px 0"><input type="checkbox" id="resume-pro-browser-input"> 实验：浏览器层点击与输入</label>
         <button class="resume-pro__ai-button" id="resume-pro-ai-fill" type="button">一键 AI 填写</button>
         <button class="resume-pro__manager-button" id="resume-pro-repeat-fill" type="button">AI 辅助新增条目（先预览）</button>
-        <button class="resume-pro__manager-button" id="resume-pro-collect-fill" type="button">把本页已填内容加进模板</button>
+        <button class="resume-pro__manager-button" id="resume-pro-collect-fill" type="button" title="先保存网页原文，再使用已配置的 AI 接口建议分类与经历归属">采集到资料树</button>
         <button class="resume-pro__manager-button" id="resume-pro-cancel-fill" type="button" hidden>取消 AI 等待（保留本地匹配）</button>
         <p id="resume-pro-wait-hint" role="status" hidden></p>
         <div class="resume-pro__status" id="resume-pro-status" aria-live="polite"></div>
@@ -257,18 +228,6 @@
             <button class="resume-pro__manager-button" type="button" id="resume-pro-fill-record-skip">不留档</button>
           </div>
         </div>
-        <div class="resume-pro__collect" id="resume-pro-collect" hidden>
-          <p class="resume-pro__save-note" id="resume-pro-collect-note"></p>
-          <div class="resume-pro__collect-list" id="resume-pro-collect-list"></div>
-          <details class="resume-pro__collect-known" id="resume-pro-collect-known" hidden>
-            <summary id="resume-pro-collect-known-summary">模板里已有的字段（不改动）</summary>
-            <div class="resume-pro__collect-list" id="resume-pro-collect-known-list"></div>
-          </details>
-          <div class="resume-pro__save-actions">
-            <button class="resume-pro__ai-button" type="button" id="resume-pro-collect-apply">加入模板</button>
-            <button class="resume-pro__manager-button" type="button" id="resume-pro-collect-cancel">取消</button>
-          </div>
-        </div>
         <details class="resume-pro__diagnostics" id="resume-pro-diagnostics" hidden>
           <summary>填写诊断（不含简历内容）</summary>
           <textarea id="resume-pro-diagnostics-text" readonly aria-label="填写诊断摘要，可选择复制" rows="14"></textarea>
@@ -280,6 +239,18 @@
         <details class="resume-pro__diagnostics" id="resume-pro-structures" hidden>
           <summary>平台结构快照（只有表单结构，不含填写内容，可复制）</summary>
           <textarea id="resume-pro-structures-text" readonly aria-label="已积累的平台表单结构，可选择复制" rows="14"></textarea>
+        </details>
+        <details class="resume-pro__diagnostics" id="resume-pro-control-capture">
+          <summary>采集控件结构（排查日期、下拉问题）</summary>
+          <p>菜单卡住时，可直接导出当前结构，无需再点网页控件。也可以开始采集后手动展开控件，或让插件自动逐个点开上次没填上的控件。导出文件会移除输入框值，可能保留页面文字；不会自动上传。</p>
+          <button class="resume-pro__manager-button" id="resume-pro-capture-current" type="button">直接导出当前控件结构（无需点击网页）</button>
+          <button class="resume-pro__manager-button" id="resume-pro-capture-start" type="button">开始采集控件结构</button>
+          <button class="resume-pro__manager-button" id="resume-pro-capture-auto" type="button">自动展开控件并导出诊断文件</button>
+          <button class="resume-pro__manager-button" id="resume-pro-capture-now" type="button">补采当前面板</button>
+          <button class="resume-pro__manager-button" id="resume-pro-capture-export" type="button">完成并导出诊断文件</button>
+          <button class="resume-pro__manager-button" id="resume-pro-capture-stop" type="button">停止采集</button>
+          <p id="resume-pro-capture-status" role="status">尚未开始采集。</p>
+          <details><summary>预览采集内容</summary><textarea id="resume-pro-capture-preview" readonly rows="8" aria-label="控件结构采集预览"></textarea></details>
         </details>
         <div class="resume-pro__divider"></div>
         <div class="resume-pro__desktop">
@@ -373,7 +344,6 @@
     });
 
     templateSelect.addEventListener("change", async (event) => {
-      closeCollectCard();
       await StorageService.setActiveTemplate(event.target.value);
       showStatus("模板已切换。", "success");
     });
@@ -381,11 +351,45 @@
     aiFillButton.addEventListener("click", handleAiFillClick);
     sidebar.querySelector("#resume-pro-repeat-fill").addEventListener("click", handleRepeatFillClick);
     sidebar.querySelector("#resume-pro-collect-fill").addEventListener("click", handleCollectFillClick);
-    sidebar.querySelector("#resume-pro-collect-apply").addEventListener("click", applyCollectSelection);
-    sidebar.querySelector("#resume-pro-collect-cancel").addEventListener("click", closeCollectCard);
     openManagerButton?.addEventListener("click", () => openManager());
     sidebar.querySelector("#resume-pro-profile-offer-add")?.addEventListener("click", addUnansweredToProfile);
     sidebar.querySelector("#resume-pro-profile-offer-skip")?.addEventListener("click", closeProfileOffer);
+    const controlCapture=self.ResumeProControlCapture.create({onUpdate:info=>{
+      sidebar.querySelector('#resume-pro-capture-status').textContent=`${info.active?'采集中':'未在采集'} · ${info.count} 次快照。${info.message}`;
+      sidebar.querySelector('#resume-pro-capture-preview').value=controlCapture.preview();
+      sidebar.querySelector('#resume-pro-capture-start').textContent=info.active?'重新选择控件（清空本次采集）':'开始采集控件结构';
+    }});
+    sidebar.querySelector('#resume-pro-capture-start').addEventListener('click',()=>controlCapture.start());
+    sidebar.querySelector('#resume-pro-capture-current').addEventListener('click',()=>{
+      const failed=state.lastCaptureTargets.filter(item=>item.node?.isConnected);
+      const targets=[...failed,...scanCaptureTargets()].filter((item,index,all)=>all.findIndex(other=>other.node===item.node)===index);
+      controlCapture.exportCurrent(targets);
+    });
+    // 自动点击采集：复用同一套快照/脱敏/导出，只是把「用户点」换成「插件点」。
+    // 组件普遍拒绝合成点击，所以勾了真实浏览器输入就走 CDP 通道；没勾就退回合成事件，
+    // 并把用了哪种点击写进导出文件——「合成点击打不开面板」本身就是上游要的诊断信息。
+    const captureAutoclick=self.ResumeProCaptureAutoclick.create({
+      recorder:controlCapture,
+      visible:isVisible,
+      click:async node=>{if(browserInputEnabled()){await browserInput(node);return 'cdp';}clickComboOption(node);return 'synthetic';},
+      escape:node=>browserInputEnabled()?browserEscape(node):null,
+      getTargets:()=>state.lastCaptureTargets.length?state.lastCaptureTargets:scanCaptureTargets(),
+      onStatus:message=>{
+        sidebar.querySelector('#resume-pro-capture-status').textContent=`${controlCapture.active?'采集中':'未在采集'} · ${message}`;
+        sidebar.querySelector('#resume-pro-capture-preview').value=controlCapture.preview();
+      }
+    });
+    sidebar.querySelector('#resume-pro-capture-auto').addEventListener('click',()=>{
+      captureAutoclick.run().then(result=>{
+        if(!result.started&&result.skip==='running')sidebar.querySelector('#resume-pro-capture-status').textContent='正在自动采集，请等这一轮跑完。';
+        if(result.started&&controlCapture.exportFile())sidebar.querySelector('#resume-pro-capture-status').textContent=`未在采集 · 自动采集完成并导出：点击 ${result.clicked} 个，打开面板 ${result.panelsOpened} 个，跳过 ${result.skipped} 个。文件含字段标签和弹层结构。`;
+      }).catch(error=>{
+        sidebar.querySelector('#resume-pro-capture-status').textContent=`自动采集失败：${error?.message||error}`;
+      });
+    });
+    sidebar.querySelector('#resume-pro-capture-now').addEventListener('click',()=>controlCapture.capture());
+    sidebar.querySelector('#resume-pro-capture-export').addEventListener('click',()=>controlCapture.exportFile());
+    sidebar.querySelector('#resume-pro-capture-stop').addEventListener('click',()=>controlCapture.stop());
     bindDesktopEvents(sidebar);
 
     const chipActions = shadowRoot.querySelector("#resume-pro-chip-actions");
@@ -897,6 +901,28 @@
     return clone.textContent || "";
   }
 
+  // Frameworks may replace nodes after a change event. Rebind only a unique structural identity.
+  function refreshFieldEntry(meta, entry) {
+    const anchor = entry?.kind === "radio" ? entry.elements?.[0] : entry?.trigger || entry?.element;
+    if (anchor?.isConnected) return entry;
+    if (!meta) return null;
+    const scan = scanFillableFields();
+    const api = self.ResumeProFormStructure;
+    const candidates = scan.fields.filter(field => api.fieldIdentity(field) === api.fieldIdentity(meta)
+      && (!meta.recordSignature || field.recordSignature === meta.recordSignature)
+      && (!meta.idAttr || field.idAttr === meta.idAttr)
+      && (!meta.name || field.name === meta.name));
+    if(candidates.length!==1)return null;
+    const next=scan.fieldMap.get(candidates[0].fieldId);
+    // A dynamically discovered autocomplete may remove its only list on selection.
+    // Retain that proven driver when the same unique field is rebuilt as a text input.
+    if(entry?.kind==='combobox'&&entry.structuralChoice&&next?.kind==='element'){
+      const root=structuralChoiceRoot(next.element,true);
+      return root?promoteStructuralChoice(next,root):null;
+    }
+    return next;
+  }
+
   function hasExistingValue(entry) {
     if (entry.kind === "radio") return entry.elements.some(el => el.checked);
     const el = entry.kind === "combobox" ? entry.trigger : entry.element;
@@ -913,15 +939,19 @@
       return checked ? getRadioOptionLabel(checked) : "";
     }
 
-    if (entry.kind === "combobox") {
-      const display = entry.root?.querySelector(COMBO_DISPLAY_SELECTOR);
-      const shown = sanitizeLabelText(display ? display.textContent : comboTriggerText(entry.trigger));
-      return isFormatPlaceholder(shown) ? "" : shown;
-    }
+    if (entry.kind === "combobox") return comboAgent.read(entry);
 
     const el = entry.element;
     if (!el?.isConnected) return "";
-    if (el instanceof HTMLSelectElement) return el.options[el.selectedIndex]?.text?.trim() || "";
+    if (udDateAgent.recognizes(entry)) return udDateAgent.read(entry);
+    if (el instanceof HTMLSelectElement) {
+      const option = el.options[el.selectedIndex];
+      return !option || self.ResumeProAIHelpers.isPlaceholderOption({ value: option.value, text: option.text, disabled: option.disabled }) ? "" : option.text.trim();
+    }
+    if (entry.displayDate) {
+      const shown=sanitizeLabelText(el.textContent);
+      return isFormatPlaceholder(shown)?'':shown;
+    }
     if (el.type === "checkbox" || el.type === "radio") return el.checked ? "已勾选" : "";
 
     const typed = String(el.value ?? "").trim();
@@ -939,11 +969,12 @@
   function isFormatPlaceholder(text) {
     const shown = sanitizeLabelText(text);
     return COMBO_PLACEHOLDER.test(shown)
-      || DATE_PLACEHOLDER.test(shown)
       || /^(yyyy|yy|mm|dd|hh|ss|年|月|日|时|分|秒|[-\/:.\s])+$/i.test(shown);
   }
 
   function verifyFilledValue(entry, value, inputType) {
+    const anchor = entry?.kind === 'radio' ? entry.elements?.[0] : entry?.trigger || entry?.element;
+    if (!anchor?.isConnected) return false;
     const expected = String(value ?? "").trim();
 
     if (entry.kind === "radio") {
@@ -951,12 +982,16 @@
       const checkedIndex = entry.elements.findIndex((radio) => radio.checked);
       // 和写入时同一套判定：包裹式 label 会让选项文本带上分组标题（「性别男」），
       // 直接比字符串会把填对的单选误报成没生效。
-      return checkedIndex >= 0 && self.ResumeProAIHelpers.findSelectOptionIndex(options, expected) === checkedIndex;
+      return checkedIndex >= 0 && self.ResumeProAIHelpers.findSelectOptionIndex(options, expected, entry.meta) === checkedIndex;
     }
 
     if (entry.kind === "combobox") {
       const shown = readBackValue(entry);
-      return Boolean(shown) && (shown === expected || shown.includes(expected) || expected.includes(shown));
+      return Boolean(shown) && (self.ResumeProFormStructure.normalizeLabel(shown) === self.ResumeProFormStructure.normalizeLabel(expected) || Boolean(entry.verifiedChoice && shown === entry.verifiedChoice));
+    }
+    if (entry.element?.type === 'checkbox') {
+      const wanted = self.ResumeProAIHelpers.checkboxState(value, entry.meta?.label || getCheckboxLabel(entry.element));
+      return wanted !== null && entry.element.checked === wanted;
     }
 
     const actual = readBackValue(entry);
@@ -965,6 +1000,11 @@
     }
     if (entry.element instanceof HTMLSelectElement && entry.element.value === value) {
       return true;
+    }
+    if (entry.element instanceof HTMLSelectElement) {
+      const options = Array.from(entry.element.options).map(option => ({value:option.value,text:option.text,disabled:option.disabled}));
+      const index = self.ResumeProAIHelpers.findSelectOptionIndex(options, expected, entry.meta);
+      return index >= 0 && entry.element.selectedIndex === index;
     }
     // 日期控件写入前会被归一（「2000年1月1日」→「2000-01-01」），读回要按同一套规则比，
     // 否则填对的也会被报成没生效。
@@ -976,26 +1016,59 @@
   // 「简历写六级、页面只有 CET 6」这类错从根上没了。
   async function prefetchComboOptions(fields, fieldMap) {
     let opened = 0;
+    const report = { optionAttempts: 0, optionObserved: 0, optionFailures: 0, optionErrors: [] };
+    // Clean up owned lists left open by an older fill before probing another field.
+    for(const field of fields){
+      const entry=fieldMap.get(field.fieldId);
+      if(entry?.kind==='combobox'&&(comboAgent.panel(entry)||comboAgent.pending(entry))&&!await closeCombobox(entry)){
+        entry.prefetchError='候选列表未能关闭，已暂停选项预读';
+        report.optionFailures++;report.optionErrors.push('unknown');return report;
+      }
+    }
     for (const field of fields) {
-      if (field.inputType !== "combobox" || (field.options || []).length) {
+      if (field.inputType !== "combobox") {
         continue;
       }
       const entry = fieldMap.get(field.fieldId);
+      // Cached lists and virtualized observations are hints, never the complete vocabulary.
+      field.options = [];
+      field.optionsSource = "unobserved";
+      field.optionsComplete = false;
       if (!entry || entry.kind !== "combobox" || opened >= 25) {
         continue;
       }
+      entry.meta=field;
+      // Existing selections are protected by the fill policy and need no probing.
+      if (hasExistingValue(entry)) continue;
       opened += 1;
-      const options = await openComboboxOptions(entry);
-      // 虚拟滚动的列表只渲染可见那几项，直接把看到的当成全部选项，
-      // 模型就会在「没有可选值」的结论下把字段空着。
-      const texts = (await collectAllComboOptions(entry, options)).slice(0, 60);
-      if (texts.length) {
-        field.options = texts;
-        entry.observedOptions = texts;
+      report.optionAttempts += 1;
+      let closeFailed=false;
+      try {
+        const options = await openComboboxOptions(entry);
+        // A virtualized list may expose only part of the vocabulary.
+        const texts = (await collectAllComboOptions(entry, options)).filter(text=>!isFormatPlaceholder(text)).slice(0, 60);
+        if (texts.length) {
+          field.options = texts;
+          field.optionsSource = "live";
+          entry.observedOptions = texts;
+          report.optionObserved += 1;
+        }
+      } catch (error) {
+        // Reading options is optional. One inaccessible control must not abort
+        // matching for all the other fields, nor imply that its vocabulary is empty.
+        report.optionFailures += 1;
+        const code = safeInputErrorCode(error.code) || 'unknown';
+        report.optionErrors.push(code);
+        entry.prefetchError = error.message || '未能读取当前控件的选项';
+        entry.interactions ??= [];
+        entry.interactions.push({action: '预读跳过', detail: entry.prefetchError});
+      } finally {
+        try { closeFailed=!await closeCombobox(entry); } catch { closeFailed=true; }
       }
-      closeCombobox(entry);
+      if(closeFailed){report.optionFailures++;report.optionErrors.push('unknown');entry.prefetchError='候选列表未能关闭，已暂停选项预读';break;}
       await new Promise((resolve) => setTimeout(resolve, 60));
     }
+    return report;
   }
 
   // 下拉列表里真正会滚的那个容器。组件库把滚动挂在不同层上，
@@ -1086,6 +1159,13 @@
 
   // 全部填完再统一复读一次。成对起止时间这类控件会互相顶值，边填边读看不出来；
   // 读回来的值正好是别的字段该填的，就说明值串到这一行来了。
+  function reviewFieldName(meta = {}) {
+    const name = [meta.labelUnreliable ? '' : meta.label, meta.name].find(value => value && !isFormatPlaceholder(value));
+    const kind = /select|combobox/.test(meta.inputType || '') ? '下拉框' : '字段';
+    const part={year:'年',month:'月',day:'日'}[meta.datePart];
+    return `${meta.group ? `[${meta.group}] ` : ''}${meta.recordIndex ? `第 ${meta.recordIndex} 条 · ` : ''}${name || `未识别名称的${kind}（${meta.fieldId || '位置未知'}）`}${part ? ` · ${part}` : ''}`;
+  }
+
   async function verifyWrittenValues(written, outcomes) {
     if (!written.size) {
       return { drift: 0, swapped: 0, manual: [] };
@@ -1096,26 +1176,42 @@
     let drift = 0;
     let swapped = 0;
     const manual = [];
+    let firstFocus;
 
     written.forEach((record, fieldId) => {
-      if (verifyFilledValue(record.entry, record.value, record.inputType)) {
+      const refreshed = refreshFieldEntry(record.meta, record.entry);
+      record.entry = refreshed ? {...record.entry,...refreshed} : record.entry;
+      const related=record.meta?.rangeId?records.filter(r=>r.meta?.rangeId===record.meta.rangeId):[];
+      const start=related.find(r=>r.meta.rangeRole==='start'),end=related.find(r=>r.meta.rangeRole==='end');
+      const peer=record.entry.rangePeer;
+      const peerStart=record.meta?.rangeRole==='end'?peer:record.entry,peerEnd=record.meta?.rangeRole==='start'?peer:record.entry;
+      const splitMembers=record.entry.rangeMembers;
+      const rangeOk=!record.meta?.rangeId||(splitMembers?.length?validDateOrder(
+        rangeEndpointValue(splitMembers.map(item=>item.meta),'start',meta=>{const item=splitMembers.find(item=>item.meta.fieldId===meta.fieldId);return readBackValue(refreshFieldEntry(meta,item.entry)||item.entry);}),
+        rangeEndpointValue(splitMembers.map(item=>item.meta),'end',meta=>{const item=splitMembers.find(item=>item.meta.fieldId===meta.fieldId);return readBackValue(refreshFieldEntry(meta,item.entry)||item.entry);}))
+        :start&&end?validDateOrder(readBackValue(refreshFieldEntry(start.meta,start.entry)||start.entry),readBackValue(refreshFieldEntry(end.meta,end.entry)||end.entry))
+        : Boolean(peer&&validDateOrder(readBackValue(peerStart),readBackValue(peerEnd))));
+      const scope=record.entry.rangeRoot||record.entry.pickerRoot;
+      const pageError=scope&&Array.from(scope.querySelectorAll('[role="alert"],[class*="error"]')).some(n=>isVisible(n)&&n.textContent.trim());
+      if (rangeOk && !pageError && verifyFilledValue(record.entry, record.value, record.inputType)) {
         outcomes.set(fieldId, { ok: true });
         return;
       }
 
       const actual = readBackValue(record.entry);
       const other = records.find((item) => item !== record && actual && String(item.value).trim() === actual);
-      outcomes.set(fieldId, { ok: false, readBack: actual, swappedWith: other?.label || "" });
+      outcomes.set(fieldId, { ok: false, readBack: actual, swappedWith: other?.label || "", failureReason: !rangeOk ? "日期区间不完整或顺序异常" : pageError ? "页面仍显示校验错误" : !refreshed ? "控件已替换，无法唯一定位" : !actual ? "读回为空或占位文字" : "读回内容与预期不同" });
       highlightFilledField(record.entry, record.value, "drift");
       // 合成事件驱动不了的组件（ant 3.x 的下拉、日历）不再静默失败：
       // 焦点放好、状态条点名，用户几秒就能手填。
-      manual.push(record.label);
-      const focusTarget = record.entry?.kind === "radio" ? record.entry.elements?.[0] : record.entry?.element;
-      focusTarget?.focus?.();
+      manual.push(record.meta ? reviewFieldName(record.meta) : record.label);
+      const focusTarget = record.entry?.kind === "radio" ? record.entry.elements?.[0] : record.entry?.trigger || record.entry?.element;
+      if (!firstFocus && focusTarget?.isConnected) firstFocus = focusTarget;
       drift += 1;
       if (other) swapped += 1;
     });
 
+    firstFocus?.focus?.();
     return { drift, swapped, manual };
   }
 
@@ -1128,6 +1224,86 @@
 
     showStatus("插件刚更新过，这个页面里跑的还是旧脚本。刷新页面就能用。", "error", true);
     return false;
+  }
+
+  function validDateOrder(start,end){
+    const parse=value=>{
+      const m=String(value).match(/^(\d{4})[-/.年](\d{1,2})(?:[-/.月](\d{1,2}))?/);
+      if(!m)return NaN;
+      const year=Number(m[1]),month=Number(m[2]),day=Number(m[3]||1);
+      return month>=1&&month<=12&&day>=1&&day<=new Date(year,month,0).getDate()?year*10000+month*100+day:NaN;
+    };
+    const a=parse(start),b=parse(end);return Number.isFinite(a)&&Number.isFinite(b)&&a<=b;
+  }
+
+  function rangeEndpointValue(fields, role, getValue) {
+    const endpoint=fields.filter(field=>field.rangeRole===role);
+    if(endpoint.length===1&&!endpoint[0].datePart)return getValue(endpoint[0]);
+    const parts={};
+    for(const field of endpoint){
+      if(!field.datePart||Object.hasOwn(parts,field.datePart))return '';
+      parts[field.datePart]=self.ResumeProAIHelpers.normalizeDatePart(getValue(field),field.datePart);
+      if(!parts[field.datePart])return '';
+    }
+    return parts.year&&parts.month?`${parts.year}-${parts.month}${parts.day?'-'+parts.day:''}`:'';
+  }
+
+  function rangeMatchReason(fields, matches) {
+    const proofs=fields.map(field=>matches.find(match=>match.fieldId===field.fieldId));
+    if(proofs.some(proof=>!proof))return '起止时间缺少成对来源';
+    if(proofs.some(proof=>!proof.resumeRecordId)||new Set(proofs.map(proof=>JSON.stringify([
+      proof.resumeGroupId||proof.resumeGroup||'',proof.resumeRecordId]))).size!==1)return '起止时间无法确认来自同一条简历记录';
+    const value=field=>proofs[fields.indexOf(field)].value;
+    return validDateOrder(rangeEndpointValue(fields,'start',value),rangeEndpointValue(fields,'end',value))
+      ?'':'来源日期顺序异常或不明确，未自动交换';
+  }
+
+  function currentRecordStateReason(meta,fields,fieldMap){
+    const key=f=>JSON.stringify([f.group,f.recordIndex,f.recordSignature]);
+    const evidence=fields.filter(f=>key(f)===key(meta)&&f.currentValue);
+    for(const field of evidence){
+      const entry=refreshFieldEntry(field,fieldMap.get(field.fieldId));
+      if(!entry||self.ResumeProFormStructure.normalizeLabel(readBackValue(entry))!==self.ResumeProFormStructure.normalizeLabel(field.currentValue))
+        return '网页已有记录在匹配后变化，已停止本条填写，请重新扫描';
+    }
+    return '';
+  }
+
+  async function decideInteraction(observation,aiConfig,button){
+    const requestId='interaction-'+crypto.randomUUID();
+    const stop=document.createElement('button');stop.type='button';stop.textContent='停止 AI 交互';
+    let stopped=false;
+    stop.onclick=()=>{stopped=true;button.dataset.interactionStopped='true';stop.disabled=true;self.ResumeProAIClient.cancel(requestId).catch(()=>{});};
+    button.insertAdjacentElement('afterend',stop);
+    try{
+      const response=await self.ResumeProAIClient.send({type:'AI_INTERACTION_STEP',requestId,aiConfig,observation});
+      if(stopped)throw new Error('已停止 AI 交互');
+      if(!response?.success)throw new Error(response?.error||'AI 交互未返回有效操作');
+      return response.action;
+    }finally{stop.remove();}
+  }
+
+  async function fillDateWithAgent(entry,value,meta){
+    if (entry.element?.matches?.('[type="checkbox"],[type="radio"]')) {
+      entry.fillNote='勾选控件不能按日期填写';return false;
+    }
+    entry.interactions=[];let attempted=false,result=false;
+    const observe=()=>{
+      const fresh=refreshFieldEntry(meta,entry);
+      if(!fresh)return {blocked:'日期控件无法唯一定位'};
+      entry.element=fresh.element;
+      const current=readBackValue(entry);
+      const candidates=[{id:'stop',kind:'stop',label:'停止并交给用户'}];
+      if(!attempted&&!current)candidates.push({id:'write',kind:'write',label:'通过日期适配器填写有来源的目标日期'});
+      return {field:meta,record:entry.recordContext,target:value,current,lastAction:attempted?'日期操作未通过核对':'未操作',candidates,fingerprint:JSON.stringify([current,candidates])};
+    };
+    try{
+      const ok=await self.ResumeProInteractionAgent.run({observe,decide:entry.decide,maxSteps:3,trace:(action,detail)=>entry.interactions.push({action,detail}),execute:async()=>{attempted=true;result=await setElementValue(entry,value);},verify:async()=>{
+        await new Promise(r=>setTimeout(r,180));
+        return Boolean(result&& (typeof result!=='object'||result.ok))&&verifyFilledValue(entry,result?.value||value,meta.inputType);
+      }});
+      if(!ok)entry.fillNote=result?.reason||entry.fillNote||'日期交互未通过核对，未重复覆盖';return ok?result:false;
+    }catch(error){entry.fillNote=error.message;return false;}
   }
 
   async function handleAiFillClick(event, assisted = null) {
@@ -1159,15 +1335,17 @@
     if (collectButton) collectButton.disabled = true;
     button.textContent = "正在扫描网页...";
     const totalStart = performance.now();
-    const timing = { scanMs: null, roundTripMs: null, fillMs: null };
+    const timing = { scanMs: null, optionsMs: null, roundTripMs: null, fillMs: null };
     let phaseStart = totalStart;
     let phase = "scanMs";
+    let stage = "scan";
     let timer = null;
     let diagnostics = {};
     let fieldCount = 0;
     let filledCount = 0;
     let unconfirmedCount = 0;
     const unfilledLabels = [];
+    const notAttemptedLabels = [];
     const traceOutcomes = new Map();
     const writtenEntries = new Map();
     let traceText = "";
@@ -1204,33 +1382,47 @@
       if (!assisted) closeProfileOffer();
       // 模板字段在前并且优先；「我的信息」只补模板里没有的字段名。
       const templateFields = activeTemplate ? flattenTemplateFields(activeTemplate) : [];
-      const resumeFields = self.ResumeProProfile
-        ? self.ResumeProProfile.mergeResumeFields(templateFields, profileFields)
-        : templateFields;
+      // 区间时间拆开始/结束、奖项名补成字段：资料树里这些事实的存放形状按值回查认不出来，
+      // 不补的话真实出处会被判成「编造」再被来源校验拦掉。只作用于本次发送，不改存储。
+      const resumeFields = self.ResumeProAIHelpers.expandResumeFields(
+        self.ResumeProProfile
+          ? self.ResumeProProfile.mergeResumeFields(templateFields, profileFields)
+          : templateFields
+      );
       // 平台映射：上次在这套表单上确认过的对应关系，直接按简历字段填，不再问模型。
       const platformSnapshot = assisted ? null : await loadPlatformSnapshot();
-      // 自定义下拉扫描时拿不到选项（要点开才有），但上次填写已经把选项存进快照了。
-      // 补回去模型才看得见真实词表 —— 否则它会答「六级」而页面要「CET 6」。
-      if (platformSnapshot) {
-        const structureApi = self.ResumeProFormStructure;
-        fields.forEach((field) => {
-          if (field.inputType !== "combobox" || (field.options || []).length) {
-            return;
-          }
-          const stored = (platformSnapshot.fields || []).find((item) =>
-            structureApi.normalizeLabel(item.label) === structureApi.normalizeLabel(field.label)
-              && (item.recordIndex || 0) === (field.recordIndex || 0));
-          if (stored?.options?.length) {
-            field.options = stored.options.slice(0, 60);
-          }
-        });
+      // Read this page's options. Historical/seed lists may be partial or belong to a different employer.
+      stage = 'options';
+      phase = 'optionsMs';
+      phaseStart = performance.now();
+      button.textContent = '正在读取网页选项...';
+      diagnostics = await prefetchComboOptions(fields, fieldMap);
+      timing.optionsMs = performance.now() - phaseStart;
+      phase = null;
+      // Record identity comes from the live page, not only the model's proposed
+      // name. Existing names must constrain dates even when rows change order.
+      const recordEvidence=/^(学校名称|学校|院校名称|专业|专业名称|所学专业|项目名称|课题名称|获奖名称|获奖项|奖项名称|奖励名称|公司名称|单位名称|组织名称|活动名称|语言类型|语言|语种|(?:(?:项目|职务|工作|实习|经历)?(?:描述|内容))|项目中职责|职责|概述|内容概述|主要工作|职责描述)$/;
+      for(const field of fields){
+        if(!recordEvidence.test(field.label||'')&&!field.datePart&&!/^(开始时间|结束时间|获奖时间|获奖日期)$/.test(field.label||''))continue;
+        const entry=refreshFieldEntry(field,fieldMap.get(field.fieldId));
+        if(entry){fieldMap.set(field.fieldId,entry);const current=readBackValue(entry);if(current)field.currentValue=current;}
       }
-      // 快照里没有的选项，现场点开读真实选项，再送 AI。
-      await prefetchComboOptions(fields, fieldMap);
       const mapped = platformSnapshot
         ? mappingMatches({ fields, snapshot: platformSnapshot, resumeFields })
         : { matches: [], answered: new Set() };
+      // Keep the full row available when a missing field needs record evidence.
+      // Cached names alone must not hide the education/language/award identity
+      // from a newly derived or combined field.
+      const recordKey=f=>JSON.stringify([f.group,f.recordIndex,f.recordSignature]);
+      const needsProof=f=>f.datePart || f.rangeId || (f.recordIndex&&/时间|日期/.test(f.label)) || (!mapped.answered.has(f.fieldId)
+        && (self.ResumeProAIHelpers.educationFieldTopic(f) || self.ResumeProAIHelpers.selectEnumTopic(f)
+          || /^(职务名称|职位名称|担任职务|职务|项目角色)$/.test(f.label || '')));
+      const contextRecords=new Set(fields.filter(needsProof).map(recordKey));
+      const rematchIds=new Set(fields.filter(f=>contextRecords.has(recordKey(f))).map(f=>f.fieldId));
+      mapped.matches=mapped.matches.filter(m=>!rematchIds.has(m.fieldId));
+      for(const id of rematchIds)mapped.answered.delete(id);
       const aiFields = fields.filter((field) => !mapped.answered.has(field.fieldId));
+      stage = 'match';
       phase = "roundTripMs";
       phaseStart = performance.now();
       if (cancelButton) {
@@ -1284,13 +1476,15 @@
       timer = null;
       if (cancelButton) cancelButton.hidden = true;
       if (waitHint) waitHint.hidden = true;
-      diagnostics = response?.diagnostics || {};
+      diagnostics = { ...diagnostics, ...(response?.diagnostics || {}) };
+      for(const rejection of diagnostics.sourceRejections||[]){const field=fields.find(f=>f.fieldId===rejection.fieldId);if(field){field.sourceRejection=rejection.reason;field.sourceRejectionValue=rejection.value;}}
 
       if (!response?.success) {
         throw new Error(response?.error || "AI 填写失败。");
       }
 
       button.textContent = "正在填写网页...";
+      stage = 'fill';
       phase = "fillMs";
       phaseStart = performance.now();
 
@@ -1307,11 +1501,24 @@
         return (domOrderMap.get(a.fieldId) ?? 0) - (domOrderMap.get(b.fieldId) ?? 0);
       });
 
+      delete button.dataset.interactionStopped;
       for (const match of sortedMatches) {
+        if(button.dataset.interactionStopped==='true')break;
         if (assisted && getActiveTemplate(state.currentStore) !== activeTemplate) throw new Error("模板已变化，已停止辅助填写，请核对网页。");
-        const element = fieldMap.get(match.fieldId);
+        let element = refreshFieldEntry(fieldMetaMap.get(match.fieldId), fieldMap.get(match.fieldId));
 
         if (!element) continue;
+        fieldMap.set(match.fieldId, element);
+        if(!await comboAgent.ready(element)){
+          const blocker=comboAgent.blocking();
+          const blockerName=blocker?.meta?reviewFieldName(blocker.meta):'前一控件';
+          for(const pending of sortedMatches.slice(sortedMatches.indexOf(match))){
+            const pendingEntry=fieldMap.get(pending.fieldId),pendingMeta=fieldMetaMap.get(pending.fieldId);
+            if(pendingEntry)pendingEntry.fillNote=`${blockerName}的候选列表仍未关闭，本字段尚未尝试`;
+            traceOutcomes.set(pending.fieldId,{ok:false,notAttempted:true,blockedBy:blockerName});notAttemptedLabels.push(reviewFieldName(pendingMeta));
+          }
+          break;
+        }
         if (assisted && (!isAssistedTextField(element) || hasExistingValue(element) || !assisted.scopes.some(scope => scope.isConnected && scope.contains(element.element)))) continue;
 
         // 用户定的规则：网页上已经有内容的字段，插件一律不动 —— 哪怕 AI 认为该改。
@@ -1322,12 +1529,27 @@
           continue;
         }
 
-        let filled = setElementValue(element, match.value);
+        const meta=fieldMetaMap.get(match.fieldId);
+        const recordChanged=currentRecordStateReason(meta,fields,fieldMap);
+        if(recordChanged){element.fillNote=recordChanged;traceOutcomes.set(match.fieldId,{ok:false});unfilledLabels.push(reviewFieldName(meta));continue;}
+        if(/勾选|同意|承诺书|用户协议|隐私声明/.test(meta.label||'')){element.fillNote='协议和承诺请本人确认';traceOutcomes.set(match.fieldId,{ok:false});continue;}
+        element.meta=meta;
+        element.recordContext=fields.filter(f=>f.group===meta.group&&f.recordIndex===meta.recordIndex).map(f=>({label:f.label,current:readBackValue(fieldMap.get(f.fieldId))})).slice(0,20);
+        element.decide=observation=>decideInteraction(observation,aiConfig,button);
+        if(meta.rangeId){
+          const pair=fields.filter(f=>f.rangeId===meta.rangeId);
+          const reason=rangeMatchReason(pair,allMatches);
+          if(reason){element.fillNote=reason;traceOutcomes.set(match.fieldId,{ok:false});unfilledLabels.push(reviewFieldName(meta));continue;}
+        }else if(/起止|起讫/.test(meta.label)){
+          element.fillNote='未能明确日期区间的开始和结束，已停止';traceOutcomes.set(match.fieldId,{ok:false});unfilledLabels.push(reviewFieldName(meta));continue;
+        }
+        let filled = element.kind==='combobox'?setElementValue(element,match.value)
+          : (element.dateLike||element.pickerType)?fillDateWithAgent(element,match.value,meta):setElementValue(element, match.value);
         if (filled instanceof Promise) {
           filled = await filled;
         }
         // 日期写入会带出「简历只到月、按 1 号补的」这类说明，这里拆开。
-        const writeResult = filled && typeof filled === "object" ? filled : { ok: Boolean(filled), padded: false };
+        const writeResult = filled && typeof filled === "object" ? filled : { ok: Boolean(filled), padded: Boolean(element.datePadded) };
         filled = writeResult.ok;
         if (assisted && filled) {
           await new Promise(resolve => window.setTimeout(resolve, 50));
@@ -1340,8 +1562,10 @@
         // 也按同样的方式等一等（和 worker 放行它用的是同一个判断）；选项出来了却对不上，不再白等。
         if (!filled && element.kind === "element" && element.element instanceof HTMLSelectElement
           && (fieldMeta?.cascadeGroup !== undefined || !hasRealSelectOptions(element.element))) {
-          for (let retry = 0; retry < 3; retry++) {
+          for (let retry = 0; retry < 12; retry++) {
             await new Promise((resolve) => setTimeout(resolve, 150));
+            element = refreshFieldEntry(fieldMeta, element);
+            if (!element || hasExistingValue(element)) break;
             filled = setElementValue(element, match.value);
             if (filled || (fieldMeta?.cascadeGroup === undefined && hasRealSelectOptions(element.element))) break;
           }
@@ -1353,6 +1577,7 @@
           }
           writtenEntries.set(match.fieldId, {
             entry: element,
+            meta: fieldMeta,
             value: writeResult.value || match.value,
             inputType: fieldMeta?.inputType,
             mappingKey: match.mappingKey || "",
@@ -1379,16 +1604,20 @@
       }
 
       const verified = await verifyWrittenValues(writtenEntries, traceOutcomes);
+      writtenEntries.forEach((record, id) => fieldMap.set(id, record.entry));
       driftCount = verified.drift;
+      filledCount = Math.max(0, filledCount - driftCount);
       swappedCount = verified.swapped;
       const manualNote = verified.manual.length
-        ? `${verified.manual.length} 项控件不认合成事件，需手动（焦点已放好）：${summarizeLabels(verified.manual, 6)}。`
+        ? `需核对：${summarizeLabels(verified.manual, 6)}。可展开“字段对照表”查看预期值与读回结果。`
         : "";
       const mappingOutcome = await applyMappingOutcomes(writtenEntries, traceOutcomes, platformSnapshot);
       mappingFilledCount = mappingOutcome.filled;
       // 写不进去的控件也要把类名线索带出来：用户不会去 F12 里抓 DOM，
       // 这些线索是下次能补上驱动的唯一依据。
       const controlHints = collectControlHints({ fields, fieldMap, outcomes: traceOutcomes, dropped: droppedControls });
+      // 这一轮没填上的控件，活引用只在本轮有效：自动点击采集要用，所以每次填写整体替换。
+      state.lastCaptureTargets = buildCaptureTargets({ fields, fieldMap, outcomes: traceOutcomes });
       traceText = formatFieldTrace({ fields, fieldMap, matches: allMatches, outcomes: traceOutcomes, unlabeledCombos, notices: dateNotices, dropped: controlHints.list, droppedTotal: controlHints.total });
       // 快照要带上每个字段实际的写入结果，所以放在复读校验之后。
       structureText = await recordStructureSnapshot({ fields, fieldMap, outcomes: traceOutcomes, unlabeledCombos, dropped: controlHints.list, droppedTotal: controlHints.total });
@@ -1397,13 +1626,18 @@
       learnedNote = learnedMappings
         ? `记下 ${learnedMappings} 条平台映射，下次这套表单直接照映射填。`
         : "";
-      outcome = response.warning || unconfirmedCount || unfilledLabels.length || driftCount ? "partial" : "success";
+      const answered = new Set(allMatches.map(match => match.fieldId));
+      const blockedFields = fields.filter(field => field.sourceRejection && !answered.has(field.fieldId));
+      const sourceNote = blockedFields.length
+        ? `${blockedFields.length} 项被来源校验拦截，未写入；请查看字段对照表中的原因。`
+        : "";
+      outcome = response.warning || unconfirmedCount || unfilledLabels.length || notAttemptedLabels.length || driftCount || blockedFields.length ? "partial" : "success";
       const driftNote = driftCount
-        ? `${driftCount} 项写进去被页面顶掉了值${swappedCount ? `（其中 ${swappedCount} 项是和别的行串了值）` : ""}，已在页面上标红，提交前必须逐个核对。`
+        ? `${driftCount} 项未通过页面读回校验${swappedCount ? `（其中 ${swappedCount} 项可能与其他字段串值）` : ""}，已标红可定位的控件，请核对后再提交。`
         : "";
-      const unfilledNote = unfilledLabels.length
+      const unfilledNote = (unfilledLabels.length
         ? `${unfilledLabels.length} 项没填上：${summarizeLabels(unfilledLabels)}，请手动补上。`
-        : "";
+        : "")+(notAttemptedLabels.length?`${notAttemptedLabels.length} 项尚未尝试：前一控件弹层未关闭，请关闭弹层后重新填写。`:"");
       const mappingNote = mappingFilledCount
         ? `其中 ${mappingFilledCount} 项按这套平台的快照映射直接填，未请求 AI${aiFields.length ? `（只把剩下 ${aiFields.length} 个字段送去匹配）` : "（本次没有字段发出去）"}。`
         : "";
@@ -1414,12 +1648,12 @@
         ? `${keptCount} 项页面上已经有内容，按你的设置未改动。`
         : "";
       if (assisted) {
-        showStatus(`辅助填写：已验证 ${filledCount} 项。${unconfirmedCount ? `${unconfirmedCount} 项未确认，请核对网页。` : ""}${response.warning || ""}`, outcome === "partial" ? "error" : "success");
+        showStatus(`辅助填写：已验证 ${filledCount} 项。${unconfirmedCount ? `${unconfirmedCount} 项未确认，请核对网页。` : ""}${sourceNote}${response.warning || ""}`, outcome === "partial" ? "error" : "success");
       } else if (response.warning) {
-        showStatus(`本地已填写 ${filledCount} 项；${unfilledNote}${driftNote}${response.warning}`, "error", Boolean(unfilledNote || driftNote));
-      } else if (unfilledNote || driftNote || manualNote) {
+        showStatus(`本地已填写 ${filledCount} 项；${unfilledNote}${driftNote}${sourceNote}${response.warning}`, "error", Boolean(unfilledNote || driftNote || sourceNote));
+      } else if (unfilledNote || driftNote || manualNote || sourceNote) {
         // 没填上的字段要用户自己去补，提示不自动消失。
-        showStatus(`已填写 ${filledCount} 个字段。${unfilledNote}${driftNote}${manualNote}${learnedNote}`, "error", true);
+        showStatus(`已填写 ${filledCount} 个字段。${unfilledNote}${driftNote}${manualNote}${sourceNote}${learnedNote}`, "error", true);
       } else if (mappingNote || droppedNote || keptNote || learnedNote) {
         showStatus(`已填写 ${filledCount} 个字段。${mappingNote}${keptNote}${learnedNote}${droppedNote}`, "success", true);
       } else {
@@ -1437,6 +1671,7 @@
         })), resumeFields);
       }
     } catch (error) {
+      if (!diagnostics.errorCode || diagnostics.errorCode === 'none') diagnostics.errorCode = safeInputErrorCode(error.code) || 'unknown';
       showStatus(error.message || "AI 填写失败。", "error");
     } finally {
       if (cancelButton) {
@@ -1448,7 +1683,7 @@
       if (phase) timing[phase] = performance.now() - phaseStart;
       const totalMs = performance.now() - totalStart;
       const summary = formatFillDiagnostics({ ...timing, totalMs,
-        fieldCount, filledCount, unfilledCount: unfilledLabels.length, outcome, diagnostics });
+        fieldCount, filledCount, unfilledCount: unfilledLabels.length, notAttemptedCount:notAttemptedLabels.length, outcome, stage, diagnostics });
       const panel = shadowRoot?.querySelector("#resume-pro-diagnostics");
       const text = shadowRoot?.querySelector("#resume-pro-diagnostics-text");
       if (panel && text) {
@@ -1506,15 +1741,20 @@
     const groupOf = (field) => {
       const entry = fieldMap?.get(field.fieldId);
       const anchor = entry?.kind === "radio" ? entry.elements?.[0] : entry?.kind === "combobox" ? entry.root : entry?.element;
-      return findSectionHeading(anchor);
+      return field.group || findSectionHeading(anchor);
     };
     const sourceOf = (match) => {
       const key = oneLine(match.resumeKey) || "未知";
-      if (match.source === "local") return `简历字段「${key}」`;
+      if (match.source === "local" && !match.relation) return `简历字段「${key}」`;
       if (match.invented) return "简历里找不到出处";
+      if (match.relation === 'date-part') return `按${{year:'年',month:'月',day:'日'}[fields.find(field=>field.fieldId===match.fieldId)?.datePart]||'日期部分'}取自简历字段「${key}」`;
       if (match.relation === "date") return `简历字段「${key}」的另一种写法`;
+      if (match.relation === "formatted") return `格式化自简历字段「${key}」`;
+      if (match.relation === "equivalent") return `简历字段「${key}」的同义写法`;
+      if (match.relation === "inferred") return `依据简历字段「${key}」推导（${oneLine(match.inference?.inputLabel)}：${oneLine(match.inference?.inputValue)} → ${oneLine(match.inference?.targetValue)}）`;
       if (match.relation === "partial") return `截自简历字段「${key}」`;
       if (match.relation === "rewritten") return `按简历字段「${key}」改写`;
+      if (match.relation === "composed") return `组合自简历字段「${key}」`;
       return `简历字段「${key}」${match.ambiguousSource ? " 等多条同值" : ""}`;
     };
     const rows = [];
@@ -1522,18 +1762,26 @@
     const kept = [];
     const silent = [];
     const invented = [];
+    const blocked = [];
+    const missing = [];
+    const failed = [];
+    const notAttempted = [];
     let localCount = 0;
     let mappingCount = 0;
     let aiCount = 0;
 
     fields.forEach((field) => {
       const group = groupOf(field);
-      const named = oneLine(field.label);
-      const title = `${group ? `[${oneLine(group)}] ` : ""}${named || (field.labelUnreliable ? "（标签取不到：位置上的文本是你的值）" : field.fieldId)}`;
+      const title = reviewFieldName({...field, group:group || field.group});
       const match = byId.get(field.fieldId);
+      const prefetchError = fieldMap?.get(field.fieldId)?.prefetchError;
+      if (prefetchError) rows.push(`${title} · 选项预读未完成（${oneLine(prefetchError)}）`);
 
       if (!match) {
-        rows.push(`${title} → 没给出值`);
+        (field.sourceRejection ? blocked : missing).push(title);
+        const rejected = field.sourceRejection ? `来源校验拦截（${field.sourceRejection}）` : "没给出值";
+        const proposed = field.sourceRejectionValue ? ` · 预期值：${oneLine(field.sourceRejectionValue)}` : "";
+        rows.push(`${title} → ${rejected}${proposed}`);
         return;
       }
 
@@ -1543,7 +1791,8 @@
       const outcome = outcomes.get(field.fieldId);
       let result;
 
-      if (!outcome) result = "跳过（没执行到写入）";
+      if (!outcome) { result = "尚未尝试"; notAttempted.push(title); }
+      else if (outcome.notAttempted) {result=`尚未尝试（${oneLine(outcome.blockedBy)||'前一控件'}的弹层未关闭）`;notAttempted.push(title);}
       else if (outcome.kept) {
         result = "页面上已有内容，按规则未改动";
         kept.push(title);
@@ -1553,17 +1802,21 @@
         result = `值是别的行串过来的（当前显示：${oneLine(outcome.readBack) || "空"}，本该填「${outcome.swappedWith}」）`;
         swapped.push(title);
       } else if (typeof outcome.readBack === "string") {
-        result = `写了但页面没认（当前显示：${oneLine(outcome.readBack) || "空"}）`;
+        result = `${outcome.failureReason || "未通过读回校验"}（当前显示：${oneLine(outcome.readBack) || "空"}）`;
         silent.push(title);
       } else {
-        const note = fieldMap?.get(field.fieldId)?.fillNote;
-        result = note ? `没写进去（${oneLine(note)}）` : "没写进去（控件不收）";
+        const entry = fieldMap?.get(field.fieldId), note = entry?.fillNote;
+        result = entry?.fillIssue === 'choice-mismatch' ? `需要人工选择（${String(note || '').slice(0,240)}）`
+          : note ? `没写进去（${oneLine(note)}）` : "没写进去（控件不收）";
+        failed.push(title);
       }
 
       if (match.invented) {
         invented.push(title);
       }
 
+      const actions = fieldMap?.get(field.fieldId)?.interactions;
+      if (actions?.length) rows.push(`${title} · 操作：${actions.map(item => item.action + (item.detail ? `（${item.detail}）` : "")).join(" → ")}`);
       const notice = notices?.get(field.fieldId);
       rows.push(`${title} → ${result} · ${match.source === "local" ? "规则补空" : (match.source === "mapping" ? "快照映射" : "AI")} · ${sourceOf(match)} = ${oneLine(match.value) || "空"}${notice ? `（${notice}）` : ""}`);
     });
@@ -1571,8 +1824,14 @@
     const notes = [];
     if (kept.length) notes.push(`${kept.length} 个字段页面上已经有内容，按你的设置未改动（${kept.slice(0, 6).join("、")}）`);
     if (swapped.length) notes.push(`${swapped.length} 个字段的值是别的行串过来的（${swapped.slice(0, 6).join("、")}）—— 提交前必须逐个核对`);
-    if (silent.length) notes.push(`${silent.length} 个字段写进去了但页面没认（${silent.slice(0, 6).join("、")}）`);
+    if (silent.length) notes.push(`${silent.length} 个字段未通过读回校验（${silent.slice(0, 6).join("、")}）`);
     if (invented.length) notes.push(`${invented.length} 个字段的值在简历里找不到出处（${invented.slice(0, 6).join("、")}）`);
+    if (blocked.length) notes.push(`${blocked.length} 个字段被来源校验拦截，未写入（${blocked.slice(0, 6).join("、")}），原因见明细`);
+    if (failed.length) notes.push(`${failed.length} 个字段未完成填写（${failed.slice(0, 6).join("、")}）`);
+    if (notAttempted.length) {
+      const blockers=[...new Set(fields.map(f=>outcomes.get(f.fieldId)?.blockedBy).filter(Boolean))];
+      notes.push(`${notAttempted.length} 个字段尚未尝试${blockers.length?`（${blockers.slice(0,2).join('、')}的弹层未关闭，收起后重试）`:'，本轮未执行到写入'}`);
+    }
     if (unlabeledCombos && !droppedTotal) notes.push(`另有 ${unlabeledCombos} 个自定义下拉取不到标签，没送去匹配，需要手动填`);
     if (droppedTotal) {
       const hints = (dropped || []).slice(0, 6).map((item) => {
@@ -1584,10 +1843,15 @@
       notes.push(`${droppedTotal} 个控件要补驱动或补标签，类名线索：${hints.join("；")}`);
     }
 
+    const families = new Map();
+    fields.forEach(field => {if(field.controlFamily)families.set(field.controlFamily,(families.get(field.controlFamily)||0)+1);});
+    const familyNames = Array.from(families,([id,count]) => `${self.ResumeProControlCatalog.contracts.find(c=>c.id===id)?.name || id} ×${count}`);
     return [
       `ApplyFill v${pluginVersion()} · 字段对照表`,
       `扫描 ${fields.length} 个字段，给出值 ${byId.size} 个（AI ${aiCount}、规则补空 ${localCount}、快照映射 ${mappingCount}）。`,
-      notes.length ? `需要注意：${notes.join("；")}。` : "没有发现「值串位」「写了没生效」或「值无出处」的字段。",
+      ...(missing.length ? [`另有 ${missing.length} 个字段未给出值，需核对资料是否齐全。`] : []),
+      ...(familyNames.length ? [`识别控件：${familyNames.join("、")}。`] : []),
+      notes.length ? `需要注意：${notes.join("；")}。` : "已写入的字段未发现串位或读回失败。",
       "",
       ...rows
     ].join("\n");
@@ -1629,7 +1893,9 @@
   // 驱动方式才是这次真正攒下来的东西：同一个「学历」下拉，A 公司能直接赋值、
   // B 公司必须点开再选；记下来下次就不用再试错。
   function formDriveOf(entry, field) {
+    if (entry?.atsxPeriod || entry?.interactions?.some(item => /识别.*日历/.test(item.action))) return "open-calendar-pick";
     if (entry?.kind === "combobox") return entry.remoteOptions ? "open-search-pick" : "open-pick";
+    if (field.inputType === "date-picker" && self.ResumeProControlCatalog.contracts.some(c=>c.id===field.controlFamily && c.driver==='calendar-panel')) return "open-calendar-pick";
     if (field.inputType === "date-picker") return "click-focus-type-enter";
     if (entry?.dateLike) return "focus-type-enter";
     if (field.cascadeGroup !== undefined) return "cascade-select";
@@ -1674,6 +1940,7 @@
           .filter((option) => !filled.has(String(option).trim()));
 
         return {
+          group: field.group || "",
           label: field.label || "",
           // __radio__N 是扫描时给没有 name 的单选临时编的占位，跟页面位置绑定、跨公司无意义，
           // 当成结构标识会把映射带偏。
@@ -1681,10 +1948,14 @@
           id: api.maskIdentifier(field.idAttr),
           placeholder: field.label ? "" : sanitizeLabelText(field.placeholder || "").slice(0, 24),
           control: formControlOf(entry, field),
+          controlFamily: field.controlFamily || "",
+          controlEvidence: field.controlEvidence || "",
           drive: formDriveOf(entry, field),
           options: options.slice(0, 60).map((option) => String(option).slice(0, 40)),
           recordIndex: field.recordIndex,
           recordTotal: field.recordTotal,
+          datePart: field.datePart,
+          rangeRole: field.rangeRole,
           result: outcome?.ok ? "ok" : outcome ? "failed" : "untested"
         };
       }).filter((field) => field.label || field.name || field.id || field.placeholder)
@@ -1726,12 +1997,7 @@
       if (list[0]) {
         return api.upgradeMappings ? api.upgradeMappings(list[0]) : list[0];
       }
-      // 第一次跑某平台：用内置种子库给 AI 真实选项。种子只含标签和选项原文，
-      // 不含简历值；也不带映射（映射必须来自用户自己的确认）。
-      const seeds = self.ResumeProPlatformSeeds?.[platform];
-      if (seeds?.length) {
-        return { platform, fields: seeds, seeded: true };
-      }
+      // Offline option seeds are not evidence of this employer's current vocabulary.
       return null;
     } catch (_) {
       return null;
@@ -1749,19 +2015,30 @@
     }
 
     fields.forEach((field) => {
+      if (fields.filter(candidate => api.fieldIdentity(candidate) === api.fieldIdentity(field)).length !== 1) return;
       const hit = api.lookupMapping(snapshot, {
         label: field.label,
+        group: field.group || "",
         recordIndex: field.recordIndex,
-        groupSignature: field.recordSignature
+        groupSignature: field.recordSignature,
+        datePart: field.datePart
       });
       if (!hit) {
         return;
       }
 
-      const source = resumeFields.find((item) => api.normalizeLabel(item.key) === api.normalizeLabel(hit.resumeKey));
+      const source = api.resolveMappingSource(hit, resumeFields);
       if (!source || !String(source.value ?? "").trim()) {
         // 模板里把这条删了，或者那条还没填内容 —— 回落 AI，别拿空值去写。
         return;
+      }
+      if (helpers?.educationFieldTopic(field)) {
+        const proof=helpers.findResumeSource(source.value, [source], field);
+        // Old mappings store a source field, not the proof binding this education
+        // row. A degree conversion goes through the fresh record-aware pipeline.
+        if (proof.relation === 'none' || proof.relation === 'inferred') return;
+        // A global highest level needs fresh evidence about this row, which a cached mapping lacks.
+        if (/教育/.test(field.group || '') && !/教育/.test(source.group || '')) return;
       }
       if (helpers?.isValueValidForField && !helpers.isValueValidForField(field, source.value)) {
         return;
@@ -1772,7 +2049,7 @@
         value: source.value,
         source: "mapping",
         resumeKey: hit.resumeKey,
-        mappingKey: api.fieldIdentity({ label: field.label, recordIndex: field.recordIndex })
+        mappingKey: api.fieldIdentity(field)
       });
       answered.add(field.fieldId);
     });
@@ -1837,6 +2114,7 @@
         return;
       }
 
+      if (fields.filter(candidate => api.fieldIdentity(candidate) === api.fieldIdentity(field)).length !== 1) return;
       const match = byId.get(field.fieldId);
       if (!match?.resumeKey || match.source === "mapping" || match.invented || match.ambiguousSource) {
         return;
@@ -1844,6 +2122,8 @@
       if (String(match.resumeKey).includes("、")) {
         return;
       }
+      if (self.ResumeProAIHelpers?.educationFieldTopic(field) && /教育/.test(field.group || '')
+        && !/教育/.test(match.resumeGroup || '')) return;
       // 只学「原样相等」和「日期的另一种写法」两档。映射只存字段名，复现不了模型
       // 当时做的加工：截取（英语水平 → 英语）学下来，下次就会把整段原文写进那一格；
       // 本地规则的宽松匹配（id 里带 name 就当成人名）学下来，会把姓名写进项目名称。
@@ -1853,11 +2133,15 @@
 
       entries.push({
         label: field.label,
+        group: field.group || "",
         recordIndex: Number.isInteger(field.recordIndex) ? field.recordIndex : 0,
         recordTotal: field.recordTotal || 0,
         groupSignature: field.recordSignature || "",
         resumeKey: match.resumeKey,
-        resumeGroup: match.resumeGroup || ""
+        resumeGroup: match.resumeGroup || "",
+        resumeGroupId: match.resumeGroupId || "",
+        resumeRecordId: match.resumeRecordId || "",
+        resumeFieldId: match.resumeFieldId || ""
       });
     });
 
@@ -1880,21 +2164,30 @@
     return entries.length;
   }
 
+  function safeInputErrorCode(code) {
+    return /^input_(?:invalid|too_long|target_(?:missing|ambiguous|disabled|moving|hidden|covered)|observation|focus|context|busy|foreground|page_changed|attach|transport)$/.test(code || '') ? code : '';
+  }
+
   function formatFillDiagnostics(result) {
     const seconds = (value) => typeof value === "number" && Number.isFinite(value) ? `${(value / 1000).toFixed(2)} s` : "未执行 / 未取得";
     const count = (value) => Number.isInteger(value) && value >= 0 ? value : "未取得";
     const d = result.diagnostics;
     // Explicit allowlist: never copy provider messages, URL, keys or field values.
-    const code = /^(none|cancelled|network|format|http_\d{3})$/.test(d.errorCode) ? d.errorCode : "unknown";
+    const code = /^(none|cancelled|network|format|http_\d{3})$/.test(d.errorCode) ? d.errorCode : safeInputErrorCode(d.errorCode) || "unknown";
+    const stage = ({scan:'扫描',options:'读取控件选项',match:'AI 匹配',fill:'填写与核对'})[result.stage] || '未取得';
     return [
       `ApplyFill v${pluginVersion()}`,
       `结果：${({ success: "完成", partial: "部分完成", failed: "失败" })[result.outcome] || "未知"}；错误类别：${code}`,
+      `中断阶段：${result.outcome === 'failed' ? stage : '无'}`,
       `网页字段：${count(result.fieldCount)}；成功填写：${count(result.filledCount)}；没填上：${count(result.unfilledCount)}`,
-      `AI 匹配：${count(d.aiMatches)}；规则补空：${count(d.ruleMatches)}`,
+      ...(result.notAttemptedCount?[`尚未尝试：${count(result.notAttemptedCount)}（前一控件弹层未关闭）`]:[]),
+      `AI 匹配：${count(d.aiMatches)}；规则补空：${count(d.ruleMatches)}；来源校验拦截：${count(d.rejectedSources)}`,
       `送 AI 字段：${count(d.aiFields)}（全部网页字段）`,
       `候选 / 简历字段：${count(d.candidateFields)} / ${count(d.resumeFields)}`,
       `用户 prompt：${count(d.promptBytes)} bytes`,
       `扫描：${seconds(result.scanMs)}`,
+      `选项预读：${seconds(result.optionsMs)}；尝试 ${count(d.optionAttempts)}；读到选项 ${count(d.optionObserved)}；失败 ${count(d.optionFailures)}`,
+      ...(d.optionFailures ? [`预读错误：${[...new Set(d.optionErrors || [])].map(c=>safeInputErrorCode(c)||'unknown').join('、')}`] : []),
       `匹配往返（含后台处理）：${seconds(result.roundTripMs)}`,
       `API（含响应读取）：${seconds(d.apiMs)}`,
       `填写：${seconds(result.fillMs)}；总计：${seconds(result.totalMs)}`
@@ -1911,26 +2204,89 @@
   const skin = (...selectors) => ANTD_SKINS
     .flatMap((prefix) => selectors.map((selector) => selector.replace(/\.ant-/g, `.${prefix}-`)))
     .join(", ");
+  const controlCatalog = self.ResumeProControlCatalog;
 
-  const COMBO_ROOT_SELECTOR = `${skin(".ant-select")}, .el-select, .next-select, .arco-select, .semi-select, .MuiSelect-root, [role='combobox']`;
+  const COMBO_ROOT_SELECTOR = `${controlCatalog.selector('selectRoot')}, .next-select, .arco-select, .semi-select, .MuiSelect-root, [role='combobox']`;
   // 组件库的最外层容器：一层套一层时取最外那个，免得同一个下拉被扫成两个字段。
-  const COMBO_LIBRARY_SELECTOR = `${skin(".ant-select")}, .el-select, .next-select, .arco-select, .semi-select, .MuiSelect-root`;
+  const COMBO_LIBRARY_SELECTOR = `${controlCatalog.selector('selectRoot')}, .next-select, .arco-select, .semi-select, .MuiSelect-root`;
   // ant 3.x 的触发器是 .ant-select-selection，4.x 才是 -selector，两个都要认。
-  const COMBO_TRIGGER_SELECTOR = `${skin(".ant-select-selector", ".ant-select-selection")}, .el-select__wrapper, .el-select__input, .next-select-inner, .arco-select-view, .semi-select-selection, .MuiSelect-select, [role='combobox']`;
-  const COMBO_OPTION_SELECTOR = `${skin(".ant-select-item-option", ".ant-select-dropdown-menu-item", ".ant-select-tree-node-content-wrapper")}, .el-select-dropdown__item, .next-menu-item, .arco-select-option, .semi-select-option, .MuiMenuItem-root, [role='listbox'] [role='option'], li[role='option']`;
-  const COMBO_DISPLAY_SELECTOR = `${skin(".ant-select-selection-item", ".ant-select-selection-selected-value", ".ant-select-selection__choice__content")}, .el-select__selected-item, .el-select__placeholder, .next-select-values, .arco-select-view-value, .semi-selection-item-text, .MuiSelect-select`;
+  const COMBO_TRIGGER_SELECTOR = `${controlCatalog.selector('trigger')}, .next-select-inner, .arco-select-view, .semi-select-selection, .MuiSelect-select, [role='combobox']`;
+  function comboTriggerFor(root) {
+    // Phoenix Select.tsx owns onClick on the .phoenix-select wrapper; __inputWrapper can be a tiny
+    // placeholder covered by sibling display layers, not the activation surface.
+    return (root.matches('.ud__select') ? root.querySelector('.ud__select__selector') || root.querySelector('.ud__select__dropdown-open input') || root : null)
+      || (root.matches('.phoenix-select') ? root : root.matches('.phoenix-select__cont') ? root.querySelector('.phoenix-select') || root : null)
+      || root.querySelector(COMBO_TRIGGER_SELECTOR) || root;
+  }
+  const COMBO_OPTION_SELECTOR = `${controlCatalog.selector('option')}, .next-menu-item, .arco-select-option, .semi-select-option, .MuiMenuItem-root, [role='treeitem'], [class*='phoenix-select'][class*='option']`;
+  const COMBO_DISPLAY_SELECTOR = `${controlCatalog.selector('display')}, .next-select-values, .arco-select-view-value, .semi-selection-item-text, .MuiSelect-select, [class*='selectedValue']`;
+  // Popup search boxes are observations/actions within a control, not resume fields.
+  const CONTROL_POPUP_SELECTOR = `${controlCatalog.selector('selectPanel')}, ${controlCatalog.selector('datePanel')}`;
+  function controlPopupFor(node) {
+    const panel = node.closest(CONTROL_POPUP_SELECTOR);
+    if (panel) return controlCatalog.popupRoot(panel);
+    // Search inputs can be siblings of the option list in a real, bounded popup.
+    const layer = node.closest(controlCatalog.selector('layerRoot'));
+    return layer && Array.from(layer.querySelectorAll(CONTROL_POPUP_SELECTOR)).some(p => controlCatalog.popupRoot(p) === layer) ? layer : null;
+  }
   // 真实站点上的占位语常带字段名（「请选择民族」），只认完整匹配会把它当成已有内容。
   // 前缀匹配挡的是「请选择…」「请输入…」这类；「选择其他」这种正经选项不以「请」开头，不受影响。
   const COMBO_PLACEHOLDER = /^(请选择|请输入|请填写|不限|--|—|…|please\s*(select|choose)|select\b|choose\b)/i;
+
+  const comboAgent = self.ResumeProComboAgent.create({
+    visible:isVisible, optionSelector:COMBO_OPTION_SELECTOR, displaySelector:COMBO_DISPLAY_SELECTOR,
+    panelSelector:`${controlCatalog.selector('selectPanel')}, [role='tree'], [class*='select-dropdown' i], [class*='select__dropdown' i], [class*='select__menu' i], [class*='select__list' i], [class*='autocomplete' i][class*='dropdown' i], [class*='select' i][class*='options' i], [class*='select' i][class*='menu' i], [class*='select' i][class*='list' i]`,
+    placeholder:isFormatPlaceholder,
+    popupRoot:controlCatalog.popupRoot,
+    click:node=>browserInputEnabled()?browserInput(node):null,
+    input:(node,text)=>browserInputEnabled()?browserInput(node,text):null,
+    escape:node=>browserInputEnabled()?browserEscape(node):null,
+    dismiss:node=>browserInputEnabled()?browserAction(controlCatalog.dismissSurface(node)||node,{kind:'dismiss'}):null,
+    readPeer:entry=>readBackValue(entry),
+    refresh:entry=>entry.meta?refreshFieldEntry(entry.meta,entry):null
+  });
 
   function visibleComboOptions() {
     return Array.from(document.querySelectorAll(COMBO_OPTION_SELECTOR))
       .filter((option) => isVisible(option) && !option.closest(`#${SIDEBAR_ID}`) && !option.closest("[aria-hidden='true']"));
   }
 
+  const STRUCTURAL_CHOICE_PANELS = '[role="listbox"],ul,[class*="dropdown" i],[class*="suggest" i],[class*="options" i],[class*="menu" i],[class*="list" i]';
+  const provenChoiceRoots=new WeakSet();
+  function structuralChoiceRoot(input,previouslyProven=false) {
+    if (!(input instanceof HTMLInputElement) || !['text','search'].includes(input.type)
+      || input.list || input.closest(`#${SIDEBAR_ID}`) || controlPopupFor(input)) return null;
+    const label=getFieldLabel(input),placeholder=input.getAttribute('placeholder')||'';
+    if(looksLikeDateInput(input,label,placeholder)||input.closest('[class*="picker" i],[class*="calendar" i]'))return null;
+    let owner=null;
+    for(let scope=input.parentElement,depth=0;scope&&depth<4;scope=scope.parentElement,depth++){
+      if(scope.matches('body,form,main,section,fieldset,nav'))break;
+      const controls=Array.from(scope.querySelectorAll('input:not([type="hidden"]),textarea,select'))
+        .filter(n=>isVisible(n)&&!n.matches('[type="checkbox"],[type="radio"]'));
+      if(controls.length!==1||controls[0]!==input)break;
+      const named=/(?:^|[-_\s])(?:select\d*|autocomplete|auto-complete|autosuggest|dropdown|combobox|combo)(?:[-_\s]|$)/i.test(String(scope.className||''));
+      const linked=input.matches('[aria-haspopup="listbox"],[aria-autocomplete="list"],[aria-autocomplete="both"]');
+      const list=Array.from(scope.querySelectorAll(STRUCTURAL_CHOICE_PANELS)).some(n=>!n.contains(input)
+        &&!n.querySelector('input,textarea,select,form')&&(n.matches('[role="listbox"]')||['absolute','fixed'].includes(getComputedStyle(n).position)));
+      const arrow=input.readOnly&&scope.querySelector('[class*="arrow" i],[class*="caret" i],[class*="chevron" i]');
+      if((named||!owner&&(linked||list||arrow||provenChoiceRoots.has(scope)||previouslyProven&&input.value.trim()))&&(formItemLabel(scope,'')||getFieldLabel(input)))owner=scope;
+    }
+    // The Select label may contain only the trigger. Its bounded Dropdown parent
+    // owns a sibling popup; stopping at the inner label loses those candidates.
+    return owner;
+  }
+  function promoteStructuralChoice(entry,root) {
+    entry.kind='combobox';entry.root=root;
+    entry.trigger=root.matches('.ud__select')?comboTriggerFor(root):root.querySelector('input:not([type="hidden"])')||root;
+    entry.structuralChoice=true;
+    provenChoiceRoots.add(root);
+    return entry;
+  }
+
   function collectComboboxRoots() {
     const roots = [];
     const claimed = new Set();
+    const structuralRoots = new Set();
 
     const addRoot = (anchor) => {
       if (!anchor || roots.includes(anchor) || roots.some((item) => item.contains(anchor) || anchor.contains(item))) {
@@ -1944,12 +2300,23 @@
     };
 
     Array.from(document.querySelectorAll(COMBO_ROOT_SELECTOR)).forEach((element) => {
-      if (element.closest(`#${SIDEBAR_ID}`) || !isVisible(element)) {
+      if (element.closest(`#${SIDEBAR_ID}`) || controlPopupFor(element) || !isVisible(element)) {
         return;
       }
       // 组件库容器取最外层那一个，避免一层套一层重复成两个字段。
       const root = element.matches(COMBO_LIBRARY_SELECTOR) ? element : element.closest(COMBO_LIBRARY_SELECTOR);
-      addRoot(root || element);
+      const bounded=!root&&element instanceof HTMLInputElement?structuralChoiceRoot(element):null;
+      addRoot(root || bounded || element);
+      if(bounded&&roots.includes(bounded))structuralRoots.add(bounded);
+    });
+
+    // A library name is optional. Recognize a bounded input + choice-list widget,
+    // including editable school/major autocomplete and readonly arrow triggers.
+    // Native datalists remain text inputs; they explicitly permit free text.
+    document.querySelectorAll('input[type="text"],input[type="search"],input:not([type])').forEach(input=>{
+      if(!isVisible(input)||roots.some(root=>root.contains(input)))return;
+      const root=structuralChoiceRoot(input);
+      if(root){addRoot(root);if(roots.includes(root))structuralRoots.add(root);}
     });
 
     // 名单外的自定义下拉。飞书的「学历 / 语言 / 精通程度」在页面里就是一个
@@ -1960,7 +2327,7 @@
     Array.from(document.querySelectorAll(
       "input[type='search'], input[aria-haspopup='listbox'], input[aria-autocomplete='list'], [aria-haspopup='listbox']"
     )).forEach((element) => {
-      if (element.closest(`#${SIDEBAR_ID}`) || !isVisible(element)) {
+      if (element.closest(`#${SIDEBAR_ID}`) || controlPopupFor(element) || !isVisible(element)) {
         return;
       }
       if (roots.some((root) => root.contains(element) || element.contains(root))) {
@@ -1990,7 +2357,7 @@
       // 结果这个控件从字段表里彻底消失 —— 比当成普通输入框更糟。
       // 所以只认结构上真有字段名的：靠 placeholder 兜底出来的名字（页头站内搜索框
       // 那种「搜索职位」）不足以说明这是表单里的下拉，升级错了只会白点一次还填不上。
-      const trigger = root.querySelector(COMBO_TRIGGER_SELECTOR) || root;
+      const trigger = comboTriggerFor(root);
       const shownText = sanitizeLabelText(comboTriggerText(trigger));
       if (!formItemLabel(root, shownText) && !comboLabelFromFormItem(root)) {
         return;
@@ -2007,7 +2374,7 @@
       root.querySelectorAll("input, textarea, select").forEach((inner) => claimed.add(inner));
     });
 
-    return { roots, claimed };
+    return { roots, claimed, structuralRoots };
   }
 
   const DATE_PLACEHOLDER = /(yyyy|YYYY)\s*[-/年]|\d{4}\s*[-/]\s*\d{1,2}|月\s*[-/日]\s*(dd|日)|年\s*月/;
@@ -2017,7 +2384,7 @@
     if (!(element instanceof HTMLInputElement)) {
       return false;
     }
-    if (["date", "month", "time", "datetime-local"].includes(element.type)) {
+    if (!["text", "search"].includes(element.type)) {
       return false;
     }
 
@@ -2061,7 +2428,7 @@
     const combos = collectComboboxRoots();
     const candidates = Array.from(document.querySelectorAll(
       "input:not([type='hidden']):not([type='file']):not([type='button']):not([type='submit']):not([type='reset']):not([disabled]), textarea:not([disabled]), select:not([disabled])"
-    )).filter((element) => isVisible(element) && !element.closest(`#${SIDEBAR_ID}`) && !combos.claimed.has(element));
+    )).filter((element) => isVisible(element) && !element.closest(`#${SIDEBAR_ID}`) && !controlPopupFor(element) && !combos.claimed.has(element));
 
     const fieldMap = new Map();
     const fields = [];
@@ -2104,7 +2471,7 @@
         return;
       }
 
-      const fieldId = `field-${fields.length}`;
+      const fieldId = `field-${fields.length}-${fieldMap.size}`;
       const label = getFieldLabel(element);
       const placeholder = element.getAttribute("placeholder") || "";
       fieldMap.set(fieldId, { kind: "element", element, dateLike: looksLikeDateInput(element, label, placeholder) });
@@ -2129,6 +2496,7 @@
       // ant 3.x 和飞书 atsx 换皮版：日历输入框叫 *-calendar-picker / *-date-picker。
       { selector: skin(".ant-calendar-picker", ".ant-date-picker"), pickerType: "antd" },
       { selector: ".el-date-editor", pickerType: "element" },
+      { selector: ".ivu-date-picker", pickerType: "iview" },
       // 区间选择器的类名通常是 date-range-picker / range-picker / ud__picker-range，
       // 不含「date-picker」这个连续子串，只认旧选择器时整类起止时间都扫不到。
       { selector: "[class*='date-picker'], [class*='datepicker'], [class*='range-picker'], [class*='date-range']", pickerType: "generic" },
@@ -2137,17 +2505,41 @@
     // 同一个容器会被多条选择器命中，只按第一条归类，
     // 否则通用的那条会把 antd / element 的 pickerType 覆盖掉。
     const handledPickers = new WeakSet();
+    // Period components expose two display targets but only one internal input.
+    const periodRoots = Array.from(document.querySelectorAll('[class*="date-picker-period"]'))
+      .filter(n => !n.matches('input') && isVisible(n) && !controlPopupFor(n) && !n.parentElement?.closest('[class*="date-picker-period"]'));
+    for (const root of periodRoots) {
+      const atsxLabels=Array.from(root.querySelectorAll('.atsx-date-picker-period-month-label')).filter(isVisible);
+      const displays = atsxLabels.length ? atsxLabels : Array.from(root.querySelectorAll('*')).filter(n =>
+        !n.matches('input,button') && isVisible(n) && !n.children.length &&
+        /^(?:YYYY[-/]MM|\d{4}[-/]\d{1,2}|至今)$/i.test(n.textContent.trim()));
+      if (displays.length !== 2) continue;
+      // Drop internal storage inputs: never click or independently match them.
+      for (let i=fields.length-1;i>=0;i--) {
+        const node=fieldMap.get(fields[i].fieldId)?.element;
+        if(root.contains(node)&&!node?.matches('[type="checkbox"],[type="radio"]')) {fieldMap.delete(fields[i].fieldId);fields.splice(i,1);}
+      }
+      const rangeId='period-'+fieldMap.size;
+      displays.forEach((node,index)=>{
+        const fieldId=rangeId+'-'+index;
+        fieldMap.set(fieldId,{kind:'element',element:node,pickerRoot:root,pickerType:'antd',pickerInputType:'month',dateLike:true,rangeRoot:root,displayDate:true,atsxPeriod:atsxLabels.length===2,periodIndex:index});
+        fields.push({fieldId,label:index?'结束时间':'开始时间',placeholder:'YYYY-MM',name:'',idAttr:'',ariaLabel:'',tagName:node.tagName.toLowerCase(),inputType:'date-picker',pickerType:'antd',pickerInputType:'month',rangeId,rangeRole:index?'end':'start',options:[],group:findNearestGroupLabel(root)});
+      });
+      handledPickers.add(root);
+    }
 
     pickerSelectors.forEach(({ selector, pickerType }) => {
       document.querySelectorAll(selector).forEach((container) => {
-        if (handledPickers.has(container)) return;
+        if (handledPickers.has(container) || periodRoots.some(root => handledPickers.has(root) && root.contains(container))) return;
         if (container.closest(`#${SIDEBAR_ID}`)) return;
+        if (controlPopupFor(container)) return;
         if (!isVisible(container)) return;
         // file-picker / color-picker 这类也叫 picker，但不是日期。
         if (/file|color|emoji|image|upload/i.test(container.className || "")) return;
         handledPickers.add(container);
 
-        const innerInputs = Array.from(container.querySelectorAll("input:not([type='hidden']):not([disabled])"));
+        const innerInputs = Array.from(container.querySelectorAll("input:not([type='hidden']):not([disabled])"))
+          .filter(inner=>!inner.matches('[type="checkbox"],[type="radio"],[type="file"],[type="button"],[type="submit"],[type="reset"]')&&!combos.claimed.has(inner));
         const visibleInputs = innerInputs.filter((inner) => isVisible(inner));
         // 有的日期组件把真正的 input 藏起来（0 宽），只露一个 div 显示日期。
         // 一个可见输入框都没有时照样登记隐藏的那个：值写进它组件才认，
@@ -2160,6 +2552,7 @@
           const existingEntry = Array.from(fieldMap.entries()).find(([, v]) => v.element === inner);
           if (existingEntry) {
             const [existingId, entryValue] = existingEntry;
+            if (entryValue.pickerRoot && entryValue.pickerRoot !== container) return;
             entryValue.pickerType = pickerType;
             entryValue.pickerInputType = pickerInputType;
             entryValue.pickerRoot = container;
@@ -2174,7 +2567,7 @@
             return;
           }
 
-          const fieldId = `field-${fields.length}`;
+          const fieldId = `field-${fields.length}-${fieldMap.size}`;
           fieldMap.set(fieldId, {
             kind: "element",
             element: inner,
@@ -2229,23 +2622,24 @@
     let unlabeledCombos = 0;
     const unlabeledComboHints = [];
     combos.roots.forEach((root) => {
-      const trigger = root.querySelector(COMBO_TRIGGER_SELECTOR) || root;
+      const structuralChoice=root.matches('.ud__select')||combos.structuralRoots.has(root)||!root.matches(COMBO_LIBRARY_SELECTOR)
+        &&Boolean(root.matches('input[type="text"],input[type="search"],input:not([type])')||root.querySelector('input[type="text"],input[type="search"],input:not([type])'));
+      const trigger = root.matches('.ud__select') ? comboTriggerFor(root) : structuralChoice ? root.querySelector('input:not([type="hidden"])')||root : comboTriggerFor(root);
       const label = getComboboxLabel(root, trigger);
 
       if (!label) {
         unlabeledCombos += 1;
         unlabeledComboHints.push(classHint(root));
-        return;
       }
 
-      const fieldId = `field-${fields.length}`;
-      fieldMap.set(fieldId, { kind: "combobox", root, trigger });
+      const fieldId = `field-${fields.length}-${fieldMap.size}`;
+      fieldMap.set(fieldId, { kind: "combobox", root, trigger, structuralChoice });
       fields.push({
         fieldId,
         label,
-        placeholder: "",
+        placeholder: root.querySelector('input')?.getAttribute('placeholder') || '',
         name: "",
-        idAttr: root.id || "",
+        idAttr: root.id || (structuralChoice?trigger.id:'') || "",
         ariaLabel: root.getAttribute("aria-label") || "",
         tagName: root.tagName.toLowerCase(),
         inputType: "combobox",
@@ -2255,14 +2649,76 @@
       });
     });
 
+    // Find a bounded common wrapper even when the two date inputs have separate inner wrappers.
+    const dateFields=fields.filter(f=>{const e=fieldMap.get(f.fieldId);return e?.element instanceof HTMLInputElement&&(e.dateLike||f.inputType==='date-picker'||/^(date|month)$/.test(f.inputType));});
+    const paired=new Set();
+    for(const field of dateFields){
+      if(paired.has(field.fieldId))continue;
+      const input=fieldMap.get(field.fieldId).element;
+      for(let scope=input.parentElement,depth=0;scope&&depth<4;scope=scope.parentElement,depth++){
+        const members=dateFields.filter(f=>scope.contains(fieldMap.get(f.fieldId).element));
+        if(members.length>2)break;
+        if(members.length!==2)continue;
+        const unrelated=Array.from(scope.querySelectorAll('input,textarea,select')).filter(n=>isVisible(n)&&!members.some(f=>fieldMap.get(f.fieldId).element===n)&&!n.matches('[type="checkbox"],[type="hidden"]'));
+        if(unrelated.length)break;
+        members.sort((a,b)=>fieldMap.get(a.fieldId).element.compareDocumentPosition(fieldMap.get(b.fieldId).element)&Node.DOCUMENT_POSITION_FOLLOWING?-1:1);
+        const hints=members.map(f=>`${f.placeholder} ${f.ariaLabel} ${f.name} ${f.idAttr}`);
+        const marker=`${scope.className||''} ${scope.querySelector('label')?.textContent||''} ${(scope.previousElementSibling?.textContent||'').slice(0,30)}`;
+        const roles=members.map((f,i)=>`${f.label} ${hints[i]}`);
+        if(!/range|起止|起讫/i.test(marker)&&!(roles.some(t=>/开始|起始|start/i.test(t))&&roles.some(t=>/结束|截止|end/i.test(t))))continue;
+        const reversed=/结束|截止|end/i.test(hints[0])&&/开始|起始|start/i.test(hints[1]);
+        if(reversed)members.reverse();
+        const id='range-'+members[0].fieldId;
+        members.forEach((f,i)=>{f.label=i?'结束时间':'开始时间';f.rangeId=id;f.rangeRole=i?'end':'start';paired.add(f.fieldId);fieldMap.get(f.fieldId).rangeRoot=scope;});
+        break;
+      }
+    }
     sortFieldsByDocumentOrder(fields, fieldMap);
+    annotateSplitDates(fields, fieldMap);
 
     // 级联判断 (Cascade Detection)
     if (self.ResumeProAIHelpers?.detectCascadeGroups) {
       self.ResumeProAIHelpers.detectCascadeGroups(fields, fieldMap);
     }
 
+    const sectionHeadings = collectSectionHeadings();
+    fields.forEach(field => {
+      const entry = fieldMap.get(field.fieldId);
+      const anchor = entry?.kind === "radio" ? entry.elements?.[0] : entry?.root || entry?.element;
+      field.contextGroup = field.group;
+      field.group = findSectionHeading(anchor, sectionHeadings);
+    });
     annotateRecordIndexes(fields, fieldMap);
+    // Separate date dropdowns in the same repeated record still form a range.
+    // Require one explicit start and one explicit end; never infer direction from DOM order alone.
+    const recordDates=new Map();
+    fields.filter(f=>f.recordIndex&&f.group&&fieldMap.get(f.fieldId)?.kind==='combobox'&&/开始时间|开始日期|入学时间|起始时间|结束时间|结束日期|毕业时间/.test(f.label||'')).forEach(f=>{
+      const key=JSON.stringify([f.group,f.recordIndex,f.recordSignature]);recordDates.set(key,[...(recordDates.get(key)||[]),f]);
+    });
+    for(const list of recordDates.values()){
+      const start=list.filter(f=>/开始|入学|起始/.test(f.label)),end=list.filter(f=>/结束|毕业/.test(f.label));
+      if(start.length!==1||end.length!==1||list.length!==2)continue;
+      [start[0],end[0]].forEach((f,i)=>{f.rangeId='record-'+start[0].fieldId;f.rangeRole=i?'end':'start';});
+      const a=fieldMap.get(start[0].fieldId),b=fieldMap.get(end[0].fieldId);
+      for(let scope=a.root.parentElement,depth=0;scope&&depth<12;scope=scope.parentElement,depth++){
+        if(scope.contains(b.root)){a.rangeRoot=scope;b.rangeRoot=scope;break;}
+      }
+    }
+    fields.filter(f=>f.rangeId).forEach(f=>{
+      const peer=fields.find(other=>other.rangeId===f.rangeId&&other.fieldId!==f.fieldId);
+      if(peer)fieldMap.get(f.fieldId).rangePeer=fieldMap.get(peer.fieldId);
+      if(f.datePart)fieldMap.get(f.fieldId).rangeMembers=fields.filter(other=>other.rangeId===f.rangeId)
+        .map(meta=>({meta,entry:fieldMap.get(meta.fieldId)}));
+    });
+    const awardRecords=new Set(fields.filter(f=>/^(获奖名称|奖项名称|获奖项)$/.test(f.label)).map(f=>JSON.stringify([f.group,f.recordIndex,f.recordSignature])));
+    fields.forEach(f=>{if(f.recordSignature&&awardRecords.has(JSON.stringify([f.group,f.recordIndex,f.recordSignature])))f.group='获奖经历';});
+    // Some project templates distinguish a short role (职责) from the separate
+    // narrative field 项目中职责. Only that complete record shape authorizes this alias.
+    fields.filter(f=>f.label==='职责'&&/项目/.test(f.group||'')&&f.inputType==='text').forEach(f=>{
+      if(fields.some(other=>other.group===f.group&&other.recordIndex===f.recordIndex
+        &&other.recordSignature===f.recordSignature&&other.label==='项目中职责'))f.label='项目角色';
+    });
+    fields.forEach(field=>{const entry=fieldMap.get(field.fieldId);if(entry?.kind==='combobox')entry.meta=field;});
     markUnreliableLabels(fields, fieldMap);
 
     // 认不出来的控件要留下线索：这些字段送到模型那里只是「未命名字段」，
@@ -2283,6 +2739,10 @@
       }
     });
 
+    fields.forEach(field => {
+      const entry=fieldMap.get(field.fieldId), family=controlCatalog.identify(entry?.root || entry?.element);
+      if(family){field.controlFamily=family.id;field.controlEvidence=family.evidence;}
+    });
     return { fields, fieldMap, unlabeledCombos, dropped: dropped.slice(0, 20), droppedTotal: dropped.length };
   }
 
@@ -2343,7 +2803,7 @@
       }
 
       const outcome = outcomes?.get(field.fieldId);
-      if (outcome && !outcome.ok && !outcome.kept && !outcome.skipped) {
+      if (outcome && !outcome.ok && !outcome.kept && !outcome.skipped && !outcome.notAttempted && entry?.fillIssue !== 'choice-mismatch') {
         add({
           reason: "write-rejected",
           label: label || "(无名)",
@@ -2355,6 +2815,99 @@
 
     const list = [...merged.values()];
     return { list: list.slice(0, 24), total };
+  }
+
+  // 自动点击采集的目标：只要自定义控件，上游缺的正是这些控件弹层的结构。
+  // radio/checkbox 点下去会改掉用户已经选好的值；原生 <select> 弹的是系统下拉，CDP 关不掉 —— 都不采。
+  function buildCaptureTargets({ fields, fieldMap, outcomes }) {
+    const primary = [];
+    const secondary = [];
+    const seen = new Set();
+
+    const push = (field, reason, bucket) => {
+      const entry = fieldMap?.get(field.fieldId);
+      const control = formControlOf(entry, field);
+      if (control !== "combobox" && control !== "date-picker") return;
+      // 点哪里必须和填写时一致（见 writeCalendarPanelDate 的 trigger）：只有隐藏 input 的
+      // 日期控件才点外层 picker，有可见 input 就点 input —— 点容器正中心会落在日历图标上，面板打不开。
+      const node = entry?.kind === "combobox" ? entry.trigger || entry.root
+        : entry?.hiddenInput ? entry.pickerRoot : entry?.element || entry?.pickerRoot;
+      if (!node?.isConnected || seen.has(node)) return;
+      seen.add(node);
+      bucket.push({
+        reason,
+        control,
+        node,
+        hint: classHint(entry?.kind === "combobox" ? entry.root : node),
+        // 标签位置上显示的可能就是简历里的值，这种标签不进导出文件。
+        label: field.labelUnreliable ? "" : sanitizeLabelText(field.label).slice(0, 20),
+        labelSafe: !field.labelUnreliable,
+        source: "fill-failure"
+      });
+    };
+
+    (fields || []).forEach((field) => {
+      const entry = fieldMap?.get(field.fieldId);
+      const outcome = outcomes?.get(field.fieldId);
+      if(outcome?.notAttempted){
+        if(entry&&!hasExistingValue(entry))push(field,'not-attempted',secondary);
+        return;
+      }
+      if (outcome && !outcome.ok && !outcome.kept && !outcome.skipped && entry?.fillIssue !== 'choice-mismatch') {
+        return push(field, outcome.failureReason || "write-rejected", primary);
+      }
+      if (field.labelUnreliable) return push(field, "label-was-value", primary);
+      if (!field.label && !field.placeholder && !field.name && !field.idAttr && !field.ariaLabel) return push(field, "no-label", primary);
+      // 页面上已经有值的控件不用再采：它们会挤占有限的点击名额，把真正没填上的顶出去。
+      if (!outcome && entry && !hasExistingValue(entry)) push(field, "not-attempted", secondary);
+    });
+
+    return controlCatalog.sampleTargets([...primary, ...secondary],24);
+  }
+
+  // 点容器正中心可能落在日历图标上（飞书的获奖时间控件就是这样点开不了的）：
+  // 日期类控件有可见 input 就点 input，和填写时 writeCalendarPanelDate 的选择一致；
+  // 隐藏 input 的情况仍然点外层容器。
+  function captureClickNode(node) {
+    if(node.matches('.ud__select'))return comboTriggerFor(node);
+    if (!node.matches('[class*="date-picker"],[class*="calendar-picker"],.ant-picker,[class*="date-editor"]')) return node;
+    // 组件内部的隐藏 input 只是焦点与存值位置，点它等于没点（atsx-date-picker-period-hidden-input 就是这种）。
+    // 这类 input 常常还有 8×6 的实际盒子，而 isVisible 不看 opacity，所以这里自己判一遍。
+    const input = Array.from(node.querySelectorAll("input")).find((element) => {
+      if (element.type === "hidden" || element.disabled) return false;
+      const rect = element.getBoundingClientRect();
+      const style = getComputedStyle(element);
+      return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden" && style.opacity !== "0";
+    });
+    return input || node;
+  }
+
+  // 没跑过填写时的兜底：直接扫页面上的自定义控件。嵌套容器只留最外层，免得同一个下拉被点两次。
+  function scanCaptureTargets() {
+    const captureRoot = self.ResumeProControlCapture.ROOT;
+    const roots = Array.from(document.querySelectorAll(`${captureRoot}, ${COMBO_ROOT_SELECTOR}`))
+      .filter((node) => isVisible(node) && !node.closest(`#${SIDEBAR_ID}`))
+      .filter((node, index, all) => !all.some((other) => other !== node && other.contains(node)));
+    const seen = new Set();
+    const targets = [];
+    for (const node of roots) {
+      // 采集要以 selectRoot 认得出的那一层为准：库容器（.ant-select）不在 ROOT 词表里，
+      // 交给 recorder 会被判成 no-root，真正要点开的是里面的触发器。
+      const found = node.matches(captureRoot) ? node : node.querySelector(`${COMBO_TRIGGER_SELECTOR}, ${captureRoot}`) || node;
+      const trigger = found.matches('.ud__select') ? comboTriggerFor(found) : captureClickNode(found);
+      if (!trigger.isConnected || seen.has(trigger)) continue;
+      seen.add(trigger);
+      targets.push({
+        reason: "page-scan",
+        control: node.matches(COMBO_ROOT_SELECTOR) ? "combobox" : "date-picker",
+        node: trigger,
+        hint: classHint(node),
+        label: "",
+        labelSafe: false,
+        source: "page-scan"
+      });
+    }
+    return targets.slice(0, 24);
   }
 
   // 标签是不是真的字段名。Moka、北森这类站点的输入框没有 <label> 关联，通用解析会退到
@@ -2401,7 +2954,7 @@
       // 别的字段的值才算可疑。
       const displaysOwnText = entry?.kind === "combobox" || entry?.kind === "radio";
       const fromOthers = occurrences - (displaysOwnText && values[index] === field.label ? 1 : 0);
-      if (hasAssociation(element) || fromOthers <= 0) {
+      if (hasAssociation(element) || (element?.type === 'checkbox' && getCheckboxLabel(element) === field.label) || fromOthers <= 0) {
         return;
       }
 
@@ -2469,6 +3022,13 @@
       return fromItem;
     }
 
+    for(let scope=root.parentElement,depth=0;scope&&depth<8;depth++,scope=scope.parentElement){
+      const others=Array.from(scope.querySelectorAll('input,textarea,select,[role="combobox"]')).filter(n=>!root.contains(n)&&n!==root&&isVisible(n));
+      if(others.length)break;
+      const labels=Array.from(scope.querySelectorAll('label,[class*="label"],[class*="title"]')).filter(n=>!n.contains(root)&&!root.contains(n)&&(n.compareDocumentPosition(root)&Node.DOCUMENT_POSITION_FOLLOWING));
+      const text=labels.map(n=>stableLabelText(n)).filter(t=>t&&t.length<=30&&!isFormatPlaceholder(t));
+      if(new Set(text).size===1)return text[0].replace(/[*＊：:\s]+$/, '');
+    }
     const direct = sanitizeLabelText(getFieldLabel(root.querySelector("input, textarea") || trigger));
     // 拿回来的文本正是控件里显示的值，那不是字段名。
     if (!direct || COMBO_PLACEHOLDER.test(direct) || (shown && direct === shown)) {
@@ -2483,7 +3043,93 @@
   const RECORD_MAX_PEERS = 12;
   // 组件库的容器嵌套很深（组合框的锚点比同一段里的输入框深好几层），层数给少了
   // 会出现同一段里输入框拿到段号、下拉拿不到。判定结果按父节点缓存，多走几层不贵。
-  const RECORD_MAX_DEPTH = 14;
+  const RECORD_MAX_DEPTH = 32;
+
+  function fieldAnchor(entry) {
+    return entry?.kind === 'radio' ? entry.elements?.[0] : entry?.root || entry?.element;
+  }
+
+  // Resolve split date selectors before looking for repeated resume records.
+  function annotateSplitDates(fields, fieldMap) {
+    const helpers=self.ResumeProAIHelpers;
+    if(!helpers) return;
+    const anchors=fields.map(field=>({field,element:fieldAnchor(fieldMap.get(field.fieldId))})).filter(item=>item.element);
+    const hintPart=field=>{
+      const entry=fieldMap.get(field.fieldId),element=entry?.trigger||entry?.element;
+      const captions=[field.placeholder,field.ariaLabel,element?.getAttribute('placeholder')];
+      if(element instanceof HTMLSelectElement)captions.push(element.options[0]?.text);
+      if(captions.some(text=>/^(?:请(?:选择|输入))?(?:年|年份|YYYY)$/i.test(String(text||'').trim())))return 'year';
+      if(captions.some(text=>/^(?:请(?:选择|输入))?(?:月|月份|MM)$/i.test(String(text||'').trim())))return 'month';
+      const name=`${field.name} ${field.idAttr}`.replace(/([a-z])([A-Z])/g,'$1 $2');
+      if(/(?:^|[\s_-])year(?:$|[\s_-])/i.test(name))return 'year';
+      if(/(?:^|[\s_-])month(?:$|[\s_-])/i.test(name))return 'month';
+      if(/时间|日期|年月|生日/.test(field.label||'')){
+        const options=(field.options||[]).filter(option=>!helpers.isPlaceholderOption(option));
+        if(options.length>=2&&options.every(option=>helpers.normalizeDatePart(option,'year')))return 'year';
+        const months=new Set(options.map(option=>helpers.normalizeDatePart(option,'month')));
+        if(options.length===12&&months.size===12&&!months.has(''))return 'month';
+      }
+      return '';
+    };
+    const parts=new Map(anchors.map(item=>[item.field.fieldId,hintPart(item.field)]).filter(([,part])=>part));
+    const handled=new Set();
+    for(const item of anchors){
+      if(!parts.has(item.field.fieldId)||handled.has(item.field.fieldId))continue;
+      let best;
+      for(let scope=item.element.parentElement,depth=0;scope&&scope!==document.body&&depth<RECORD_MAX_DEPTH;scope=scope.parentElement,depth++){
+        const members=anchors.filter(anchor=>scope.contains(anchor.element)&&anchor.field.inputType!=='checkbox');
+        if(members.length>4||members.some(anchor=>!parts.has(anchor.field.fieldId)))break;
+        if(members.length!==2&&members.length!==4)continue;
+        const sequence=members.map(anchor=>parts.get(anchor.field.fieldId)).join(',');
+        if(sequence!=='year,month'&&sequence!=='year,month,year,month')continue;
+        const labels=[...new Set(members.map(anchor=>anchor.field.label).filter(Boolean))];
+        const label=labels.find(text=>/时间|日期|年月|生日/.test(text));
+        if(!label)continue;
+        if(members.length===2){best={scope,members,label};continue;}
+        const roleOf=anchor=>{
+          const hints=[anchor.field.label,anchor.field.name,anchor.field.idAttr,anchor.field.ariaLabel];
+          for(let node=anchor.element,step=0;node&&node!==scope&&step<8;node=node.parentElement,step++){
+            hints.push(node.getAttribute('data-date-role'),node.getAttribute('aria-label'));
+          }
+          const text=hints.filter(Boolean).join(' ');
+          return /结束|毕业|截止|(?:^|[\s_-])end(?:$|[\s_-])/i.test(text)?'end'
+            :/开始|入学|起始|(?:^|[\s_-])start(?:$|[\s_-])/i.test(text)?'start':'';
+        };
+        let roles=members.map(roleOf);
+        const explicit=roles[0]&&roles[0]===roles[1]&&roles[2]&&roles[2]===roles[3]&&roles[0]!==roles[2];
+        // The range dash is often a bare text node between nested dropdown wrappers.
+        // Read only visible text outside the four controls and their option panels;
+        // looking at element leaves misses that dash, while scope.textContent reads options.
+        const texts=document.createTreeWalker(scope,NodeFilter.SHOW_TEXT);
+        let separator=false;
+        for(let node=texts.nextNode();node;node=texts.nextNode()){
+          if(!/^(?:至|到|[-–—~～])$/.test(node.textContent.trim()))continue;
+          const parent=node.parentElement;
+          if(!parent||!isVisible(parent)||members.some(anchor=>anchor.element.contains(node))
+            ||parent.closest(`select,input,textarea,${COMBO_ROOT_SELECTOR},${CONTROL_POPUP_SELECTOR}`))continue;
+          if((members[1].element.compareDocumentPosition(node)&Node.DOCUMENT_POSITION_FOLLOWING)
+            &&(node.compareDocumentPosition(members[2].element)&Node.DOCUMENT_POSITION_FOLLOWING)){separator=true;break;}
+        }
+        if(!explicit&&!(separator&&/起止|起讫|就读|时间|日期/.test(label))){
+          if(labels.length===1)best={scope,members,label,unresolved:true};
+          continue;
+        }
+        if(!explicit)roles=['start','start','end','end'];
+        best={scope,members,label,roles};
+      }
+      if(!best)continue;
+      const {scope,members,label,roles,unresolved}=best,id='split-'+members[0].field.fieldId;
+      members.forEach(({field},index)=>{
+        field.datePart=parts.get(field.fieldId);
+        if(unresolved)field.dateRangeUnresolved=true;
+        if(roles){field.rangeId=id;field.rangeRole=roles[index];field.label=roles[index]==='start'?'开始时间':'结束时间';}
+        else {field.datePointId=id;field.label=label;}
+        const entry=fieldMap.get(field.fieldId);entry.dateLike=false;entry.datePart=field.datePart;
+        if(roles)entry.rangeRoot=scope;
+        handled.add(field.fieldId);
+      });
+    }
+  }
 
   function annotateRecordIndexes(fields, fieldMap) {
     const anchors = [];
@@ -2509,7 +3155,7 @@
           const api = self.ResumeProFormStructure;
           field.recordSignature = anchors
             .filter((item) => member === item.element || member.contains(item.element))
-            .map((item) => (api ? api.normalizeLabel(item.field.label) : String(item.field.label || "")))
+            .map((item) => (api ? api.normalizeLabel(item.field.label) : String(item.field.label || "")) + (item.field.datePart ? `[${item.field.datePart}]` : ''))
             .filter(Boolean).sort().join("|");
           return;
         }
@@ -2532,48 +3178,66 @@
       byTag = new Map();
       cache.set(parent, byTag);
     }
-    if (byTag.has(member.tagName)) {
-      return byTag.get(member.tagName);
+    const signatureOf = (peer) => {
+      const members=anchors.filter(item=>peer===item.element||peer.contains(item.element));
+      // Date endpoints and year/month wrappers belong to one date item.
+      if(members.length<RECORD_MIN_FIELDS||members.every(item=>item.field.datePart
+        ||/时间|日期|年月/.test(item.field.label||'')))return '';
+      // A missing separator changes date certainty, not which outer experience
+      // owns the controls. Keep that distinction in recordSignature, not the bin.
+      return members.map(item=>JSON.stringify([item.field.group||'',item.field.datePart?'日期部分':item.field.label||'',item.field.datePart||''])).sort().join('|');
+    };
+    if(!byTag.has(member.tagName)) {
+      const buckets=new Map();
+      Array.from(parent.children).filter(sibling=>sibling.tagName===member.tagName).forEach(peer=>{
+        const signature=signatureOf(peer);
+        if(signature)buckets.set(signature,[...(buckets.get(signature)||[]),peer]);
+      });
+      byTag.set(member.tagName,buckets);
     }
-
-    const signatureOf = (peer) => anchors
-      .filter((item) => peer !== item.element && peer.contains(item.element))
-      .map((item) => item.field.label).sort().join("|");
-    const buckets = new Map();
-    Array.from(parent.children).filter((sibling) => sibling.tagName === member.tagName).forEach((peer) => {
-      const signature = signatureOf(peer);
-      if (!signature || signature.split("|").length < RECORD_MIN_FIELDS) {
-        return;
-      }
-      buckets.set(signature, [...(buckets.get(signature) || []), peer]);
-    });
-
-    const group = buckets.get(signatureOf(member));
-    const peers = group && group.length >= 2 && group.length <= RECORD_MAX_PEERS ? group : null;
-    byTag.set(member.tagName, peers);
-    return peers;
+    const group=byTag.get(member.tagName).get(signatureOf(member));
+    return group&&group.length>=2&&group.length<=RECORD_MAX_PEERS?group:null;
   }
 
   // 表单项容器里的标签元素。飞书这类站点的日期框和自定义下拉没有 <label> 关联，
   // 通用解析会一路退到「相邻元素文本」或 placeholder —— 那个位置显示的往往是
   // 控件当前值（「本科」）或日期格式串（「YYYY」），拿这种字符串去和模板键匹配
   // 永远对不上，整组字段就静默空着。所以先按表单项结构正经找一次标签。
-  const FORM_ITEM_SELECTOR = ".ant-form-item, .el-form-item, .arco-form-item, .semi-form-field, [class*='form-item'], [class*='formItem'], [class*='form-field'], [class*='formField'], [class*='field-wrap'], [class*='form-row'], [class*='formRow']";
-  const FORM_LABEL_SELECTOR = "[class*='label'], label, legend, dt, th";
+  const FORM_ITEM_SELECTOR = `${controlCatalog.selector('formItem')}, .ant-form-item, .arco-form-item, .semi-form-field, [class*='form-item'], [class*='formItem'], [class*='form-field'], [class*='formField'], [class*='field-wrap'], [class*='form-row'], [class*='formRow']`;
+  const FORM_LABEL_SELECTOR = `${controlCatalog.selector('label')}, [class*='label'], label, legend, dt, th`;
 
   function formItemLabel(element, ownText = "") {
     const own = sanitizeLabelText(ownText);
+    const udItem=controlCatalog.fieldRoot(element);
+    if(udItem){
+      const labels=Array.from(udItem.querySelectorAll('[class*="ud-formily-item-label"]'))
+        .filter(n=>!n.querySelector('input,textarea,select')&&!n.contains(element)&&!element.contains(n))
+        .filter((n,i,all)=>!all.some(other=>other!==n&&other.contains(n)))
+        .map(n=>stableLabelText(n).replace(/[*＊：:\s]+$/,''))
+        .filter(text=>text&&text.length<=20&&!COMBO_PLACEHOLDER.test(text)&&!isFormatPlaceholder(text));
+      if(new Set(labels).size===1){
+        const text=labels[0];
+        const choice=element.closest('.ud__select')||element.matches('.ud__select')&&element;
+        const phones=Array.from(udItem.querySelectorAll('input')).filter(n=>!n.closest('.ud__select')&&n.type!=='hidden');
+        if(choice&&phones.length===1&&/手机|电话/.test(text))return '手机区号';
+        return text;
+      }
+      return '';
+    }
+    const visited = new Set();
 
-    for (let node = element, depth = 0; node && depth < 5; depth += 1, node = node.parentElement) {
+    for (let node = element, depth = 0; node && depth < 32; depth += 1, node = node.parentElement) {
       const item = node.closest(FORM_ITEM_SELECTOR);
-      if (!item) {
+      if (!item || visited.has(item)) {
         continue;
       }
+      visited.add(item);
 
       for (const candidate of Array.from(item.querySelectorAll(FORM_LABEL_SELECTOR))) {
         // 标签里套着输入框（<label>性别<input></label>）或者套着选中值的显示区，
         // 取出来的文本会带上值，都不能当字段名。
         if (candidate.contains(element) || element.contains(candidate)) continue;
+        if (candidate.matches('[class*="label-help"],[class*="item-help"],[role="tooltip"]')) continue;
         if (candidate.querySelector("input, textarea, select")) continue;
         if (candidate.querySelector(COMBO_DISPLAY_SELECTOR)) continue;
         // 标签必须排在控件前面：一行里并排两个字段时，
@@ -2610,7 +3274,7 @@
   // 挂在页面上的浮层（下拉面板、日历面板、弹窗、气泡、抽屉）不是标签来源：
   // 它们的文本是一整串选项。页头搜索框就因为前一个兄弟是下拉面板，
   // 被标成了「XX大学 四川大学 电子科技大学」。
-  const PORTAL_SELECTOR = "[class*='dropdown'], [class*='picker-container'], [class*='calendar'], [class*='modal'], [class*='dialog'], [class*='popover'], [class*='tooltip'], [class*='drawer'], [class*='overlay'], [role='listbox'], [role='dialog']";
+  const PORTAL_SELECTOR = `${CONTROL_POPUP_SELECTOR}, [class*='dropdown'], [class*='picker-container'], [class*='calendar'], [class*='modal'], [class*='dialog'], [class*='popover'], [class*='tooltip'], [class*='drawer'], [class*='overlay'], [role='listbox'], [role='dialog']`;
 
   function isPortalNode(node) {
     if (!node || !node.matches) {
@@ -2619,26 +3283,58 @@
     return node.matches(PORTAL_SELECTOR) || Boolean(node.querySelector?.(PORTAL_SELECTOR));
   }
 
+  function stableLabelText(label) {
+    const copy = label?.cloneNode(true);
+    copy?.querySelectorAll("input, textarea, select, [role='combobox'], [role='listbox']").forEach(node => node.remove());
+    return sanitizeLabelText(copy?.textContent);
+  }
+
+  function structuralFieldLabel(element) {
+    const ownPicker = element.closest("[class*='picker'], [class*='calendar'], [class*='date']");
+    for (let node = element, depth = 0; node?.parentElement && depth < 32; node = node.parentElement, depth++) {
+      const scope = node.parentElement;
+      if (scope === document.body || scope === document.documentElement) break;
+      // Stop at the first scope shared with a different field. Never borrow a sibling's label.
+      const competitors = Array.from(scope.querySelectorAll("input, textarea, select, [role='combobox']"))
+        .filter(other => isVisible(other) && other !== element && !other.contains(element) && !element.contains(other))
+        .filter(other => other.type !== 'checkbox' && other.type !== 'radio')
+        .filter(other => !ownPicker || !ownPicker.contains(other));
+      if (competitors.length) break;
+      const labels = [];
+      for (let candidate = node.previousElementSibling; candidate; candidate = candidate.previousElementSibling) {
+        if (!isVisible(candidate) || isPortalNode(candidate)
+          || candidate.matches('[role="tooltip"],[class*="help"],[class*="error"],[class*="hint"]')
+          || candidate.querySelector("input, textarea, select, button, [role='combobox']")) continue;
+        const text = stableLabelText(candidate).replace(/[*＊：:\s]+$/, '');
+        if (text && text.length <= 20 && !COMBO_PLACEHOLDER.test(text) && !isFormatPlaceholder(text)) labels.push(text);
+      }
+      if (labels.length) return labels.length === 1 ? labels[0] : '';
+    }
+    return '';
+  }
+
   function getFieldLabel(element) {
+    if (element.type === 'checkbox') return getCheckboxLabel(element);
     const cleanedElementLabel = sanitizeLabelText(element.getAttribute("data-label"));
     if (cleanedElementLabel) return cleanedElementLabel;
 
     // 1. 标准 label 关联
+    const controlShell=label=>label&&/\bsd-(?:Input|Select)-container(?:[-_\s]|$)|\bud__input-input-wrap\b/.test(String(label.className||''));
     if (element.labels?.length) {
-      const labelText = sanitizeLabelText(Array.from(element.labels).map((label) => label.textContent?.trim() || "").join(" / "));
+      const labelText = sanitizeLabelText(Array.from(element.labels).filter(label=>!controlShell(label)).map((label) => stableLabelText(label)).join(" / "));
       if (labelText) return labelText;
     }
 
     // 2. label[for] 关联
     if (element.id) {
       const linked = document.querySelector(`label[for="${CSS.escape(element.id)}"]`);
-      const linkedText = sanitizeLabelText(linked?.textContent);
+      const linkedText = controlShell(linked)?'':stableLabelText(linked);
       if (linkedText) return linkedText;
     }
 
     // 3. 包裹在 label 里
     const wrappingLabel = element.closest("label");
-    const wrappingText = sanitizeLabelText(wrappingLabel?.textContent);
+    const wrappingText = controlShell(wrappingLabel)?'':stableLabelText(wrappingLabel);
     if (wrappingText) return wrappingText;
 
     // 4. aria-labelledby
@@ -2652,6 +3348,14 @@
     // 显示的常常是控件已经选中的值，先走那一步就会把值当成字段名。
     const itemLabel = formItemLabel(element, element instanceof HTMLInputElement ? element.value : "");
     if (itemLabel) return itemLabel;
+    const structureLabel = structuralFieldLabel(element);
+    if (structureLabel) return structureLabel;
+
+    // Formily field boundaries are explicit. A missing local label must not
+    // borrow 姓名/学校名称 from an earlier field in the same resume section.
+    if (element.closest('.ud-formily-item,[class*="ud-formily-item-control"]')) {
+      return element.getAttribute('aria-label')?.trim() || element.getAttribute('placeholder')?.trim() || '';
+    }
 
     // 5. 同一行的前一个兄弟元素文本（td/th/span/div/p）
     let sibling = element.previousElementSibling;
@@ -2706,6 +3410,20 @@
 
     // 8. placeholder 兜底
     return element.getAttribute("placeholder")?.trim() || "";
+  }
+
+  function getCheckboxLabel(element) {
+    const explicit = element.getAttribute('data-label') || element.getAttribute('aria-label');
+    if (explicit) return sanitizeLabelText(explicit);
+    // Read the checkbox's own caption (e.g. 至今), never its outer 结束时间 form label.
+    const wrapper = element.closest('.phoenix-checkbox,.ant-checkbox-wrapper,.atsx-checkbox-wrapper,.el-checkbox,.ivu-checkbox-wrapper,[role="checkbox"]');
+    if (wrapper && wrapper.querySelectorAll('input').length === 1) {
+      const text = stableLabelText(wrapper);
+      if (text && text.length <= 30 && !isFormatPlaceholder(text)) return text;
+    }
+    if (element.labels?.length) return Array.from(element.labels).map(stableLabelText).filter(Boolean).join(' / ');
+    const labelledBy = element.getAttribute('aria-labelledby');
+    return labelledBy ? sanitizeLabelText(labelledBy.split(/\s+/).map(id=>document.getElementById(id)?.textContent||'').join(' ')) : '';
   }
 
   function bindFocusTracking() {
@@ -2775,92 +3493,36 @@
 
   // 自定义下拉：点开 → 等新渲染出来的选项 → 匹配 → 点那一项。
   // 只在 AI 已经给出值的字段上执行，只点触发器和选项本身；对不上就收起并记下原因。
+  function browserInputEnabled(){return Boolean(shadowRoot?.querySelector('#resume-pro-browser-input')?.checked);}
+  async function browserAction(node,action){
+    if(!node?.isConnected){const error=new Error('操作目标已被替换，未点击');error.code='input_target_missing';throw error;}
+    const token=crypto.randomUUID();node.setAttribute('data-applyfill-input',token);
+    try{const result=await chrome.runtime.sendMessage({type:'BROWSER_INPUT',action:{...action,token}});if(!result?.ok){const error=new Error(result?.error||'浏览器操作失败');error.code=safeInputErrorCode(result?.errorCode)||'input_transport';throw error;}return true;}
+    finally{if(node.getAttribute('data-applyfill-input')===token)node.removeAttribute('data-applyfill-input');}
+  }
+  function browserInput(node,text,enter=false){return browserAction(node,{kind:text===undefined?'click':'fill',text,enter});}
+  async function browserEscape(node){
+    // Some triggers are plain divs with no input or tabindex. Temporarily make
+    // this exact owned trigger focusable so Escape can reach its popup handler.
+    const temporary=node?.isConnected&&!node.matches('input,textarea,select,[tabindex]')&&!node.querySelector('input:not([type="hidden"]):not([disabled]),[tabindex]');
+    if(temporary)node.setAttribute('tabindex','-1');
+    try{return await browserAction(node,{kind:'key',key:'Escape'});}
+    finally{if(temporary&&node.getAttribute('tabindex')==='-1')node.removeAttribute('tabindex');}
+  }
+  async function calendarClick(node){if(browserInputEnabled())return browserInput(node);clickComboOption(node);}
+  const atsxDateAgent=self.ResumeProAtsxDateAgent.create({click:calendarClick,visible:isVisible,read:readBackValue});
+  const udDateAgent=self.ResumeProUdDateAgent.create({click:calendarClick,visible:isVisible,
+    escape:node=>browserInputEnabled()?browserEscape(node):node.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true})),
+    readPeer:readBackValue,refresh:entry=>entry.meta?refreshFieldEntry(entry.meta,entry):null});
+
   async function fillCombobox(entry, value) {
-    let options = await openComboboxOptions(entry);
-
-    // 要的选项不在已渲染的那几项里：先把列表滚一遍。虚拟滚动只渲染可见项，
-    // 飞书「学历」里就没有「硕士」。滚动找不到再打字搜索 —— 搜索会把当前列表
-    // 整个换掉，顺序反了连原本能点的项都丢了。
-    if (options.length && !matchesAnyOption(options, value)) {
-      options = await revealOptionInList(entry, value, options);
-    }
-
-    // 搜索框打开是「暂无数据」、依赖型下拉的选项异步加载：先打字/重开再等一轮。
-    if (!options.length || !matchesAnyOption(options, value)) {
-      const retried = await searchComboFor(entry, value);
-      if (retried?.length) {
-        options = retried;
-      }
-    }
-
-    if (!options.length) {
-      entry.fillNote = "点开没有读到选项";
-      // 点开是空的、要先输入文字才出候选 —— 这是远程搜索型组合框（学校名称这类），
-      // 和普通下拉是两种控件，驱动方式要分开记。
-      entry.remoteOptions = true;
-      closeCombobox(entry);
-      return false;
-    }
-
-    const texts = options.map((option) => sanitizeLabelText(option.textContent) || option.getAttribute("aria-label") || "");
-    // 选项原文即使这次没匹配上也要留下：它是平台定义的候选项，跨公司稳定。
-    entry.observedOptions = texts.filter(Boolean).slice(0, 60);
-    let index = self.ResumeProAIHelpers.findSelectOptionIndex(texts, value);
-
-    // 树形下拉的节点标题常常只是值的最后一级（值「四川省资阳市」、节点「资阳市」）。
-    if (index < 0) {
-      const api = self.ResumeProFormStructure;
-      const wanted = api.normalizeLabel(value);
-      index = texts.findIndex((text) => {
-        const norm = api.normalizeLabel(text);
-        return norm.length >= 2 && (wanted.endsWith(norm) || norm.endsWith(wanted));
-      });
-    }
-
-    if (index < 0) {
-      entry.fillNote = `选项里没有「${String(value).trim().slice(0, 12)}」`;
-      closeCombobox(entry);
-      return false;
-    }
-
-    // 树形多级（籍贯要省/市两级）：值带斜杠时逐级展开点击。
-    if (/[\/／]/.test(String(value)) && (await clickTreePath(entry, value))) {
-      entry.fillNote = "";
-      return true;
-    }
-
-    const target = freshOptionFor(entry, texts[index]) || options[index];
-    clickComboOption(target);
-    await new Promise((resolve) => setTimeout(resolve, 150));
-
-    // 不少组件库把选中逻辑挂在 mousedown 或选项内部的元素上，单击 li 不一定生效。
-    if (!comboTook(entry, texts[index])) {
-      const again = freshOptionFor(entry, texts[index]);
-      const inner = deepestElement(again || target);
-      if (inner && inner !== (again || target)) {
-        clickComboOption(inner);
-        await new Promise((resolve) => setTimeout(resolve, 150));
-      }
-    }
-
-    if (!comboTook(entry, texts[index])) {
-      entry.fillNote = "点了选项但页面没选中";
-      closeCombobox(entry);
-      return false;
-    }
-
-    entry.fillNote = "";
-    return true;
+    return comboAgent.fill(entry,value);
   }
 
   // React 可能在拿到引用之后重渲染下拉，点脱离文档的节点等于没点，所以点之前按文本重查。
-  function freshOptionFor(entry, wantedText) {
-    const dropdown = comboDropdownFor(entry);
-    const pool = dropdown
-      ? Array.from(dropdown.querySelectorAll(COMBO_OPTION_SELECTOR))
-      : visibleComboOptions();
-    const api = self.ResumeProFormStructure;
-    return pool.find((option) => api.normalizeLabel(option.textContent) === api.normalizeLabel(wantedText)) || null;
+  function freshOptionFor(entry,wantedText) {
+    const found=comboAgent.options(entry).filter(option=>self.ResumeProFormStructure.normalizeLabel(option.textContent)===self.ResumeProFormStructure.normalizeLabel(wantedText));
+    return found.length===1?found[0]:null;
   }
 
   function matchesAnyOption(options, value) {
@@ -2869,13 +3531,7 @@
     return options.some((option) => api.normalizeLabel(option.textContent) === wanted);
   }
 
-  function freshOptionsFor(entry) {
-    const dropdown = comboDropdownFor(entry);
-    const pool = dropdown
-      ? Array.from(dropdown.querySelectorAll(COMBO_OPTION_SELECTOR))
-      : visibleComboOptions();
-    return pool.filter((option) => isVisible(option));
-  }
+  function freshOptionsFor(entry) { return comboAgent.options(entry); }
 
   // 远程搜索型（打开是「暂无数据」）和依赖型（先选语言才出等级）都靠这个：
   // 往搜索框打关键词，等候选渲染出来。
@@ -2957,46 +3613,9 @@
     return api.normalizeLabel(shown) === api.normalizeLabel(expectedText);
   }
 
-  async function openComboboxOptions(entry) {
-    // 下拉面板挂在 body 上，不先把上一个还开着的关掉，选项就会串到别的字段上。
-    document.body.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
-    await new Promise((resolve) => setTimeout(resolve, 60));
-
-    const before = new Set(visibleComboOptions());
-    entry.trigger.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
-    entry.trigger.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
-    entry.trigger.click();
-
-    const scoped = comboDropdownFor(entry);
-    for (let attempt = 0; attempt < 8; attempt += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 60));
-      if (scoped) {
-        const options = visibleComboOptions().filter((option) => scoped.contains(option));
-        if (options.length) {
-          return options;
-        }
-        continue;
-      }
-      const added = visibleComboOptions().filter((option) => !before.has(option));
-      if (added.length) {
-        return added;
-      }
-    }
-
-    return [];
-  }
-
-  // Ant 3.x 把面板 id 写在触发器的 aria-controls 上，这是唯一可靠的归属关系。
-  function comboDropdownFor(entry) {
-    const id = entry.trigger?.getAttribute?.("aria-controls") || entry.root?.getAttribute?.("aria-controls");
-    return id ? document.getElementById(id) : null;
-  }
-
-  function closeCombobox(entry) {
-    [entry.trigger, document].forEach((target) => {
-      target.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true }));
-    });
-  }
+  async function openComboboxOptions(entry) { return comboAgent.open(entry); }
+  function comboDropdownFor(entry) { return comboAgent.panel(entry); }
+  function closeCombobox(entry) { return comboAgent.close(entry); }
 
   // 日期类控件要按「人敲键盘」的顺序来：先真的聚焦，再写值、回车提交、失焦。
   // 成对的起止时间控件把状态存在自己内部，并且记着「当前编辑的是哪一行」——
@@ -3017,6 +3636,7 @@
     }
 
     const probe = `${element.getAttribute("placeholder") || ""} ${String(element.value || "")}`.trim();
+    if (/^yyyy$/i.test(probe)) return "year";
     if (DATE_DAY_HINT.test(probe)) {
       return "day";
     }
@@ -3026,113 +3646,122 @@
     return "auto";
   }
 
-  // 面板默认停在今天这个月，目标在别的年月时格子不在视图里。按头部按钮逐步翻过去。
-  async function navigateCalendarTo(panel, wanted) {
-    const [yy, mm] = wanted.split("-").map(Number);
-    const yearBtn = panel.querySelector(skin(".ant-calendar-year-select"));
-    const monthBtn = panel.querySelector(skin(".ant-calendar-month-select"));
-    if (!yearBtn || !monthBtn) {
-      return;
-    }
-
-    for (let step = 0; step < 40; step += 1) {
-      const curYear = Number((yearBtn.textContent || "").replace(/\D/g, ""));
-      const curMonth = Number((monthBtn.textContent || "").replace(/\D/g, ""));
-      if (!curYear || !curMonth) {
-        return;
+  // Bind to the current input: explicit ARIA ownership or a unique newly opened portal.
+  async function writeCalendarPanelDate(element, value, precision, entry) {
+    const trace=(action,detail)=>{if(entry){entry.interactions??=[];entry.interactions.push({action,detail});}};
+    const selector=`${skin(".ant-calendar-picker-container", ".ant-calendar")}, ${controlCatalog.selector('datePanel')}`;
+    const panels=()=>{
+      const all=Array.from(document.querySelectorAll(selector)).filter(n=>isVisible(n)&&!n.closest('[aria-hidden="true"]')&&!Array.from(n.classList).some(c=>/calendar-hidden$/.test(c)));
+      return all.filter(n=>!all.some(other=>other!==n&&other.contains(n)));
+    };
+    const before=new Set(panels());let owned=null;
+    const current=()=>{
+      if(!element.isConnected)return null;
+      const ids=new Set([element,element.parentElement,entry?.pickerRoot].filter(Boolean).flatMap(n=>`${n.getAttribute('aria-controls')||''} ${n.getAttribute('aria-owns')||''}`.split(/\s+/)).filter(Boolean));
+      const linked=[...ids].map(id=>document.getElementById(id)).filter(n=>n&&isVisible(n));
+      if(linked.length===1)return linked[0];
+      if(linked.length>1)return null;
+      if(owned?.isConnected&&isVisible(owned))return owned;
+      const appeared=panels().filter(n=>!before.has(n));
+      if(appeared.length===1){owned=appeared[0];return owned;}
+      return null;
+    };
+    const pause=ms=>new Promise(r=>setTimeout(r,ms));
+    const waitFor=async predicate=>{for(let i=0;i<20;i++){const result=predicate();if(result)return result;await pause(80);}return null;};
+    const visibleOne=(panel,css)=>Array.from(panel?.querySelectorAll(css)||[]).find(isVisible);
+    const helpers=self.ResumeProAIHelpers;
+    let target=helpers.normalizeDateForPrecision(value,precision),wanted=target.value;
+    const fail=reason=>{trace('日历停止',reason);if(entry)entry.fillNote=reason;return {ok:false,value:wanted,padded:target.padded,reason};};
+    const close=()=>{if(element.isConnected){element.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',code:'Escape',bubbles:true}));element.blur();}};
+    try{
+      if(!element.isConnected)return fail('日期输入框已被替换');
+      const trigger=entry?.hiddenInput?entry.pickerRoot:element;
+      if(!trigger||!isVisible(trigger))return fail('未找到可见的日期点击目标');
+      if(browserInputEnabled())await browserInput(trigger);else {trigger.focus();trigger.dispatchEvent(new MouseEvent('mousedown',{bubbles:true,cancelable:true}));trigger.click();}
+      trace('打开日历','等待当前输入框关联的面板');
+      let panel=await waitFor(current);
+      if(!panel)return fail('未出现唯一关联的日历面板');
+      const adapted=await self.ResumeProCalendarAgent.create({visible:isVisible,click:calendarClick}).fill({
+        entry:entry||{},value,precision,panel:current,read:()=>entry?readBackValue(entry):element.value,close,trace,
+        readPeer:entry?.rangePeer?()=>readBackValue(entry.rangePeer):undefined
+      });
+      if(adapted)return adapted;
+      if(precision==='year'&&panel.querySelector('.atsx-date-picker-panel-body-year'))return await atsxDateAgent.fillYear(entry||{element},element,current,value);
+      if(precision==='year') {
+        const yy=String(value).match(/^(\d{4})(?:$|[-/年])/)?.[1];
+        if(!yy)return fail('目标年份不明确');
+        wanted=yy;
+        const sameYear=()=>String(entry?readBackValue(entry):element.value).trim()===yy;
+        for(let step=0;step<30&&!sameYear();step++) {
+          panel=current();if(!panel)return fail('年份面板关闭，目标值未保留');
+          const cells=Array.from(panel.querySelectorAll(skin('.ant-calendar-year-panel-cell'))).filter(n=>isVisible(n)&&!n.matches('[class*="disabled"],[aria-disabled="true"]'));
+          if(!cells.length){const select=visibleOne(panel,skin('.ant-calendar-year-select'));if(!select)return fail('未找到年份选择面板');await calendarClick(select);await pause(180);continue;}
+          const candidates=cells.filter(n=>n.textContent.trim()===yy);
+          if(candidates.length===1){await calendarClick(candidates[0]);await pause(180);break;}
+          if(candidates.length>1)return fail('年份候选不唯一');
+          const years=cells.map(n=>Number(n.textContent.trim())).filter(Number.isFinite);
+          const direction=Number(yy)<Math.min(...years)?'prev':'next';
+          const next=visibleOne(panel,skin(`.ant-calendar-year-panel-${direction}-decade-btn`));
+          if(!next)return fail('缺少年份翻页按钮');await calendarClick(next);await pause(180);
+        }
+        close();await pause(180);
+        return sameYear()?{ok:true,value:yy,padded:false}:fail('年份选择后未保留目标值');
       }
-      if (curYear === yy && curMonth === mm) {
-        return;
+      const monthMode=Boolean(visibleOne(panel,skin('.ant-calendar-month-panel')));
+      if(monthMode)target=helpers.normalizeDateForPrecision(value,'month');
+      else if(precision==='auto')target=helpers.normalizeDateForPrecision(value,'day');
+      wanted=target.value;
+      const parts=/^(\d{4})-(\d{2})(?:-(\d{2}))?$/.exec(wanted);
+      if(!parts)return fail('目标日期格式不明确');
+      const yy=Number(parts[1]),mm=Number(parts[2]),dd=Number(parts[3]);
+      trace('识别日历',monthMode?'月份面板':'日期面板');
+      const same=()=>{const actual=entry?readBackValue(entry):String(element.value||'');return element.isConnected&&actual.split('-').length>=wanted.split('-').length&&sameDateAtPrecision(actual,wanted);};
+      const input=visibleOne(panel,`${skin('.ant-calendar-input','.ant-calendar-month-panel-input')}, .el-date-editor input`);
+      if(input&&!input.readOnly&&!input.disabled){
+        if(browserInputEnabled())await browserInput(input,wanted,true);
+        else {Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,wanted);
+        input.dispatchEvent(new Event('input',{bubbles:true}));input.dispatchEvent(new Event('change',{bubbles:true}));
+        input.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',code:'Enter',keyCode:13,bubbles:true}));
+        }
+        trace('日历输入','已尝试面板输入，等待外部字段确认');await pause(180);
       }
-
-      let btn = null;
-      if (curYear < yy) {
-        btn = panel.querySelector(skin(".ant-calendar-next-year-btn"));
-      } else if (curYear > yy) {
-        btn = panel.querySelector(skin(".ant-calendar-prev-year-btn"));
-      } else if (curMonth < mm) {
-        btn = panel.querySelector(skin(".ant-calendar-next-month-btn"));
-      } else {
-        btn = panel.querySelector(skin(".ant-calendar-prev-month-btn"));
+      // Re-read the panel and header after each navigation; frameworks replace these nodes.
+      for(let step=0;!same()&&step<60;step++){
+        panel=current();if(!panel)return fail('日历关闭或失去关联，目标值未保留');
+        const year=visibleOne(panel,monthMode?skin('.ant-calendar-month-panel-year-select'):skin('.ant-calendar-year-select'));
+        const month=monthMode?null:visibleOne(panel,skin('.ant-calendar-month-select'));
+        const shownYear=Number((year?.textContent||'').match(/\d{4}/)?.[0]);
+        const shownMonth=monthMode?mm:Number((month?.textContent||'').match(/\d{1,2}/)?.[0]);
+        if(!shownYear||!shownMonth)return fail('无法读取当前日历年月');
+        if(shownYear===yy&&shownMonth===mm){
+          const cells=Array.from(panel.querySelectorAll(monthMode?skin('.ant-calendar-month-panel-cell'):skin('.ant-calendar-cell'))).filter(n=>isVisible(n)&&!n.matches('[aria-disabled="true"],[class*="disabled"]'));
+          const names=['一','二','三','四','五','六','七','八','九','十','十一','十二'];
+          const candidates=cells.filter(n=>{
+            const title=n.getAttribute('title')||'',text=n.textContent.trim();
+            if(monthMode)return [wanted,`${yy}年${mm}月`,`${mm}月`,`${names[mm-1]}月`].includes(title)||text===`${mm}月`||text===`${names[mm-1]}月`;
+            return [wanted,`${yy}年${mm}月${dd}日`,`${yy}-${mm}-${dd}`].includes(title);
+          });
+          if(candidates.length!==1)return fail(`目标日期格无法唯一确定（${candidates.length} 个候选）`);
+          await calendarClick(candidates[0]);trace('选择日期格',monthMode?'选择目标月份':'选择目标日期');
+          await waitFor(same);break;
+        }
+        const direction=shownYear<yy?'next':shownYear>yy?'prev':shownMonth<mm?'next':'prev';
+        const unit=shownYear!==yy?'year':'month';
+        const cls=monthMode?`.ant-calendar-month-panel-${direction}-year-btn`:`.ant-calendar-${direction}-${unit}-btn`;
+        const button=visibleOne(panel,skin(cls));
+        if(!button||button.matches('[disabled],[aria-disabled="true"]'))return fail('缺少可用的日历翻页按钮');
+        await calendarClick(button);trace('日历翻页',unit==='year'?'切换年份':'切换月份');
+        const changed=await waitFor(()=>{
+          const p=current(),y=visibleOne(p,monthMode?skin('.ant-calendar-month-panel-year-select'):skin('.ant-calendar-year-select'));
+          const m=monthMode?null:visibleOne(p,skin('.ant-calendar-month-select'));
+          return y&&(Number((y.textContent||'').match(/\d{4}/)?.[0])!==shownYear||(!monthMode&&Number((m?.textContent||'').match(/\d{1,2}/)?.[0])!==shownMonth));
+        });
+        if(!changed)return fail('点击翻页后日历年月未改变');
       }
-      if (!btn) {
-        return;
-      }
-      clickComboOption(btn);
-      await new Promise((resolve) => setTimeout(resolve, 60));
-    }
-  }
-
-  function visibleCalendarPanel() {
-    return Array.from(document.querySelectorAll(`${skin(".ant-calendar", ".ant-calendar-picker-container")}, .el-picker-panel`))
-      .find((panel) => isVisible(panel) && !Array.from(panel.classList).some((name) => /calendar-hidden$/.test(name)));
-  }
-
-  async function writeCalendarPanelDate(element, value, precision) {
-    const helpers = self.ResumeProAIHelpers;
-    const targeted = helpers?.normalizeDateForPrecision
-      ? helpers.normalizeDateForPrecision(value, precision)
-      : { value: String(value ?? "").trim(), padded: false };
-    const normalized = targeted.value;
-
-    element.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
-    element.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-
-    let panel = null;
-    for (let attempt = 0; attempt < 10; attempt += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 60));
-      panel = visibleCalendarPanel();
-      if (panel) {
-        break;
-      }
-    }
-    if (!panel) {
-      return { ok: false, padded: targeted.padded, value: normalized };
-    }
-
-    // Ant 的月份选择器面板是月历，往它的输入框打带日的日期是无效格式。
-    // 面板类型比占位符可靠：是月历就按月精度重新归一。
-    const isMonthPanel = Boolean(panel.querySelector(skin(".ant-calendar-month-panel")));
-    const effective = isMonthPanel && precision !== "month"
-      ? (helpers?.normalizeDateForPrecision ? helpers.normalizeDateForPrecision(value, "month") : targeted)
-      : targeted;
-    const wanted = effective.value;
-
-    // 面板里可能同时存在日期面板和月份面板的输入框，按文档顺序会拿到隐藏的那个。
-    const panelInput = Array.from(
-      panel.querySelectorAll(`${skin(".ant-calendar-input", ".ant-calendar-month-panel-input")}, .el-date-editor input`)
-    ).find((input) => isVisible(input)) || null;
-    if (panelInput) {
-      const descriptor = Object.getOwnPropertyDescriptor(panelInput.constructor.prototype, "value");
-      if (descriptor?.set) {
-        descriptor.set.call(panelInput, wanted);
-      } else {
-        panelInput.value = wanted;
-      }
-      panelInput.dispatchEvent(new Event("input", { bubbles: true }));
-      panelInput.dispatchEvent(new Event("change", { bubbles: true }));
-      panelInput.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", keyCode: 13, bubbles: true }));
-      await new Promise((resolve) => setTimeout(resolve, 120));
-    }
-
-    if (element.value !== wanted) {
-      await navigateCalendarTo(panel, wanted);
-      // 格子的 title 是中文格式（2026年9月1日，月日不补零），ISO 写法永远点不中。
-      const [yy, mm, dd] = wanted.split("-");
-      const cnDay = `${yy}年${Number(mm)}月${Number(dd)}日`;
-      const cnMonth = `${yy}年${Number(mm)}月`;
-      const cell = panel.querySelector(`[title="${wanted}"]`)
-        || panel.querySelector(`[title="${cnDay}"]`)
-        || (isMonthPanel ? panel.querySelector(`${skin(`.ant-calendar-month-panel-cell[title="${cnMonth}"]`)}`) : null)
-        || panel.querySelector(skin(`.ant-calendar-cell[title="${cnDay}"]`));
-      if (cell) {
-        clickComboOption(cell);
-        await new Promise((resolve) => setTimeout(resolve, 120));
-      }
-    }
-
-    const took = element.value === wanted || sameDateAtPrecision(element.value, wanted);
-    return { ok: took, padded: effective.padded || targeted.padded, value: wanted };
+      close();await pause(180);
+      if(!same())return fail('日历操作后输入框未保留目标日期');
+      trace('日历核对','关闭面板后目标值仍保留');return {ok:true,padded:target.padded,value:wanted};
+    }finally{close();}
   }
 
   // 站点显示月精度（2027-06）时拿 2027-06-01 去比会误判成没写进去。
@@ -3183,7 +3812,7 @@
 
     if (element && typeof element === "object" && element.kind === "radio") {
       const radioOptions = element.elements.map((radio) => ({ value: radio.value, text: getRadioOptionLabel(radio), disabled: radio.disabled }));
-      const radioIndex = self.ResumeProAIHelpers?.findSelectOptionIndex?.(radioOptions, value) ?? -1;
+      const radioIndex = self.ResumeProAIHelpers?.findSelectOptionIndex?.(radioOptions, value, element.meta) ?? -1;
       const matchedRadio = radioIndex >= 0 ? element.elements[radioIndex] : null;
 
       if (!matchedRadio) {
@@ -3197,17 +3826,45 @@
       return true;
     }
 
+    const calendarEntry = element?.kind === "element" ? element : null;
     const pickerType = (element && typeof element === "object" && element.kind === "element") ? element.pickerType : null;
     const pickerInputType = (element && typeof element === "object" && element.kind === "element") ? (element.pickerInputType || "date") : "date";
     const dateLike = (element && typeof element === "object" && element.kind === "element") ? Boolean(element.dateLike) : false;
+
+    if(calendarEntry&&!dateLike&&!pickerType&&calendarEntry.element instanceof HTMLInputElement){
+      const root=structuralChoiceRoot(calendarEntry.element);
+      if(root)return fillCombobox(promoteStructuralChoice(calendarEntry,root),value);
+    }
 
     if (element && typeof element === "object" && element.kind === "element") {
       element = element.element;
     }
 
+    if (element instanceof HTMLInputElement && element.type === 'checkbox') {
+      const wanted = self.ResumeProAIHelpers.checkboxState(value, calendarEntry?.meta?.label || getCheckboxLabel(element));
+      if (wanted === null) { if(calendarEntry)calendarEntry.fillNote='复选框不接受日期或文本';return false; }
+      if (element.checked === wanted) return true;
+      return (async()=>{
+        try {
+          if(browserInputEnabled())await browserInput(element);else element.click();
+          await new Promise(resolve=>window.setTimeout(resolve,180));
+          if(!element.isConnected&&calendarEntry?.meta){
+            const fresh=refreshFieldEntry(calendarEntry.meta,calendarEntry);
+            if(fresh?.element?.type==='checkbox')calendarEntry.element=element=fresh.element;
+          }
+          return element.isConnected && element.type==='checkbox' && element.checked === wanted;
+        } catch(error) {
+          if(calendarEntry)calendarEntry.fillNote=error.message;return false;
+        }
+      })();
+    }
+
+    if(calendarEntry?.atsxPeriod)return atsxDateAgent.fillPeriod(calendarEntry,value);
+    if(calendarEntry&&udDateAgent.recognizes(calendarEntry))return udDateAgent.fill(calendarEntry,value,datePrecisionOf(element));
+
     // Ant 的日期框是 readonly 的，直接写值不认；值只能从日历面板进。
-    if (element instanceof HTMLInputElement && element.closest(`${skin(".ant-calendar-picker")}, .el-date-editor, [class*='date-picker']`)) {
-      return writeCalendarPanelDate(element, value, datePrecisionOf(element));
+    if (calendarEntry?.displayDate || (element instanceof HTMLInputElement && !['date','month','datetime-local','time'].includes(element.type) && element.closest(`${skin(".ant-calendar-picker")}, ${controlCatalog.selector('dateRoot')}, [class*='date-picker']`))) {
+      return writeCalendarPanelDate(element, value, calendarEntry?.displayDate ? "month" : datePrecisionOf(element), calendarEntry);
     }
 
     if (element instanceof HTMLInputElement && ["date", "month", "datetime-local", "time"].includes(element.type)) {
@@ -3244,12 +3901,35 @@
       }
       element.dispatchEvent(new Event("input", { bubbles: true }));
       element.dispatchEvent(new Event("change", { bubbles: true }));
+      // Some unlabeled/hash-class autocomplete lists only enter the DOM after typing.
+      // Upgrade from concrete, locally owned list evidence, not from the typed value.
+      if(calendarEntry&&element instanceof HTMLInputElement){
+        const root=structuralChoiceRoot(element);
+        if(root)return fillCombobox(promoteStructuralChoice(calendarEntry,root),value);
+        if(/学校|院校|专业/.test(calendarEntry.meta?.label||getFieldLabel(element))){
+          return (async()=>{
+            for(let attempt=0;attempt<5;attempt++){
+              await new Promise(resolve=>setTimeout(resolve,100));
+              if(!element.isConnected){
+                const next=refreshFieldEntry(calendarEntry.meta,calendarEntry);
+                if(!next)return false;
+                Object.assign(calendarEntry,next);
+                if(next.kind==='combobox')return verifyFilledValue(calendarEntry,value,'combobox')||fillCombobox(calendarEntry,value);
+                element=next.element;
+              }
+              const root=structuralChoiceRoot(element);
+              if(root)return fillCombobox(promoteStructuralChoice(calendarEntry,root),value);
+            }
+            return element.value===String(value);
+          })();
+        }
+      }
       return true;
     }
 
     if (element instanceof HTMLSelectElement) {
       const selectOptions = Array.from(element.options).map((option) => ({ value: option.value, text: option.text, disabled: option.disabled }));
-      const optionIndex = self.ResumeProAIHelpers?.findSelectOptionIndex?.(selectOptions, value) ?? -1;
+      const optionIndex = self.ResumeProAIHelpers?.findSelectOptionIndex?.(selectOptions, value, calendarEntry?.meta) ?? -1;
       const matchedOption = optionIndex >= 0 ? element.options[optionIndex] : null;
 
       if (!matchedOption) {
@@ -3487,7 +4167,6 @@
   // 挑出来的字段只新增；模板或「我的信息」里已经有名字、或者语义上等价的，只在
   // 「已存在」里报告，不改动用户已经存好的值。
 
-  const COLLECT_VALUE_LENGTH = 40;
 
   function readFieldValue(entry, field) {
     if (!entry) {
@@ -3507,6 +4186,7 @@
     if (!element?.isConnected) {
       return "";
     }
+    if(udDateAgent.recognizes(entry))return udDateAgent.read(entry);
 
     if (element.type === "checkbox") {
       return element.checked ? sanitizeLabelText(getFieldLabel(element) || element.value) : "";
@@ -3544,7 +4224,14 @@
       }
 
       const entry = fieldMap.get(field.fieldId);
-      const value = readFieldValue(entry, field);
+      let value = readFieldValue(entry, field);
+      if(field.datePart){
+        if(field.dateRangeUnresolved)return filled;
+        const parts=fields.filter(other=>field.rangeId?other.rangeId===field.rangeId&&other.rangeRole===field.rangeRole
+          :field.datePointId&&other.datePointId===field.datePointId);
+        if(parts[0]!==field)return filled;
+        value=rangeEndpointValue(parts,field.rangeRole,part=>readFieldValue(fieldMap.get(part.fieldId),part));
+      }
       if (!value) {
         return filled;
       }
@@ -3558,14 +4245,13 @@
 
       filled.push({
         label,
-        group: findSectionHeading(entry.kind === "radio" ? entry.elements?.[0] : entry.element),
+        group: field.group || "",
         value,
         inputType: field.inputType,
         recordIndex: field.recordIndex,
         recordTotal: field.recordTotal,
         recordSignature: field.recordSignature,
-        // 不带 field.group：那是「最近一个 label」，经常就是上一个字段的字段名，
-        // 混进语义判断会把「血型」看成「姓名」，判成模板已有而丢掉。
+        // Semantic matching uses the field itself; grouping above comes only from section headings.
         semantic: helpers?.inferFieldSemantic?.({ ...field, group: "" }) || "",
         order: index
       });
@@ -3575,259 +4261,82 @@
 
   // 一级分类只能看板块标题。findNearestGroupLabel 是给 AI 当上下文提示用的，
   // 它返回的是最近的 label 文本，当分组名会用字段名建出一个分组来。
-  function findSectionHeading(element) {
-    const scopeSelector = "section, [role='group'], fieldset, form, article, main";
-    let scope = element?.closest?.(scopeSelector);
-    const visited = new Set();
-
-    while (scope && !visited.has(scope)) {
-      visited.add(scope);
-      const heading = sanitizeLabelText(scope.querySelector("h1, h2, h3, h4, legend, caption")?.textContent);
-      if (heading && heading.length <= 20) {
-        return heading;
+  function collectSectionHeadings() {
+    // Page-wide form/main containers can contain every section; their first heading is not this field's heading.
+    // Recruitment pages often render headings as plain styled div/span nodes, without
+    // a title class or heading role. Accept only exact known headings outside controls.
+    const selector='h1,h2,h3,h4,legend,[role="heading"],[class*="title"],[class*="Title"],div,span,p,strong';
+    const candidates=Array.from(document.querySelectorAll(selector)).filter(n=>
+      /^(基本信息|个人信息|求职意向|教育经历|教育背景|教育经验|工作经历|工作经验|实习经历|实习经验|项目经历|项目经验|科研经历|研究经历|语言能力|语言技能|语言能力及证书|证书|自我描述|自我评价|个人评价|获奖经历|荣誉奖励|获奖情况|获奖|奖项|奖励荣誉|荣誉奖项|奖励情况|校园经历|在校职务|校内职务|在校经历|社团经历|社会实践|专业技能|论文发表|论文期刊)$/.test(sanitizeLabelText(n.textContent))
+      &&!n.closest(`#${SIDEBAR_ID},nav,[role="navigation"],[role="tablist"],[class*="navigation"],[class*="Navigation"],[class*="nav-"],[class*="menu"],[class*="Menu"],label,input,textarea,select,button,[role="option"],[role="treeitem"],.field-label,.phoenix-form-item-label-content,${COMBO_ROOT_SELECTOR},${CONTROL_POPUP_SELECTOR}`)
+      &&!n.querySelector(`input,textarea,select,${COMBO_ROOT_SELECTOR}`)
+      &&!n.matches('a,button,[role="tab"]')&&isVisible(n));
+    return candidates.filter(n=>{
+      if(candidates.some(other=>other!==n&&n.contains(other)))return false;
+      // A normal field can itself be called “工作经验”. Moka's single field cards
+      // use hashed apply-field-* classes; the plural apply-fields-* is a section.
+      // A field caption must never rename all fields following it to “工作经历”.
+      if(n.closest(FORM_ITEM_SELECTOR))return false;
+      for(let scope=n.parentElement,depth=0;scope&&scope!==document.body&&depth<8;scope=scope.parentElement,depth++){
+        if(String(scope.className||'').split(/\s+/).some(token=>/^apply-field(?:[-_]|$)/.test(token)))return false;
+        if(scope.querySelector(`h1,h2,h3,h4,[role="heading"]`))break;
       }
-      scope = scope.parentElement?.closest?.(scopeSelector);
+      for(let scope=n.parentElement,depth=0;scope&&scope!==document.body&&depth<8;scope=scope.parentElement,depth++){
+        if(scope.querySelector(`input,textarea,select,${COMBO_ROOT_SELECTOR}`))break;
+        if(new Set(candidates.filter(other=>scope.contains(other)).map(other=>sanitizeLabelText(other.textContent))).size>1)return false;
+      }
+      return true;
+    });
+  }
+  function findSectionHeading(element, headings) {
+    if (!element) return "";
+    const candidates=(headings || collectSectionHeadings()).filter(n=>n.compareDocumentPosition(element)&Node.DOCUMENT_POSITION_FOLLOWING);
+    for(let scope=element.parentElement;scope&&scope!==document.body;scope=scope.parentElement){
+      const local=candidates.filter(n=>scope.contains(n));
+      if(local.length){
+        const heading=sanitizeLabelText(local.at(-1).textContent);
+        const aliases={'教育经验':'教育经历','工作经验':'工作经历','实习经验':'实习经历','项目经验':'项目经历','研究经历':'科研经历',
+          '在校职务':'校园经历','校内职务':'校园经历','在校经历':'校园经历','社团经历':'校园经历','社会实践':'校园经历',
+          '自我描述':'自我评价','个人评价':'自我评价'};
+        return aliases[heading]||heading;
+      }
     }
+    return '';
 
-    return "";
   }
 
-  function collectWritebackCandidates() {
-    const api = self.ResumeProProfile;
-    const helpers = self.ResumeProAIHelpers;
-    const template = getActiveTemplate(state.currentStore);
-
-    if (!api) {
-      return null;
-    }
-    if (!template) {
-      return { error: "请先导入简历模板。" };
-    }
-
-    // 查询用的字段 = 模板 + 「我的信息」，模板在前并且优先，和一键填写同一套口径。
-    const templateFields = flattenTemplateFields(template);
-    const resumeFields = api.mergeResumeFields(templateFields, profileResumeFields());
-
-    return {
-      template,
-      result: api.pickWritebackEntries(readFilledFields(), {
-        knownKeys: api.knownFieldKeys(state.currentStore?.profile, resumeFields),
-        templateFields: resumeFields,
-        templateGroups: template.groups.map((group) => group.name),
-        entityGroupLabels: helpers?.ENTITY_LABEL_BY_GROUP || [],
-        isSemanticMatch: helpers?.isResumeFieldMatch
-          ? (semantic, resumeField, pageField) => helpers.isResumeFieldMatch(semantic, resumeField, pageField)
-          : null,
-        findSource: helpers?.findResumeSource
-          ? (value, fields) => helpers.findResumeSource(value, fields)
-          : null
-      })
-    };
-  }
-
-  const COLLECT_REASON_LABEL = {
-    known: "已经有对应字段",
-    "known-empty": "字段名有了但还没有值",
-    "semantic-known": "已经有等价的字段",
-    "duplicate-in-group": "网页上有同名字段，分不出是哪一段经历",
-    secret: "涉及密码、验证码"
-  };
-
-  function handleCollectFillClick(event) {
+  async function handleCollectFillClick(event) {
     const button = event.currentTarget;
-    if (button.disabled || shadowRoot?.querySelector("#resume-pro-ai-fill")?.disabled) {
-      return;
-    }
-    if (!requireContext()) {
-      return;
-    }
-
-    const collected = collectWritebackCandidates();
-    if (!collected || collected.error) {
-      showStatus(collected?.error || "简历组件没加载出来，刷新页面再试。", "error");
-      return;
-    }
-
-    const { template, result } = collected;
-    state.collectTemplateId = template.id;
-    renderCollectCard(template, result);
-  }
-
-  function renderCollectCard(template, result) {
-    const card = shadowRoot?.querySelector("#resume-pro-collect");
-    const list = shadowRoot?.querySelector("#resume-pro-collect-list");
-    const knownBox = shadowRoot?.querySelector("#resume-pro-collect-known");
-    const knownList = shadowRoot?.querySelector("#resume-pro-collect-known-list");
-    const note = shadowRoot?.querySelector("#resume-pro-collect-note");
-    const applyButton = shadowRoot?.querySelector("#resume-pro-collect-apply");
-    if (!card || !list || !knownBox || !knownList || !note) {
-      return;
-    }
-
-    list.textContent = "";
-    result.entries.forEach((entry) => {
-      list.appendChild(buildCollectRow(entry));
-    });
-
-    knownList.textContent = "";
-    const knownRows = result.skipped.filter((item) => COLLECT_REASON_LABEL[item.reason]);
-    knownRows.forEach((item) => {
-      knownList.appendChild(buildCollectKnownRow(item));
-    });
-    knownBox.hidden = !knownRows.length;
-    knownBox.open = false;
-
-    const emptyOnes = result.skipped.filter((item) => item.reason === "known-empty").length;
-    const knownEmptyNote = emptyOnes
-      ? `其中有 ${emptyOnes} 项模板里已经有字段名但还是空的，去管理面板补值就行，这里不重复加。`
-      : "";
-    note.textContent = result.entries.length
-      ? `模板「${template.name}」里没有这些字段，勾选后要加入的：${result.entries.length} 项。`
-        + (result.truncated ? "本页可采集的字段超过 30 个，先处理这一批，剩下的分批采集。" : "")
-        + knownEmptyNote
-        + "只新增，不会改动模板里已有的值。"
-      : `本页读到的 ${result.skipped.length} 项内容，模板「${template.name}」里都已经有了，没有需要新增的。展开下面可以看到对应关系。`
-        + knownEmptyNote;
-    applyButton.textContent = `加入模板（${result.entries.length}）`;
-    applyButton.disabled = !result.entries.length;
-    card.hidden = false;
-  }
-
-  function buildCollectRow(entry) {
-    const row = document.createElement("label");
-    row.className = "resume-pro__collect-row";
-
-    const checkbox = document.createElement("input");
-    checkbox.type = "checkbox";
-    checkbox.checked = true;
-    checkbox.dataset.id = `${entry.group}::${entry.key}`;
-
-    const text = document.createElement("span");
-    text.className = "resume-pro__collect-text";
-
-    const name = document.createElement("strong");
-    name.textContent = `${entry.group} / ${entry.key}`;
-    const value = document.createElement("span");
-    value.className = "resume-pro__collect-value";
-    value.textContent = entry.value.length > COLLECT_VALUE_LENGTH ? `${entry.value.slice(0, COLLECT_VALUE_LENGTH)}…` : entry.value;
-
-    text.append(name, value);
-    row.append(checkbox, text);
-    return row;
-  }
-
-  function buildCollectKnownRow(item) {
-    const row = document.createElement("div");
-    row.className = "resume-pro__collect-row is-known";
-
-    const name = document.createElement("strong");
-    name.textContent = `${item.group ? `${item.group} / ` : ""}${item.key}`;
-    const reason = document.createElement("span");
-    reason.className = "resume-pro__collect-value";
-    const stored = item.templateValue
-      ? `已有：${item.templateValue.length > 12 ? `${item.templateValue.slice(0, 12)}…` : item.templateValue}`
-      : "还没有值";
-    reason.textContent = `${COLLECT_REASON_LABEL[item.reason]} · ${stored}`;
-
-    row.append(name, reason);
-    return row;
-  }
-
-  // 采集的同时更新平台映射：拿页面当前的每个值去回查简历，认出「这个位置对应哪条简历字段」。
-  // 你手工改过的那几格也是在这一步被认出来的 —— 值对得上哪条就记哪条。
-  async function updatePlatformMappings() {
-    const api = self.ResumeProFormStructure;
-    const findSource = self.ResumeProAIHelpers?.findResumeSource;
-    if (!api || typeof findSource !== "function") {
-      return 0;
-    }
-
-    const snapshot = await loadPlatformSnapshot();
-    if (!snapshot) {
-      return 0;
-    }
-
+    if (button.disabled || shadowRoot?.querySelector("#resume-pro-ai-fill")?.disabled || !requireContext()) return;
     const template = getActiveTemplate(state.currentStore);
-    const resumeFields = self.ResumeProProfile
-      ? self.ResumeProProfile.mergeResumeFields(template ? flattenTemplateFields(template) : [], profileResumeFields())
-      : [];
-
-    const entries = api.buildMappingEntries(readFilledFields(), resumeFields, findSource);
-    if (!entries.length) {
-      return 0;
-    }
-
-    const applied = api.applyMappingEntries(snapshot, entries);
-    if (!applied.changed) {
-      return 0;
-    }
-
-    await StorageService.replaceFormStructure(applied.snapshot);
-    return applied.changed;
-  }
-
-  async function applyCollectSelection() {
-    const card = shadowRoot?.querySelector("#resume-pro-collect");
-    if (!card || card.hidden) {
-      return;
-    }
-    if (!requireContext()) {
-      return;
-    }
-
-    const checked = new Set(Array.from(card.querySelectorAll("#resume-pro-collect-list input[type='checkbox']"))
-      .filter((box) => box.checked)
-      .map((box) => box.dataset.id));
-
-    if (!checked.size) {
-      showStatus("至少勾选一项。", "error");
-      return;
-    }
-
-    // 卡片亮着的那段时间里用户可能又改了网页或切了模板，所以按这一刻的页面重新算一遍。
-    const collected = collectWritebackCandidates();
-    if (!collected || collected.error || collected.template.id !== state.collectTemplateId) {
-      closeCollectCard();
-      showStatus("当前模板已经切换或不可用，没有改动。请重新采集。", "error", true);
-      return;
-    }
-
-    const picked = collected.result.entries.filter((entry) => checked.has(`${entry.group}::${entry.key}`));
-
-    const applyButton = shadowRoot.querySelector("#resume-pro-collect-apply");
-    applyButton.disabled = true;
+    if (!template) { showStatus("请先在资料管理页新建或导入资料。", "error"); return; }
+    button.disabled = true;
+    let stopButton;
     try {
-      // 映射先更新。它和「往模板里加新字段」是两件事：你手工改对的那几格，
-      // 字段名往往模板里早就有了、加不进去，但对应关系必须记下来。
-      const mappingCount = await updatePlatformMappings();
-      const mappingNote = mappingCount
-        ? `同时记下 / 更新了 ${mappingCount} 条平台映射，下次这套表单照映射直接填，不再问模型。`
-        : "";
-
-      if (!picked.length) {
-        closeCollectCard();
-        showStatus(mappingNote || "这一批没有可新增的字段，页面上也没有认出新的对应关系。", mappingNote ? "success" : "error", true);
-        return;
+      const result = await chrome.runtime.sendMessage({type: "RESUME_COLLECT", templateId: template.id, fields: readFilledFields()});
+      if (!result?.success) throw new Error(result?.error || "无法保存补充内容。");
+      let note = '';
+      if (result.added) {
+        button.textContent = 'AI 正在归纳…';
+        const controller = new AbortController();
+        stopButton = document.createElement('button');
+        stopButton.type = 'button'; stopButton.className = 'resume-pro__manager-button';
+        stopButton.textContent = '停止等待 AI 归纳';
+        stopButton.addEventListener('click', () => controller.abort());
+        button.insertAdjacentElement('afterend', stopButton);
+        showStatus('原始内容已保存，AI 正在建议分类与经历归属…', 'success', true);
+        try {
+          const organized = await self.ResumeProCollectionAI.organize(template.id,result.ids,{
+            signal:controller.signal,
+            onProgress:seconds=>showStatus(`AI 正在归纳，已等待 ${seconds} 秒。${seconds>=60?'模型仍未返回，可继续等待或停止等待。':'原始采集内容已保存。'}`, 'success', true)
+          });
+          note = `AI 已归纳 ${organized.organized} 项，请核对建议。`;
+        } catch (error) { note = `AI 归纳未完成：${error.message} 可在待确认列表重试。`; }
       }
-
-      const outcome = await StorageService.addTemplateFields(collected.template.id, picked);
-      // 写成功才收卡片；写失败时卡片留着，可以直接再点一次。
-      closeCollectCard();
-      showStatus((outcome.added
-        ? `已把 ${outcome.added} 个字段加入模板「${outcome.name}」，字段 ${outcome.before} → ${outcome.after} 个。需要 .xlsx 文件请在管理面板点这份模板的「导出 Excel」。`
-        : "这些字段模板里已经有了，没有改动。") + mappingNote, outcome.added ? "success" : "error", true);
-    } catch (error) {
-      applyButton.disabled = false;
-      showStatus(`没有加进去：${error.message || "写入失败"}`, "error", true);
-    }
-  }
-
-  function closeCollectCard() {
-    const card = shadowRoot?.querySelector("#resume-pro-collect");
-    if (card) {
-      card.hidden = true;
-    }
-    state.collectTemplateId = null;
+      showStatus(`采集了 ${result.added} 项补充内容。${note}确认后才用于填写。`, 'success', true);
+      await openManager("inbox");
+    } catch (error) { showStatus(error.message, "error", true); }
+    finally { stopButton?.remove(); button.disabled = false; button.textContent = "采集到资料树"; }
   }
 
   function countTemplateFields(template) {
@@ -3835,10 +4344,15 @@
   }
 
   function flattenTemplateFields(template) {
-    return template.groups.flatMap((group) => group.fields.map((field) => ({
+    return template.groups.flatMap((group) => group.fields.filter(field => String(field.value ?? "").trim() && field.review?.status !== 'pending').map((field) => ({
       group: group.name,
+      groupId: group.id,
       key: field.key,
-      value: field.value
+      label: field.label,
+      value: field.value,
+      fieldId: field.id,
+      recordId: field.recordId,
+      recordName: group.records?.find(record => record.id === field.recordId)?.name || ""
     })));
   }
 
@@ -4084,6 +4598,7 @@
 
     return styles.display !== "none"
       && styles.visibility !== "hidden"
+      && !element.closest('[aria-hidden="true"],[inert]')
       && rect.width > 0
       && rect.height > 0;
   }
@@ -4114,45 +4629,7 @@
   }
 
   function normalizeTemplate(template) {
-    if (!template || typeof template !== "object") {
-      return null;
-    }
-
-    const groups = Array.isArray(template.groups)
-      ? template.groups
-          .map((group) => {
-            if (!group || typeof group !== "object") {
-              return null;
-            }
-
-            const fields = Array.isArray(group.fields)
-              ? group.fields
-                  .map((field) => {
-                    if (!field || typeof field !== "object") {
-                      return null;
-                    }
-
-                    return {
-                      key: String(field.key ?? "").trim(),
-                      value: String(field.value ?? "")
-                    };
-                  })
-                  .filter((field) => field && field.key)
-              : [];
-
-            return {
-              name: String(group.name ?? "").trim() || "未分类",
-              fields
-            };
-          })
-          .filter((group) => group && group.fields.length)
-      : [];
-
-    return {
-      id: typeof template.id === "string" && template.id.trim() ? template.id : crypto.randomUUID(),
-      name: String(template.name ?? "").trim() || "未命名模板",
-      groups
-    };
+    return self.ResumeProTree.normalizeTemplate(template);
   }
 
   // 扩展被重新加载或更新之后，页面里这份旧脚本的 chrome.* 全部会抛
@@ -4850,6 +5327,7 @@
       formatFillDiagnostics,
       getHighlightTargets,
       handleAiFillClick,
+      handleCollectFillClick,
       handleChipAction,
       handleFieldChipClick,
       highlightFilledField,
@@ -4860,7 +5338,19 @@
       syncChipSelectionState,
       // 扫描链路：标签解析、控件识别、快照采集。挂在钩子上是为了能用真代码验证，
       // 不必把逻辑复制一份到测试里（复制出来的那份很快就会和真的走偏）。
+      mappingMatches,
+      refreshFieldEntry,
+      verifyWrittenValues,
+      verifyFilledValue,
+      reviewFieldName,
+      setElementValue,
+      fillCombobox,
+      fillDateWithAgent,
+      validDateOrder,
+      rangeMatchReason,
       scanFillableFields,
+      prefetchComboOptions,
+      comboAgent,
       collectComboboxRoots,
       visibleComboOptions,
       comboSelectors: () => ({ root: COMBO_ROOT_SELECTOR, trigger: COMBO_TRIGGER_SELECTOR, option: COMBO_OPTION_SELECTOR, display: COMBO_DISPLAY_SELECTOR }),
@@ -4871,8 +5361,11 @@
       isFormatPlaceholder,
       markUnreliableLabels,
       collectControlHints,
+      buildCaptureTargets,
+      scanCaptureTargets,
       formatFieldTrace,
       readBackValue,
+      readFilledFields,
       hasExistingValue,
       captureFormStructure,
       setCurrentStore(store) {

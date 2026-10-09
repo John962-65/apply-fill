@@ -1,4 +1,5 @@
 const DEFAULT_STORE = {
+  resumeImportDraft: null,
   templates: [],
   activeTemplateId: "",
   aiConfig: {
@@ -21,9 +22,8 @@ const UPDATE_FAILURE_RETRY_MS = 60 * 60 * 1000;
 const MAX_LISTED_ROW_NUMBERS = 20;
 const TEMPLATE_SHEET_HEADER = ["一级分类", "字段名", "值"];
 const BACKUP_FORMAT = "resume-pro.backup";
-// 2 起备份里可以带「我的信息」。只有模板的备份仍写 1，旧版插件照样能导入；
-// 带了档案的写 2，旧版插件会提示先更新，而不是悄悄丢掉档案。
-const BACKUP_FORMAT_VERSION = 2;
+// v3 preserves record IDs, editable labels and pending web additions; v1/v2 remain importable.
+const BACKUP_FORMAT_VERSION = 3;
 let pdfJsPromise = null;
 
 const STORE_KEYS = Object.keys(DEFAULT_STORE);
@@ -45,7 +45,11 @@ const StorageService = {
       await chrome.storage.local.set(missing);
     }
 
-    return normalizeStore({ ...current, ...missing });
+    const normalized = normalizeStore({ ...current, ...missing });
+    if (JSON.stringify(normalized.templates) !== JSON.stringify(current.templates || [])) {
+      await commitResumeChanges({ templates: normalized.templates }, { templates: current.templates ?? missing.templates });
+    }
+    return normalized;
   },
 
   async getState() {
@@ -55,13 +59,15 @@ const StorageService = {
 
   // 整份替换，只给备份恢复这种本来就要覆盖全部的场景用。
   async saveState(nextState) {
+    const current = await chrome.storage.local.get(STORE_KEYS);
     const normalized = normalizeStore(nextState);
-    await chrome.storage.local.set(normalized);
+    await commitResumeChanges(normalized, current);
     return normalized;
   },
 
   async update(updater) {
-    const current = await this.getState();
+    const raw = await chrome.storage.local.get(STORE_KEYS);
+    const current = normalizeStore(raw);
     const next = normalizeStore(await updater(structuredClone(current)));
     const changed = {};
 
@@ -72,7 +78,7 @@ const StorageService = {
     }
 
     if (Object.keys(changed).length) {
-      await chrome.storage.local.set(changed);
+      await commitResumeChanges(changed, Object.fromEntries(Object.keys(changed).map(key => [key, raw[key]])));
     }
 
     return next;
@@ -115,6 +121,12 @@ const popupState = {
 };
 
 const elements = {};
+let resumeEditor;
+async function commitResumeChanges(changes, expected) {
+  const result = await chrome.runtime.sendMessage({type: "RESUME_COMMIT", changes, expected});
+  if (!result?.success) throw new Error(result?.error || "无法保存资料，请重新加载扩展。");
+}
+
 
 document.addEventListener("DOMContentLoaded", () => {
   bootstrap().catch((error) => {
@@ -126,9 +138,51 @@ document.addEventListener("DOMContentLoaded", () => {
 async function bootstrap() {
   cacheElements();
   bindEvents();
+  resumeEditor = new self.ResumeTreeEditor(document.getElementById("resume-workbench"), {
+    load: () => StorageService.getState(),
+    activate: async id => { await StorageService.setActiveTemplate(id); await render(); },
+    create: async name => {
+      await StorageService.update(state => {
+        const template = normalizeTemplate({id: crypto.randomUUID(), name: resolveTemplateName(name, state.templates), groups: []});
+        self.ResumeProSchema.addSections(template, self.ResumeProSchema.sections.map(s => s.id));
+        for(const g of template.groups)for(const r of g.records)self.ResumeProSchema.addMissing(template,r.id,false);
+        state.templates.unshift(template); state.activeTemplateId = template.id; return state;
+      });
+      await render();
+    },
+    persistDraft: async (draft, base) => StorageService.update(state=>{
+      if(JSON.stringify(state.resumeImportDraft)!==JSON.stringify(base))throw new Error('核对草稿已在其他页面更新，当前编辑保留，请重新打开资料管理后合并。');
+      state.resumeImportDraft=structuredClone(draft);return state;
+    }),
+    discardDraft: async base => StorageService.update(state=>{
+      if(JSON.stringify(state.resumeImportDraft)!==JSON.stringify(base))throw new Error('核对草稿已在其他页面更新，请先重新打开资料管理。');
+      state.resumeImportDraft=null;return state;
+    }),
+    save: async (draft, base, importBase) => {
+      await StorageService.update(state => {
+        if(!base) {
+          if(JSON.stringify(state.resumeImportDraft)!==JSON.stringify(importBase))throw new Error('核对草稿已在其他页面更新，当前内容保留，请重新打开资料管理后合并。');
+          if(state.templates.some(t=>t.id===draft.id))throw new Error("此资料编号已存在，请重新解析。");
+          const saved=structuredClone(draft);saved.name=resolveTemplateName(saved.name,state.templates);
+          state.templates.unshift(saved);state.activeTemplateId=saved.id;state.resumeImportDraft=null;return state;
+        }
+        const index = state.templates.findIndex(t => t.id === draft.id);
+        if (index < 0 || JSON.stringify(state.templates[index]) !== JSON.stringify(base)) {
+          throw new Error("资料已在其他页面更新。编辑内容仍保留，请重新加载后再合并。");
+        }
+        state.templates[index] = structuredClone(draft);
+        return state;
+      });
+    },
+    organize: (id, options) => self.ResumeProCollectionAI.organize(id, undefined, options),
+    export: exportTemplateToExcel,
+    remove: async id => { await deleteTemplate(id); await render(); }
+  });
   applyTabFromHash();
   await StorageService.ensureDefaults();
   await render();
+  const initial=await StorageService.getState();
+  if(initial.resumeImportDraft)resumeEditor.beginImport(initial.resumeImportDraft,initial);
   initializeUpdateFeature().catch((error) => {
     console.warn("ApplyFill update feature init failed:", error);
   });
@@ -259,7 +313,7 @@ function bindEvents() {
       showStatus("profile", "「我的信息」在别处被改过了，现在保存会覆盖那边的修改。", "warning", 0);
     }
 
-    if (changes.templates || changes.activeTemplateId || changes.aiConfig || changes.profile) {
+    if (changes.templates || changes.activeTemplateId || changes.aiConfig || changes.profile || changes.resumeImportDraft) {
       render().catch((error) => {
         console.error("ApplyFill popup render failed:", error);
       });
@@ -288,45 +342,7 @@ async function render() {
 }
 
 function renderTemplates(state) {
-  const { templates, activeTemplateId } = state;
-
-  if (!templates.length) {
-    elements.templateList.innerHTML = `
-      <div class="empty-state">
-        <p>还没有简历模板。</p>
-        <p>点击右上角按钮导入 Excel，或用下方 AI 解析功能从简历文件一键生成。</p>
-      </div>
-    `;
-    return;
-  }
-
-  elements.templateList.innerHTML = templates.map((template) => {
-    const fieldCount = countTemplateFields(template);
-    const groupCount = Array.isArray(template.groups) ? template.groups.length : 0;
-    const isActive = template.id === activeTemplateId;
-
-    return `
-      <article class="template-item ${isActive ? "is-active" : ""}" data-template-id="${escapeHtml(template.id)}">
-        <div class="template-head">
-          <div class="template-info">
-            <h3 class="template-name">${escapeHtml(template.name || "未命名模板")}</h3>
-            <p class="template-meta">${groupCount} 个分组 · ${fieldCount} 个字段</p>
-          </div>
-          ${isActive ? '<span class="active-badge">当前使用中</span>' : ""}
-        </div>
-        <div class="template-actions">
-          ${
-            isActive
-              ? ""
-              : '<button class="secondary-button" type="button" data-action="activate">设为当前</button>'
-          }
-          <button class="secondary-button" type="button" data-action="reimport">重新导入 Excel</button>
-          <button class="secondary-button" type="button" data-action="export">导出 Excel</button>
-          <button class="danger-button" type="button" data-action="delete">删除</button>
-        </div>
-      </article>
-    `;
-  }).join("");
+  resumeEditor.sync(state);
 }
 
 function renderConfig(aiConfig) {
@@ -398,11 +414,15 @@ async function handleFileSelection(event) {
     return;
   }
 
+  if (resumeEditor?.dirty) {
+    if (!confirm("导入前有未保存更改，放弃这些更改并继续？")) return;
+  }
   try {
     const groups = await parseTemplateFile(file);
     const templateName = getTemplateNameFromFile(file.name);
     const fieldCount = countTemplateFields({ groups });
     let previousFieldCount = null;
+    await resumeEditor.discardImport();resumeEditor.dirty=false;
 
     await StorageService.update((state) => {
       if (reimportTemplateId) {
@@ -414,6 +434,7 @@ async function handleFileSelection(event) {
 
         previousFieldCount = countTemplateFields(target);
         target.groups = groups;
+        target.pending = [];
         state.activeTemplateId = target.id;
       } else {
         const nextTemplate = {
@@ -761,6 +782,9 @@ function applyTabFromHash() {
   if (tab && elements.tabPanels.some((panel) => panel.dataset.panel === tab)) {
     popupState.activeTab = tab;
     setActiveTab(tab);
+    if (location.hash === "#templates:inbox" && resumeEditor?.draft) {
+      resumeEditor.selected = "inbox"; resumeEditor.paint();
+    }
   }
 }
 
@@ -1027,6 +1051,7 @@ async function handleCleanTemplateAliases() {
 }
 
 async function handleExportBackup() {
+  if (resumeEditor?.dirty) { showStatus("backup", "请先保存资料树中的更改，再导出备份。", "warning", 0); return; }
   const state = await StorageService.getState();
 
   if (!state.templates.length && !self.ResumeProProfile.hasProfileContent(state.profile)) {
@@ -1072,6 +1097,9 @@ async function exportBackup(includeApiKey) {
 }
 
 async function handleBackupFileSelection(event) {
+  if (resumeEditor?.dirty) {
+    if (!confirm("有未保存更改，放弃后导入备份？")) { event.target.value = ""; return; }
+  }
   const [file] = event.target.files || [];
   elements.backupFileInput.value = "";
   hideBackupConfirm();
@@ -1116,8 +1144,8 @@ async function commitPendingBackup(mode) {
 }
 
 async function applyAndSave(backup, mode) {
-  const state = await StorageService.getState();
-  await StorageService.saveState(applyBackup(state, backup, mode));
+  await resumeEditor.discardImport();resumeEditor.dirty=false;
+  await StorageService.update(state => applyBackup(state, backup, mode));
   await render();
 
   showStatus(
@@ -1151,12 +1179,19 @@ function buildBackup(state, { includeApiKey = false, now = new Date() } = {}) {
 
     // 一个字段都不剩的模板不写进文件：导入侧会把它丢掉，整份备份还会因此变成
     // 「备份里没有模板」，导出成功却恢复不了。
-    if (!stripped.groups.length) {
+    if (!stripped.groups.length && !template.groups.some(g => g.records?.length) && !template.pending?.length) {
       droppedTemplateCount += 1;
       continue;
     }
 
-    templates.push({ id: template.id, name: template.name, groups: stripped.groups });
+    const safeGroups = template.groups.map(group => ({...group,
+      fields: group.fields.filter(field => !self.ResumeProSecretFields.isSecretFieldName(group.name)
+        && !self.ResumeProSecretFields.isSecretFieldName(field.key)
+        && !self.ResumeProSecretFields.isSecretFieldName(field.label)
+        && !self.ResumeProSecretFields.isSecretFieldValue(field.value))
+    }));
+    templates.push({...template, groups: safeGroups, pending: (template.pending || []).filter(p =>
+      !self.ResumeProSecretFields.isSecretFieldName(p.key) && !self.ResumeProSecretFields.isSecretFieldValue(p.value)).map(p=>({...p,recordContext:(p.recordContext||[]).filter(f=>!self.ResumeProSecretFields.isSecretFieldName(f.key)&&!self.ResumeProSecretFields.isSecretFieldValue(f.value))}))});
   }
 
   const strippedProfile = stripProfileSecrets(state.profile);
@@ -1176,7 +1211,7 @@ function buildBackup(state, { includeApiKey = false, now = new Date() } = {}) {
   return {
     backup: {
       format: BACKUP_FORMAT,
-      formatVersion: includeProfile ? BACKUP_FORMAT_VERSION : 1,
+      formatVersion: BACKUP_FORMAT_VERSION,
       exportedAt: now.toISOString(),
       pluginVersion: chrome.runtime.getManifest().version,
       templates,
@@ -1216,7 +1251,7 @@ function parseBackup(text) {
   }
 
   const templates = Array.isArray(raw.templates)
-    ? raw.templates.map(normalizeTemplate).filter((template) => template && template.groups.length)
+    ? raw.templates.map(normalizeTemplate).filter(Boolean)
     : [];
 
   const profile = raw.profile && typeof raw.profile === "object"
@@ -1512,51 +1547,14 @@ function normalizeStore(rawState) {
   return {
     templates,
     activeTemplateId: resolvedActiveTemplateId,
+    resumeImportDraft: rawState.resumeImportDraft && typeof rawState.resumeImportDraft === 'object' ? normalizeTemplate(rawState.resumeImportDraft) : null,
     aiConfig: normalizeAiConfig(rawState.aiConfig),
     profile: self.ResumeProProfile.normalizeProfile(rawState.profile)
   };
 }
 
 function normalizeTemplate(template) {
-  if (!template || typeof template !== "object") {
-    return null;
-  }
-
-  const groups = Array.isArray(template.groups)
-    ? template.groups
-        .map((group) => {
-          if (!group || typeof group !== "object") {
-            return null;
-          }
-
-          const fields = Array.isArray(group.fields)
-            ? group.fields
-                .map((field) => {
-                  if (!field || typeof field !== "object") {
-                    return null;
-                  }
-
-                  return {
-                    key: String(field.key ?? "").trim(),
-                    value: String(field.value ?? "")
-                  };
-                })
-                .filter((field) => field && field.key)
-            : [];
-
-          return {
-            name: String(group.name ?? "").trim() || "未分类",
-            fields
-          };
-        })
-        .filter((group) => group && group.fields.length)
-    : [];
-
-  return {
-    id: typeof template.id === "string" && template.id.trim() ? template.id : crypto.randomUUID(),
-    name: String(template.name ?? "").trim() || "未命名模板",
-    groups
-  };
+  return self.ResumeProTree.normalizeTemplate(template);
 }
 
 function normalizeAiConfig(aiConfig) {
@@ -1787,6 +1785,9 @@ function updateParseFileSelection(file) {
 }
 
 async function handleParseResumeClick() {
+  if (resumeEditor?.dirty) {
+    if (!confirm("解析前有未保存更改，放弃这些更改并继续？")) return;
+  }
   const file = popupState.selectedParseFile;
 
   if (!file) {
@@ -1813,9 +1814,11 @@ async function handleParseResumeClick() {
   elements.parseResumeButton.textContent = "解析中...";
   popupState.lastParsedFields = [];
   if (elements.parseDownloadButton) elements.parseDownloadButton.hidden = true;
-  showParseStatus("正在本地读取简历，然后调用 AI 提取信息...", "success", 0);
+  showParseStatus("正在读取简历并按标准资料树提取，结果会先进入待核对草稿…", "success", 0);
 
   try {
+    await resumeEditor.flushImportDraft();
+    const previousDraft=(await StorageService.getState()).resumeImportDraft;
     const payload = await buildResumeParsePayload(file, extension);
     const result = await self.ResumeProAIClient.send({
       type: "PARSE_RESUME",
@@ -1828,29 +1831,22 @@ async function handleParseResumeClick() {
       throw new Error(result?.error || "简历解析失败。");
     }
 
-    const fields = normalizeParsedResult(result.fields);
-    // 先留住解析结果：下面存模板就算失败，也还能下载 Excel，不用再调一次 AI。
-    popupState.lastParsedFields = result.fields;
+    const extraction=result.extraction||self.ResumeProImport.fromLegacyFields(normalizeParsedResult(result.fields),payload.content);
+    const latest=await StorageService.getState();
+    const template=self.ResumeProImport.createDraft(extraction,{name:resolveTemplateName(`${getTemplateNameFromFile(file.name)}（AI 解析）`,latest.templates),fileName:file.name});
+    popupState.lastParsedFields = self.ResumeProImport.flatFields(extraction);
     if (elements.parseDownloadButton) elements.parseDownloadButton.hidden = false;
-    let template = null;
-
-    await StorageService.update((draft) => {
-      template = {
-        id: crypto.randomUUID(),
-        name: resolveTemplateName(`${getTemplateNameFromFile(file.name)}（AI 解析）`, draft.templates),
-        groups: parsedFieldsToGroups(fields)
-      };
-      draft.templates.unshift(template);
-      draft.activeTemplateId = template.id;
-      return draft;
+    const staged=await StorageService.update(state=>{
+      if(JSON.stringify(state.resumeImportDraft)!==JSON.stringify(previousDraft))throw new Error('解析期间核对草稿已在其他页面更新。原有草稿保留，请重新打开资料管理后再解析。');
+      state.resumeImportDraft=template;return state;
     });
-
-    showParseStatus(`已存为模板「${template.name}」并设为当前，共 ${countTemplateFields(template)} 个字段。`, "success", 0);
+    resumeEditor.beginImport(staged.resumeImportDraft,staged);
+    showParseStatus(`已按标准资料树生成核对草稿，${self.ResumeProImport.pendingFields(template).length} 项待核对。请逐条确认；保存前不会用于网页填写。`, "success", 0);
     updateParseFileSelection(null);
   } catch (error) {
     showParseStatus(error.message || "简历解析失败。", "error", 0);
   } finally {
-    elements.parseResumeButton.textContent = "开始解析";
+    elements.parseResumeButton.textContent = "按资料树提取";
     elements.parseResumeButton.disabled = !popupState.selectedParseFile;
   }
 }

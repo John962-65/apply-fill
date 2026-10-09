@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "minimum_chrome_version": "116",
   "name": "ApplyFill",
-  "version": "0.5.0",
+  "version": "0.8.20",
   "description": "求职网申表单填写助手：把简历模板里的信息一键填入招聘网站表单。",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAtIC8SdF6acgCEHsQqUmjmzNXLxSWmbrmkvZdUrYXug0HOCzENmxSwa31/Yozo11mSNQx+CXezTFczftXBEzp5QXrqD2RWTVbWYpIrwEcEM6y9fmnhMSokFC2Z5r7sbhpsvNYmfWgnMy+LInbNzEY80N57l+eFg1UCBl5IKAoTOOZRKvwIHJOum0T2cro7WMcz5UUN9hUCgfwdWFiPnFSlEdmGddO72JIQSC3fgzELU43HiWZQ47js12c5WtibKW9fYhdKCnRLR4QPVnYFYKMZIvfGezvsqcLTKs4ko1ezWYwqdf8irQQWFkNlbLOSKuUVkL2niUxsgzhMoKXedJRfQIDAQAB",
   "permissions": [
@@ -12,7 +12,8 @@
     "activeTab",
     "tabs",
     "nativeMessaging",
-    "alarms"
+    "alarms",
+    "debugger"
   ],
   "host_permissions": [
     "<all_urls>"
@@ -63,13 +64,23 @@
         "<all_urls>"
       ],
       "js": [
+        "collection-ai.js",
+        "resume-tree.js",
         "ai-client.js",
         "ai-helpers.js",
         "profile-fields.js",
+        "control-catalog.js",
         "form-structure.js",
-        "platform-seeds.js",
         "form-agent.js",
         "sidebar-state.js",
+        "interaction-agent.js",
+        "phoenix-date-agent.js",
+        "calendar-agent.js",
+        "combo-agent.js",
+        "control-capture.js",
+        "capture-autoclick.js",
+        "atsx-date-agent.js",
+        "ud-date-agent.js",
         "content.js"
       ],
       "css": [

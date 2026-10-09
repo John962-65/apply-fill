@@ -1,0 +1,29 @@
+<!doctype html><meta charset="utf-8"><title>ApplyFill 填写回归表单</title>
+<style>body{font:16px sans-serif;padding:24px}section{margin:24px 0}label{display:block;margin:12px}input,select{padding:8px;min-width:180px}.record{border:1px solid #ccc;padding:12px;margin:8px}</style>
+<section><h2>基本信息</h2>
+<label>性别<select id="gender"><option value="choose">请选择性别</option><option value="m">男</option><option value="f">女</option></select></label>
+<label>姓名<input id="name" value="用户手填姓名"></label>
+<label>出生日期<input id="birth" type="date"></label>
+<label>手机号码<input id="phone"></label>
+<label>邮箱<input id="email"></label>
+</section>
+<section><h2>地址</h2>
+<label>省份<select id="province"><option>请选择省份</option><option>浙江省</option></select></label>
+<label>城市<select id="city"><option>请选择城市</option></select></label>
+</section>
+<section><h2>教育经历</h2>
+<div class="record"><label>学校<input id="school1"></label><label>专业<input id="major1"></label></div>
+<div class="record"><label>学校<input id="school2"></label><label>专业<input id="major2"></label></div>
+</section>
+<section><h2>工作经历</h2>
+<div class="record"><label>单位<input id="company1"></label><label>职位<input id="role1"></label></div>
+<div class="record"><label>单位<input id="company2"></label><label>职位<input id="role2"></label></div>
+</section>
+<section><h2>重新渲染</h2><label>项目名称<input id="project"></label><label>项目描述<input id="description"></label></section>
+<script>
+province.addEventListener('change',()=>setTimeout(()=>{city.outerHTML='<select id="city"><option>请选择城市</option><option>杭州市</option></select>'},650));
+project.addEventListener('change',()=>{
+ const copy=project.cloneNode(true);copy.value=project.value;project.replaceWith(copy);
+ description.replaceWith(description.cloneNode(true));
+});
+</script>

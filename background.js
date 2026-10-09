@@ -1,3 +1,7 @@
+import { installBrowserInput } from "./browser-input.mjs";
+installBrowserInput(chrome);
+import { installResumeStore } from "./resume-store.mjs";
+installResumeStore(chrome);
 import { installDesktopLink } from "./link/worker.mjs";
 
 // The desktop link owns its own message listener. It deliberately does not touch
@@ -6,7 +10,7 @@ import { installDesktopLink } from "./link/worker.mjs";
 installDesktopLink(chrome);
 
 async function openManagerTab(requestedTab = "") {
-  const hash = requestedTab === "profile" ? "#profile" : "";
+  const hash = requestedTab === "profile" ? "#profile" : requestedTab === "inbox" ? "#templates:inbox" : "";
   const baseUrl = chrome.runtime.getURL("popup.html");
   const targetUrl = `${baseUrl}${hash}`;
   const tabs = await chrome.tabs.query({});

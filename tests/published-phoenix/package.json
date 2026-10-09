@@ -1,0 +1,14 @@
+{
+  "private": true,
+  "description": "Pinned Phoenix components for browser compatibility tests; dependencies are never shipped",
+  "dependencies": {
+    "@babel/runtime": "7.26.10",
+    "@beisen-phoenix/select": "3.3.55",
+    "@beisen-phoenix/select-list": "3.3.55",
+    "@beisen-phoenix/unmodeled-layer": "3.3.55",
+    "esbuild": "0.25.10",
+    "react": "16.14.0",
+    "react-dom": "16.14.0",
+    "styled-components": "4.1.3"
+  }
+}

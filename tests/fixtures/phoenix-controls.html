@@ -1,0 +1,82 @@
+<!doctype html><meta charset="utf-8"><title>匿名凤凰控件回归</title>
+<!-- DOM contract from @beisen-phoenix/{select,single-select-list,unmodeled-layer,rc-calendar}@3.3.55.
+     State/events below are test doubles, not the private recruitment site's JavaScript. -->
+<style>
+body{font:16px sans-serif;padding:24px}section{margin:20px 0}.record{border:1px solid #ccc;padding:12px;margin:12px}
+.form-item--phoenix{margin:12px 0}.field-label{margin-bottom:6px}.phoenix-select{width:230px;position:relative;border:1px solid #888;height:36px}
+.phoenix-select__content{margin:0;padding:0;list-style:none}.phoenix-select__inputWrapper{height:34px;width:228px;list-style:none}.phoenix-select__input{height:32px;width:210px;border:0;padding-left:8px}
+.phoenix-select__tipWrapper{position:absolute;left:8px;top:8px;pointer-events:none}.phoenix-select__calcEle{display:none}.phoenix-select__placeHolder{position:absolute;left:8px;top:8px;pointer-events:none}
+.common-unmodeled-layer__layerContent{position:fixed;left:400px;top:100px;background:white;border:1px solid #333;padding:10px;z-index:20}.phoenix-single-select-list__item{padding:8px;list-style:none;cursor:pointer}
+.phoenix-single-select-list__item--disabled{color:#aaa}.phoenix-calendar td{padding:6px;cursor:pointer}.phoenix-calendar a{display:inline-block;min-width:28px;padding:6px;cursor:pointer}
+</style>
+<div id="unrelated" class="common-unmodeled-layer__layerContent" style="left:780px"><ul class="phoenix-single-select-list"><li class="phoenix-single-select-list__item">英语</li></ul></div>
+<main>
+<section><h2>语言能力</h2><div class="form-item--phoenix"><div class="field-label">语言</div><div id="language" class="phoenix-select"></div></div></section>
+<section><h2>项目经历</h2>
+<article class="record"><div class="form-item--phoenix"><label>项目名称<input id="project-one"></label></div>
+<div class="form-item--phoenix"><div class="field-label">开始时间</div><div><div><div><div><div><div id="start-one" class="phoenix-select"></div></div></div></div></div></div></div>
+<div class="form-item--phoenix"><div class="field-label">结束时间</div><div id="end-one" class="phoenix-select"></div></div></article>
+<article class="record"><div class="form-item--phoenix"><label>项目名称<input id="project-two"></label></div>
+<div class="form-item--phoenix"><div class="field-label">开始时间</div><div id="start-two" class="phoenix-select"></div></div>
+<div class="form-item--phoenix"><div class="field-label">结束时间</div><div id="end-two" class="phoenix-select"></div></div></article>
+</section>
+<section><h2>获奖经历</h2><div class="form-item--phoenix"><div class="field-label">获奖时间</div><div id="award" class="phoenix-select"></div></div></section>
+<section><h2>基本信息</h2><div class="form-item--phoenix"><div class="field-label">学历</div><div id="existing" class="phoenix-select"></div></div></section>
+<div id="unknown" class="phoenix-select"></div>
+</main>
+<script>
+const actions=[],values={},months=['一','二','三','四','五','六','七','八','九','十','十一','十二'];let unrelatedClicks=0;
+document.getElementById('unrelated').onclick=()=>unrelatedClicks++;
+function renderControl(r,value=''){
+ r.innerHTML=`<span class="phoenix-select__calcEle">${value}</span><span class="phoenix-select__placeHolder">${value||'请选择'}</span><ul class="phoenix-select__content"><li class="phoenix-select__inputWrapper"><input class="phoenix-select__input phoenix-select__input--large phoenix-select__input--unText" placeholder="请选择" value="${value}"></li><span class="phoenix-select__tipWrapper"><span class="phoenix-select__tipEle">${value}</span></span></ul>`;
+ r.onclick=e=>{actions.push({kind:'open',trusted:e.isTrusted});if(!e.isTrusted)return;openPopup(r);};
+}
+function openPopup(r){
+ document.getElementById('choices')?.remove();
+ let p=document.createElement('div');p.id='choices';p.className='common-unmodeled-layer__layerContent';document.body.append(p);
+ const commit=(value,e)=>{
+  actions.push({kind:'choose',trusted:e.isTrusted});if(!e.isTrusted||mode==='discard')return;
+  const destination=mode==='wrong-end'&&r.id==='start-one'?document.getElementById('end-one'):r;
+  values[destination.id]=value;
+  if(mode==='rerender'){const copy=destination.cloneNode();destination.replaceWith(copy);renderControl(copy,value);}else renderControl(destination,value);
+  if(mode==='both-ends'&&r.id==='start-one'){values['end-one']='2020-01';renderControl(document.getElementById('end-one'),'2020-01');}
+  p.remove();
+  if(mode==='late-discard')setTimeout(()=>{values[destination.id]='';renderControl(document.getElementById(destination.id),'');},120);
+ };
+ if(r.dataset.choices){
+  const variant=r.dataset.list==='selectList'?'phoenix-selectList':'phoenix-single-select-list';
+  p.innerHTML=`<div class="${variant}"><ul></ul></div>`;
+  const labels=mode==='duplicate'?['院校级','院校级']:JSON.parse(r.dataset.choices);
+  for(const label of labels){const li=document.createElement('li');li.className=variant+'__item';if(variant==='phoenix-selectList'){const span=document.createElement('span');span.className='phoenix-selectList__singleLabel';span.textContent=label;li.append(span);}else li.textContent=label;li.onclick=e=>commit(label,e);p.querySelector('ul').append(li);}
+  return;
+ }
+ if(['language','unknown'].includes(r.id)){
+  const render=()=>{
+   const list=p.querySelector('ul');list.innerHTML='';
+   const labels=mode==='duplicate'?['英语','英语']:['search','wrapped-search'].includes(mode)&&!p.querySelector('input').value?['其他']:['请选择','英语','日语'];
+   labels.forEach(label=>{const li=document.createElement('li');li.className='phoenix-single-select-list__item'+(label==='日语'?' phoenix-single-select-list__item--disabled':'');li.textContent=label;li.onclick=e=>commit(label,e);list.append(li);});
+  };
+  p.innerHTML=mode==='wrapped-search'?'<input class="phoenix-input__input" placeholder="请输入"><div class="phoenix-single-select-list"><ul class="phoenix-single-select-list__ul"></ul></div>':'<div class="phoenix-single-select-list"><input class="phoenix-input__input" placeholder="请输入"><ul class="phoenix-single-select-list__ul"></ul></div>';
+  p.querySelector('input').oninput=e=>{actions.push({kind:'search',trusted:e.isTrusted});if(e.isTrusted)setTimeout(render,100);};render();return;
+ }
+ let year=2025,month=4;const dayMode=mode==='day';
+ const draw=()=>{
+  const prev=dayMode?'phoenix-calendar':'phoenix-calendar-month-panel';
+  p.innerHTML=`<div class="phoenix-date-picker"><div class="phoenix-calendar"><div class="${dayMode?'phoenix-calendar-date-panel':'phoenix-calendar-month-panel'}"><a class="${prev}-prev-year-btn">‹</a><a class="${prev}-year-select">${year}年</a><a class="${prev}-next-year-btn">›</a>${dayMode?`<a class="phoenix-calendar-prev-month-btn">‹</a><a class="phoenix-calendar-month-select">${month}月</a><a class="phoenix-calendar-next-month-btn">›</a>`:''}<table><tbody></tbody></table><div class="phoenix-date-picker__monthToday"><a>返回当月</a></div></div></div></div>`;
+  for(const direction of ['prev','next'])p.querySelector(`.${prev}-${direction}-year-btn`).onclick=e=>{actions.push({kind:'navigate',trusted:e.isTrusted});if(e.isTrusted&&mode!=='stuck'){year+=direction==='next'?1:-1;draw();}};
+  if(dayMode)for(const direction of ['prev','next'])p.querySelector(`.phoenix-calendar-${direction}-month-btn`).onclick=e=>{if(e.isTrusted){month+=direction==='next'?1:-1;draw();}};
+  const tbody=p.querySelector('tbody');const count=dayMode?new Date(year,month,0).getDate():12;
+  for(let i=1;i<=count;i++){
+   if((i-1)%4===0)tbody.append(document.createElement('tr'));
+   const td=document.createElement('td');td.className=dayMode?'phoenix-calendar-cell':'phoenix-calendar-month-panel-cell';td.setAttribute('role','gridcell');td.innerHTML=`<${dayMode?'div':'a'} class="${dayMode?'phoenix-calendar-date':'phoenix-calendar-month-panel-month'}">${dayMode?i:months[i-1]+'月'}</${dayMode?'div':'a'}>`;
+   td.onclick=e=>commit(`${year}-${String(dayMode?month:i).padStart(2,'0')}${dayMode?'-'+String(i).padStart(2,'0'):''}`,e);tbody.lastElementChild.append(td);
+  }
+  // The public fork has no td.title, and neighboring months can repeat the same day number.
+  if(dayMode){const td=document.createElement('td');td.className='phoenix-calendar-cell phoenix-calendar-last-month-cell';td.textContent='3';tbody.lastElementChild.append(td);}
+  if(mode==='duplicate')tbody.lastElementChild.append(tbody.querySelectorAll('td')[1].cloneNode(true));
+ };
+ draw();
+}
+document.querySelectorAll('.phoenix-select').forEach(r=>renderControl(r,r.id==='existing'?'硕士':''));
+document.body.addEventListener('mousedown',e=>{if(e.target===document.body)document.getElementById('choices')?.remove();});
+</script>

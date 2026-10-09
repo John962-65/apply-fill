@@ -78,16 +78,19 @@
     return String(value ?? "").replace(/\d+/g, "#").slice(0, 40);
   }
 
-  // 身份键含段号（第一段和第五段的「项目名称」是两个字段），不含控件类型
+  // 身份键包含板块、段号和字段名，不含控件类型
   // （同一家公司把下拉换成组合框很常见，不该因此变成两个字段）—— 这样映射条目
   // 能直接挂在已有的结构行上，而不是另起一条。
   function fieldIdentity(field) {
-    return `${fieldKey(field)}|${field?.recordIndex || 0}`;
+    const identity=[normalizeLabel(field?.group), field?.recordIndex || 0, fieldKey(field)];
+    if(field?.datePart)identity.push(field.datePart);
+    return JSON.stringify(identity);
   }
 
   // 同一字段在不同公司可能用不同驱动方式（有的日期框能直接赋值，有的必须聚焦回车）；
   // 这种情况保留更保守的那一种，别让一次侥幸成功把该聚焦的结论覆盖掉。
   const DRIVE_RANK = {
+    "open-calendar-pick": 8,
     "open-search-pick": 7,
     "open-pick": 6,
     "cascade-select": 5,
@@ -116,11 +119,16 @@
       const options = (field.options || []).length >= (held.options || []).length ? field.options : held.options;
       byId.set(id, {
         ...held,
+        controlFamily: Object.hasOwn(field, "controlFamily") ? field.controlFamily : held.controlFamily,
+        controlEvidence: Object.hasOwn(field, "controlEvidence") ? field.controlEvidence : held.controlEvidence,
         drive: safer,
         options: (options || []).slice(0, OPTIONS_LIMIT),
         // 本次采集没带映射，不代表要删掉上次建好的那条。
         resumeKey: field.resumeKey || held.resumeKey,
         resumeGroup: field.resumeGroup || held.resumeGroup,
+        resumeGroupId: field.resumeGroupId || held.resumeGroupId,
+        resumeRecordId: field.resumeRecordId || held.resumeRecordId,
+        resumeFieldId: field.resumeFieldId || held.resumeFieldId,
         groupSignature: field.groupSignature || held.groupSignature,
         hits: Math.max(held.hits || 0, field.hits || 0),
         misses: held.misses || 0,
@@ -137,7 +145,7 @@
   // 真实后果是「张三」被写进三个项目名称、整段英语水平被写进「语言」格。
   // 这些映射还都"写成功"，落空计数永远不涨，自动删除机制救不了。
   // 所以按版本号一次性作废旧映射：结构和选项留着，映射下次填写按新规则重新学。
-  const MAPPING_SCHEMA = 2;
+  const MAPPING_SCHEMA = 3;
 
   function upgradeMappings(snapshot) {
     if (!snapshot || snapshot.mappingSchema === MAPPING_SCHEMA) {
@@ -198,17 +206,21 @@
       }
 
       const source = findSource(item.value, resumeFields);
-      if (!source || (source.relation !== "exact" && source.relation !== "date") || !source.field?.key) {
+      if (!source || source.ambiguous || (source.relation !== "exact" && source.relation !== "date") || !source.field?.key) {
         return;
       }
 
       entries.push({
         label: item.label,
+        group: item.group || "",
         recordIndex: Number.isInteger(item.recordIndex) ? item.recordIndex : 0,
         recordTotal: item.recordTotal || 0,
         groupSignature: item.recordSignature || "",
         resumeKey: source.field.key,
-        resumeGroup: source.field.group || ""
+        resumeGroup: source.field.group || "",
+        resumeGroupId: source.field.groupId || "",
+        resumeRecordId: source.field.recordId || "",
+        resumeFieldId: source.field.fieldId || ""
       });
     });
 
@@ -222,11 +234,13 @@
 
     (Array.isArray(entries) ? entries : []).forEach((entry) => {
       const id = fieldIdentity(entry);
+      if (entries.filter(candidate => fieldIdentity(candidate) === id).length !== 1) return;
+      if (fields.filter(candidate => fieldIdentity(candidate) === id).length > 1) return;
       const position = index.get(id);
 
       if (position === undefined) {
         fields.push({
-          label: entry.label, control: "mapped", drive: "mapping", options: [],
+          ...entry, label: entry.label, control: "mapped", drive: "mapping", options: [],
           recordIndex: entry.recordIndex || undefined, recordTotal: entry.recordTotal || undefined,
           resumeKey: entry.resumeKey, resumeGroup: entry.resumeGroup,
           groupSignature: entry.groupSignature, hits: 1, misses: 0
@@ -236,7 +250,7 @@
         return;
       }
 
-      const held = fields[position];
+      const held = fields[position] = { ...fields[position] };
       if (held.resumeKey === entry.resumeKey) {
         held.hits = (held.hits || 0) + 1;
         held.misses = 0;
@@ -247,6 +261,7 @@
         held.hits = 1;
         held.misses = 0;
       }
+      Object.assign(held, { resumeGroup: entry.resumeGroup, resumeGroupId: entry.resumeGroupId, resumeRecordId: entry.resumeRecordId, resumeFieldId: entry.resumeFieldId });
       if (entry.groupSignature) {
         held.groupSignature = entry.groupSignature;
       }
@@ -262,8 +277,9 @@
     }
 
     const key = fieldIdentity(field);
-    const hit = (Array.isArray(snapshot?.fields) ? snapshot.fields : [])
-      .find((mapped) => mapped.resumeKey && fieldIdentity(mapped) === key);
+    const hits = (Array.isArray(snapshot?.fields) ? snapshot.fields : [])
+      .filter((mapped) => mapped.resumeKey && fieldIdentity(mapped) === key);
+    const hit = hits.length === 1 ? hits[0] : null;
 
     if (!hit) {
       return null;
@@ -315,15 +331,23 @@
         unrecognizedTotal: snapshot.unrecognizedTotal || 0,
         origins: snapshot.origins || [],
         fields: (snapshot.fields || []).map((field) => ({
+          group: field.group || "",
+          resumeGroupId: field.resumeGroupId || "",
+          resumeRecordId: field.resumeRecordId || "",
+          resumeFieldId: field.resumeFieldId || "",
           label: field.label,
           name: field.name || "",
           id: field.id || "",
           placeholder: field.placeholder || "",
           control: field.control,
+          controlFamily: field.controlFamily || "",
+          controlEvidence: field.controlEvidence || "",
           drive: field.drive,
           options: field.options || [],
           recordIndex: field.recordIndex,
           recordTotal: field.recordTotal,
+          datePart: field.datePart,
+          rangeRole: field.rangeRole,
           result: field.result || "untested",
           resumeKey: field.resumeKey || "",
           resumeGroup: field.resumeGroup || "",
@@ -351,6 +375,15 @@
     fieldKey,
     labelSet,
     lookupMapping,
+    resolveMappingSource(hit, fields) {
+      const candidates = (fields || []).filter(item =>
+        normalizeLabel(item.group) === normalizeLabel(hit.resumeGroup)
+        && normalizeLabel(item.key) === normalizeLabel(hit.resumeKey)
+        && (!hit.resumeGroupId || item.groupId === hit.resumeGroupId)
+        && (!hit.resumeRecordId || item.recordId === hit.resumeRecordId)
+        && (!hit.resumeFieldId || item.fieldId === hit.resumeFieldId));
+      return candidates.length === 1 ? candidates[0] : null;
+    },
     maskIdentifier,
     mergeFields,
     mergeSnapshot,
