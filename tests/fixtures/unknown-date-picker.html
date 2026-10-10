@@ -63,6 +63,14 @@
       wire();
     }
     document.body.appendChild(portal);
+    if (mode === 'covered' && state.open) {
+      // 覆盖层只遮住面板本身：合成点击无视它，CDP 点击会被命中测试拒绝。
+      const r = portal.getBoundingClientRect();
+      const overlay = document.createElement('div');
+      overlay.className = 'acme-overlay';
+      overlay.style.cssText = `position:fixed;left:${r.left}px;top:${r.top}px;width:${r.width}px;height:${r.height}px;z-index:99;background:rgba(0,0,0,0.08)`;
+      document.body.appendChild(overlay);
+    }
   }
   function head(inner) {
     const labels = state.view === 'year' ? ['上一年代', '下一年代'] : ['上一月', '下一月'];

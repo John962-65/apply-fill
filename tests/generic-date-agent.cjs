@@ -32,7 +32,8 @@ const POLICY=`(observation)=>{
   return {id:(c.find(x=>x.kind==='stop')||c[0]||{}).id};
 }`;
 
-async function scenario(browser,{mode,script=[],policy=false,target='2024-09-15',contract=true,pipeline=false,checkbox=false,peer=false,handoff=false,extraInit=''}){
+async function scenario(browser,{mode,script=[],policy=false,target='2024-09-15',contract=true,pipeline=false,checkbox=false,peer=false,handoff=false,useCdp=false,forceFirstOpen=false,extraInit=''}){
+  const {performInput}=await import('../browser-input.mjs');
   const page=await browser.newPage({viewport:{width:1100,height:900}});
   const errors=[];page.on('pageerror',e=>errors.push(e.message));
   const cdp=await page.context().newCDPSession(page);
@@ -61,31 +62,42 @@ async function scenario(browser,{mode,script=[],policy=false,target='2024-09-15'
     }},storage:{local:{get:async()=>structuredClone(fixtureStore),set:async c=>Object.assign(fixtureStore,c)},onChanged:{addListener(){}}}};
   },{script,checkbox,contract,POLICY,pipeline});
   if(extraInit)await page.evaluate(extraInit);
-  if(pipeline){
-    // 侧边栏宿主必须在内容脚本加载前就存在：content.js 启动时会自建侧边栏并占用内部 shadowRoot 引用。
-    await page.evaluate(()=>{
-      const host=document.createElement('div');host.id='resume-pro-sidebar';document.body.append(host);
-      const h=host.attachShadow({mode:'open'});
-      h.innerHTML='<button id="resume-pro-ai-fill">填写</button><div id="resume-pro-status"></div>'
-        +'<input type="checkbox" id="resume-pro-generic-date">'
-        +'<input type="checkbox" id="resume-pro-browser-input">'
-        +'<details id="resume-pro-trace"><textarea id="resume-pro-trace-text"></textarea></details>'
-        +'<details id="resume-pro-diagnostics"><textarea id="resume-pro-diagnostics-text"></textarea></details>'
-        +'<p id="resume-pro-wait-hint" role="status"></p>';
-    });
-  }
+  // 侧边栏宿主必须在内容脚本加载前就存在：content.js 启动时会自建侧边栏并占用内部 shadowRoot 引用。
+  await page.evaluate(()=>{
+    const host=document.createElement('div');host.id='resume-pro-sidebar';document.body.append(host);
+    const h=host.attachShadow({mode:'open'});
+    h.innerHTML='<button id="resume-pro-ai-fill">填写</button><div id="resume-pro-status"></div>'
+      +'<input type="checkbox" id="resume-pro-generic-date">'
+      +'<input type="checkbox" id="resume-pro-browser-input">'
+      +'<details id="resume-pro-trace"><textarea id="resume-pro-trace-text"></textarea></details>'
+      +'<details id="resume-pro-diagnostics"><textarea id="resume-pro-diagnostics-text"></textarea></details>'
+      +'<p id="resume-pro-wait-hint" role="status"></p>';
+  });
   for(const script of JSON.parse(fs.readFileSync(path.join(root,'manifest.json'))).content_scripts[0].js)await page.addScriptTag({path:path.join(root,script)});
-  const result=await page.evaluate(async ({target,pipeline,checkbox,policy,peer,handoff})=>{
+  const result=await page.evaluate(async ({target,pipeline,checkbox,policy,peer,handoff,forceFirstOpen,useCdp})=>{
     const api=ResumeProHighlightTest;
     const makeEntry=()=>{
       const scan=api.scanFillableFields();
       const field=scan.fields.find(f=>scan.fieldMap.get(f.fieldId).element?.id==='edu-start');
       const entry=scan.fieldMap.get(field.fieldId);entry.meta=field;
       if(peer)entry.rangePeer={element:document.getElementById('edu-end')};
-      if(policy)entry.decide=async observation=>{self.modelCalls++;return (new Function('return '+self.POLICY_SRC))()(observation);};
+      if(policy)entry.decide=async observation=>{
+        self.modelCalls++;
+        const decide=(new Function('return '+self.POLICY_SRC))();
+        // forceFirstOpen：先强制选一次 open（预期 NO_CHANGE），验证换策略不会被无进展计数误杀。
+        if(forceFirstOpen && !self.firstOpenDone){
+          const open=observation.candidates.find(c=>c.kind==='open');
+          if(open){self.firstOpenDone=true;return {id:open.id};}
+        }
+        return decide(observation);
+      };
       return entry;
     };
     if(!pipeline){
+      // 直接场景也挂上我们的 shadow：CDP 开关（实验：浏览器层点击与输入）从这里读取。
+      const hostShadow=document.getElementById('resume-pro-sidebar').shadowRoot;
+      api.setShadowRoot(hostShadow);
+      hostShadow.querySelector('#resume-pro-browser-input').checked=useCdp;
       const entry=makeEntry();
       if(handoff){
         const rejected=api.genericDateAgent.inspectHandoff(entry,{peerBefore:'1999-01-01'});
@@ -100,6 +112,7 @@ async function scenario(browser,{mode,script=[],policy=false,target='2024-09-15'
     }
     const host=document.getElementById('resume-pro-sidebar'),h=host.shadowRoot;
     h.querySelector('#resume-pro-generic-date').checked=checkbox;
+    h.querySelector('#resume-pro-browser-input').checked=useCdp;
     fixtureStore.templates=fixtureStore.templates.map(ResumeProTree.normalizeTemplate);
     api.setShadowRoot(h);api.setCurrentStore(fixtureStore);
     let fillError='';
@@ -108,7 +121,7 @@ async function scenario(browser,{mode,script=[],policy=false,target='2024-09-15'
     return {fillError,status:h.querySelector('#resume-pro-status').textContent,diagnostics:h.querySelector('#resume-pro-diagnostics-text').value,
       value:document.getElementById('edu-start').value,modelCalls:self.modelCalls,
       trace:h.querySelector('#resume-pro-trace-text').value};
-  },{target,pipeline,checkbox,policy,peer,handoff});
+  },{target,pipeline,checkbox,policy,peer,handoff,forceFirstOpen,useCdp});
   result.errors=errors;
   await page.close();
   return result;
@@ -234,6 +247,49 @@ async function scenario(browser,{mode,script=[],policy=false,target='2024-09-15'
     assert.match(JSON.stringify(r.trace),/直接输入目标日期/,JSON.stringify(r.trace));
     assert.equal(r.modelCalls,1,'type should resolve in one decision: '+r.modelCalls);
     console.log('PASS generic date / type action commits typed date');
+
+    // 19. 无进展计数回归：先强制选一次 open（预期 NO_CHANGE），AI 换策略点图标必须不被误杀。
+    // 旧实现按观察次数计数（每步两次观察），一次失败动作就会烧掉 2/3 的预算。
+    r=await scenario(browser,{mode:'icononly',policy:true,forceFirstOpen:true});
+    assert.equal(r.result.ok,true,JSON.stringify({r:r.result,note:r.note,trace:r.trace}));
+    assert.equal(r.value,'2024-09-15');
+    const traceText=JSON.stringify(r.trace);
+    assert.match(traceText,/点击当前日期控件尝试打开日历/,'first open attempt must be recorded');
+    assert.match(traceText,/尝试打开日历/,'icon fallback must follow');
+    assert.ok(r.modelCalls>=6,'full navigation after the failed open: '+r.modelCalls);
+    console.log('PASS generic date / strategy switch survives no-progress counter: '+r.modelCalls+' calls');
+
+    // 20-24. CDP 集成轮：同一批场景开「实验：浏览器层点击与输入」，真实 CDP 键鼠路径。
+    r=await scenario(browser,{mode:'day',useCdp:true});
+    assert.equal(r.result.ok,true,JSON.stringify({r:r.result,note:r.note}));
+    assert.equal(r.value,'2024-09-15');assert.equal(r.result.via,'contract');
+    console.log('PASS generic date cdp / contract day view via real input');
+
+    r=await scenario(browser,{mode:'icononly',policy:true,useCdp:true});
+    assert.equal(r.result.ok,true,JSON.stringify({r:r.result,note:r.note,trace:r.trace}));
+    assert.equal(r.value,'2024-09-15');
+    console.log('PASS generic date cdp / calendar icon open via real input: '+r.modelCalls+' calls');
+
+    r=await scenario(browser,{mode:'confirm',useCdp:true});
+    assert.equal(r.result.ok,true,JSON.stringify({r:r.result,note:r.note}));
+    assert.equal(r.value,'2024-09-15');
+    console.log('PASS generic date cdp / confirm button via real input');
+
+    r=await scenario(browser,{mode:'stuckclose',useCdp:true});
+    assert.equal(r.result,false,JSON.stringify({r:r.result,note:r.note}));
+    assert.equal(r.status&&r.status.status,'BLOCKED');
+    console.log('PASS generic date cdp / stuck panel still BLOCKED with real Escape');
+
+    // 遮挡：覆盖层盖住面板，CDP 命中测试必须拒绝点击；合成路径作为对照证明控件本身可填。
+    r=await scenario(browser,{mode:'covered',useCdp:true});
+    assert.equal(r.result,false,JSON.stringify({r:r.result,note:r.note}));
+    assert.equal(r.value,'','covered target must not be clicked, no value written');
+    assert.match(r.note,/遮挡|covered|失败/,JSON.stringify({note:r.note}));
+    console.log('PASS generic date cdp / covered target refuses to click:',r.note);
+    r=await scenario(browser,{mode:'covered'});
+    assert.equal(r.result.ok,true,JSON.stringify({r:r.result,note:r.note}));
+    assert.equal(r.value,'2024-09-15');
+    console.log('PASS generic date / same covered fixture passes with synthetic clicks (control)');
 
     await browser.close();
   }catch(error){await browser.close();throw error;}

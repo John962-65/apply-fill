@@ -421,26 +421,27 @@
     /* ---------- 逐步 AI 循环（观察 → 模型选 id → 执行 → 重观察） ---------- */
 
     async function runLoop(entry, { start }) {
-      const states0 = { lastAction: '尚未操作', stalls: 0, previous: '' };
+      const states0 = { lastAction: '尚未操作', stalls: 0, stalled: false, endReason: '' };
       const observe = () => {
-        if (Date.now() - start > BUDGET_MS) return { blocked: '日期交互时间达到上限' };
+        // 无进展计数只按「动作」结算（在 execute 里做），不按观察次数——
+        // interaction-agent 每步会观察两次（决策前+执行前复核），同一状态
+        // 被看两笔会把 AI 在换策略前提前判死。
+        if (states0.stalled) return { blocked: '日历操作没有推进，停止重复点击' };
+        if (Date.now() - start > BUDGET_MS) { states0.endReason = '日期交互时间达到上限'; return { blocked: states0.endReason }; }
         if (!entry.element?.isConnected) {
           const fresh = refresh?.(entry);
-          if (!fresh?.element?.isConnected) return { blocked: '日期输入框已被替换，不能唯一定位' };
+          if (!fresh?.element?.isConnected) { states0.endReason = '日期输入框已被替换，不能唯一定位'; return { blocked: states0.endReason }; }
           entry.element = fresh.element; entry.trigger = entry.element; entry.root = entry.element;
         }
-        if (entry.peerBefore !== undefined && peerValue?.(entry) !== entry.peerBefore) return { blocked: '另一端日期被改变，已停止' };
+        if (entry.peerBefore !== undefined && peerValue?.(entry) !== entry.peerBefore) { states0.endReason = '另一端日期被改变，已停止'; return { blocked: states0.endReason }; }
         const panelNode = panelOf(entry);
         const view = panelNode ? classifyCalendar(panelNode) : null;
         // 弹层已归属但精度无法从页面证据确定：保守停止，不按资料日期猜。
         const state = panelNode ? ensurePrecision(entry, entry.rawValue) : null;
-        if (panelNode && !state) return { blocked: '无法从页面证据确定日期精度，未按资料日期猜测' };
+        if (panelNode && !state) { states0.endReason = '无法从页面证据确定日期精度，未按资料日期猜测'; return { blocked: states0.endReason }; }
         const current = String(read(entry) || '').trim();
         const candidates = buildCandidates(entry, view);
         const fingerprint = JSON.stringify([Boolean(panelNode), view?.summary(), current, candidates.map(c => c.id)]);
-        states0.stalls = fingerprint === states0.previous ? states0.stalls + 1 : 0;
-        states0.previous = fingerprint;
-        if (states0.stalls >= STALL_LIMIT) return { blocked: '日历操作没有推进，停止重复点击' };
         entry.lastView = view;
         // 只发送日期导航需要的字段，其余个人信息不出观察负载。
         const fieldSlim = entry.meta ? (({ label, inputType, datePart, rangeRole, recordIndex, recordTotal }) => ({ label, inputType, datePart, rangeRole, recordIndex, recordTotal }))(entry.meta) : null;
@@ -508,7 +509,12 @@
             }
           }
         }
-        states0.lastAction = { kind: action.kind, intent, ...diffState(entry, before) };
+        const feedback = diffState(entry, before);
+        states0.lastAction = { kind: action.kind, intent, ...feedback };
+        // 无进展按动作结算：连续 STALL_LIMIT 次动作后页面无实际变化才判停，
+        // AI 中途换策略（失败后改点图标/换翻页方向）不会被观察次数误杀。
+        states0.stalls = feedback.outcome === 'PAGE_CHANGED' ? 0 : states0.stalls + 1;
+        if (states0.stalls >= STALL_LIMIT) states0.stalled = true;
       };
       const verify = async () => {
         popup.transition(entry, states.VERIFYING);
@@ -517,11 +523,23 @@
         popup.transition(entry, states.OPEN);
         return ok;
       };
-      return root.ResumeProInteractionAgent.run({
+      const completed = await root.ResumeProInteractionAgent.run({
         observe, decide: entry.decide, execute, verify,
         maxSteps: MAX_ACTIONS,
         trace: (action, detail) => trace(entry, action, detail)
       });
+      return { completed, endReason: states0.endReason };
+    }
+
+    // 循环结束原因 → 固定错误码，供诊断区分「没找到弹层/点击无效/无进展/超时/值未确认」。
+    function endCodeOf(reason) {
+      if (!reason) return '';
+      if (/没有推进/.test(reason)) return 'STALL_DETECTED';
+      if (/另一端/.test(reason)) return 'PEER_CHANGED';
+      if (/精度/.test(reason)) return 'PRECISION_UNRESOLVED';
+      if (/时间达到上限/.test(reason)) return 'BUDGET_EXCEEDED';
+      if (/被替换/.test(reason)) return 'TARGET_REPLACED';
+      return '';
     }
 
     /* ---------- 收尾：关面板 → 读回 → 精度形态核对 → peer 保护 ---------- */
@@ -628,15 +646,16 @@
           if (!closed) return { ok: false, status: 'BLOCKED', code: 'POPUP_CLOSE_UNCONFIRMED', value, reason: '日历未关闭，已暂停后续填写' };
           return { ok: false, status: 'FAILED', code: '', value, reason: '通用结构未能规则驱动，且 AI 交互不可用' };
         }
-        const completed = await runLoop(entry, { start });
+        const { completed, endReason } = await runLoop(entry, { start });
         const closed = await closePanel(entry);
         if (!closed) return { ok: false, status: 'BLOCKED', code: 'POPUP_CLOSE_UNCONFIRMED', value, reason: '日历未关闭，已暂停后续填写' };
         const state = entry.precisionState;
         if (!completed || !state) {
+          // 结构化失败原因：无进展/另一端被改/精度不定/超时各自有码，不再统统归为「值未确认」。
+          const code = !state ? 'PRECISION_UNRESOLVED' : (endCodeOf(endReason) || 'VALUE_UNCONFIRMED');
           return {
-            ok: false, status: 'FAILED',
-            code: !state ? 'PRECISION_UNRESOLVED' : 'VALUE_UNCONFIRMED',
-            value, reason: !state ? '无法从页面证据确定日期精度，未按资料日期猜测' : (entry.fillNote || 'AI 未确认结果')
+            ok: false, status: 'FAILED', code,
+            value, reason: !state ? '无法从页面证据确定日期精度，未按资料日期猜测' : (endReason || entry.fillNote || 'AI 未确认结果')
           };
         }
         const final = finalize(entry, { target: state.targetValue, precision: state.precision, peerBefore: entry.peerBefore });

@@ -21,7 +21,7 @@
 
 **弹层未归属时 AI 仍可接管**（针对 v0.8.21 真实日志的主故障"未出现可识别的关联日历"）：归属失败不再直接放弃——observe 此时只给打开类候选（点击输入框、点击字段附近过安全黑名单的日历图标、等待），归属唯一确认之前不出现任何面板内部动作；AI 自己想办法打开日历后，结构分类与快路径照常接手。静态证据（占位符/控件类型）足够时精度先行解析，`type` 候选（输入框可编辑且非 readonly）随之可用；readonly 一律拒绝直接输入。每步的 lastAction 是动作反馈对象：intent（做了什么）+ before/after（动作前后的真实输入值与面板视图）+ outcome（PAGE_CHANGED / NO_CHANGE），模型据此区分"点击成功页面变化"与"点击无效"，无效时换候选而不是重复。观察负载瘦身：只发送日期导航需要的字段白名单（label/精度相关属性/段号），不再携带整条记录上下文。
 
-**安全边界**：候选只引用已归属面板内元素；提交/删除/协议类控件一律拒绝（capture-autoclick 黑名单 + 命中点复核）；时分面板识别后立即暂停不给可点击候选；值永远来自上游有来源校验的匹配，Agent 只做"选哪个格子等于目标"的低幻觉任务；失败证据沿用白名单（新增 `PRECISION_UNRESOLVED`、`HANDOFF_UNSAFE`、`PEER_CHANGED`、`STALL_DETECTED`、`GENERIC_AGENT_UNAVAILABLE`，不含选项文本与任何值）。
+**安全边界**：候选只引用已归属面板内元素；提交/删除/协议类控件一律拒绝（capture-autoclick 黑名单 + 命中点复核）；时分面板识别后立即暂停不给可点击候选；值永远来自上游有来源校验的匹配，Agent 只做"选哪个格子等于目标"的低幻觉任务。**无进展按动作结算**：连续 3 次「动作后页面无实际变化」（比较输入值与面板视图/表头，不按观察次数——interaction-agent 每步观察两次，按观察计会把换策略前的 AI 提前判死）才停止；中途换策略（失败后改点图标/换翻页方向）不受影响。**失败原因结构化**：`STALL_DETECTED`（无进展）、`PEER_CHANGED`（另一端被改）、`PRECISION_UNRESOLVED`（精度不定）、`BUDGET_EXCEEDED`（超时）、`TARGET_REPLACED`（控件被替换）各自有码，不再统统归为「值未确认」。失败证据沿用白名单（新增 `PRECISION_UNRESOLVED`、`HANDOFF_UNSAFE`、`PEER_CHANGED`、`STALL_DETECTED`、`BUDGET_EXCEEDED`、`GENERIC_AGENT_UNAVAILABLE`，不含选项文本与任何值）。
 
 ## 使用方式
 
@@ -50,7 +50,7 @@ C 与 D 都注入同一脚本化"正确模型"决策器；D 的 0 调用来自�
 
 ## 测试与回归
 
-- `npm run test:generic-date`：18 个浏览器场景——契约快路径、AI 循环、月精度（两条路径）、十年翻页、确认按钮（两条路径）、异步打开、面板收不起 → BLOCKED、时分面板拒绝、无结构停止、peer 保护、接管前检查、完整管线开/关、**AI 通过日历图标打开（无 AI 时保持原失败语义）**、**脏状态接管（不重新点击触发器）**、**type 直接输入动作**。
+- `npm run test:generic-date`：24 个浏览器场景——契约快路径、AI 循环、月精度（两条路径）、十年翻页、确认按钮（两条路径）、异步打开、面板收不起 → BLOCKED、时分面板拒绝、无结构停止、peer 保护、接管前检查、完整管线开/关、**AI 通过日历图标打开（无 AI 时保持原失败语义）**、**脏状态接管（不重新点击触发器）**、**type 直接输入动作**、**先失败再换策略存活（无进展计数回归）**；以及 **CDP 集成轮**（开启「实验：浏览器层点击与输入」，真实 CDP 键鼠）：契约快路径、图标打开、确认按钮、真实 Escape 关闭失败 → BLOCKED、**遮挡目标拒绝点击 + 合成点击对照**。
 - `npm run test:date-benchmark`：四组对照 + 消融断言。
 - 全量回归：165 个单元测试与 popup-lifecycle、feishu-ud-captured、atsx、phoenix、published-controls（真实 rc-picker/Element/iView）、form、startup、auto-click-capture、browser-input、combo、grounded-fill 等浏览器套件全部保持通过。
 
