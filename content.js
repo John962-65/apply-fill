@@ -205,6 +205,7 @@
           <select class="resume-pro__select" id="resume-pro-template-select"></select>
         </label>
         <label style="display:block;margin:8px 0"><input type="checkbox" id="resume-pro-browser-input"> 实验：浏览器层点击与输入</label>
+        <label style="display:block;margin:8px 0"><input type="checkbox" id="resume-pro-generic-date"> 实验：未知日期 AI 交互接管</label>
         <button class="resume-pro__ai-button" id="resume-pro-ai-fill" type="button">一键 AI 填写</button>
         <button class="resume-pro__manager-button" id="resume-pro-repeat-fill" type="button">AI 辅助新增条目（先预览）</button>
         <button class="resume-pro__manager-button" id="resume-pro-collect-fill" type="button" title="先保存网页原文，再使用已配置的 AI 接口建议分类与经历归属">采集到资料树</button>
@@ -1250,27 +1251,61 @@
     }finally{stop.remove();}
   }
 
+  // 日期填写路由：规则适配器先行（0 次模型调用），失败后按实验开关交给通用日期 Agent 接管。
+  // 接管前先做脏状态检查；peer 基线在适配器尝试之前取，适配器改坏的另一端不会被当成基线。
+  function genericDateEnabled(){
+    const mode = self.__APPLY_FILL_DATE_MODE__;
+    if (mode === 'adapters-only') return false;
+    if (mode === 'agent-only') return true;
+    return Boolean(shadowRoot?.querySelector('#resume-pro-generic-date')?.checked);
+  }
   async function fillDateWithAgent(entry,value,meta){
     if (entry.element?.matches?.('[type="checkbox"],[type="radio"]')) {
       entry.fillNote='勾选控件不能按日期填写';return false;
     }
-    entry.interactions=[];let attempted=false,result=false;
-    const observe=()=>{
-      const fresh=refreshFieldEntry(meta,entry);
-      if(!fresh)return {blocked:'日期控件无法唯一定位'};
-      entry.element=fresh.element;
-      const current=readBackValue(entry);
-      const candidates=[{id:'stop',kind:'stop',label:'停止并交给用户'}];
-      if(!attempted&&!current)candidates.push({id:'write',kind:'write',label:'通过日期适配器填写有来源的目标日期'});
-      return {field:meta,record:entry.recordContext,target:value,current,lastAction:attempted?'日期操作未通过核对':'未操作',candidates,fingerprint:JSON.stringify([current,candidates])};
-    };
-    try{
-      const ok=await self.ResumeProInteractionAgent.run({observe,decide:entry.decide,maxSteps:3,trace:(action,detail)=>entry.interactions.push({action,detail}),execute:async()=>{attempted=true;result=await setElementValue(entry,value);},verify:async()=>{
-        await new Promise(r=>setTimeout(r,180));
-        return Boolean(result&& (typeof result!=='object'||result.ok))&&verifyFilledValue(entry,result?.value||value,meta.inputType);
-      }});
-      if(!ok)entry.fillNote=result?.reason||entry.fillNote||'日期交互未通过核对，未重复覆盖';return ok?result:false;
-    }catch(error){entry.fillNote=error.message;return false;}
+    entry.interactions=[];
+    const trace=(action,detail='')=>entry.interactions.push({action,detail});
+    if (self.__APPLY_FILL_DATE_MODE__ !== 'agent-only' && readBackValue(entry)
+      && verifyFilledValue(entry, readBackValue(entry), meta.inputType)) {
+      entry.fillNote='';return {ok:true,value:readBackValue(entry)};
+    }
+    const peerBefore = entry.rangePeer ? readBackValue(entry.rangePeer) : undefined;
+    let result=false;
+    if (self.__APPLY_FILL_DATE_MODE__ !== 'agent-only') {
+      try{result=await setElementValue(entry,value);}
+      catch(error){result={ok:false,reason:error.message};}
+      await new Promise(r=>setTimeout(r,180));
+      if (result && (typeof result!=='object'||result.ok) && verifyFilledValue(entry,result?.value||value,meta.inputType)) {
+        entry.fillNote='';return result;
+      }
+    }
+    const reason=(typeof result==='object'&&result?.reason)||entry.fillNote||'日期适配未通过核对';
+    trace('规则适配未完成',reason);
+    if (!genericDateEnabled()) { entry.fillNote=reason; return false; }
+    const inspect = self.ResumeProGenericDateAgent
+      ? genericDateAgent.inspectHandoff(entry, { peerBefore })
+      : { safe:false, code:'GENERIC_AGENT_UNAVAILABLE' };
+    if (!inspect.safe) {
+      entry.popupBlocked=true;
+      entry.fillNote = inspect.code==='PEER_CHANGED' ? '接管前发现另一端日期已被改变，停止本条经历'
+        : inspect.code==='GENERIC_AGENT_UNAVAILABLE' ? '通用日期模块未加载' : '接管前页面状态无法解释，未继续';
+      entry.interactionResult={status:'BLOCKED',code:inspect.code||'HANDOFF_UNSAFE'};
+      trace('接管前检查未通过',entry.fillNote);
+      return false;
+    }
+    try {
+      const takeover = await genericDateAgent.fill(entry, value, null, { ...inspect, peerBefore });
+      if (takeover.ok) { entry.fillNote=''; return takeover; }
+      entry.fillNote = takeover.reason || reason;
+      entry.interactionResult={status:takeover.status==='BLOCKED'?'BLOCKED':takeover.status==='SKIPPED'?'SKIPPED':'RECOVERED',code:takeover.code||'VALUE_UNCONFIRMED'};
+      if (takeover.status==='BLOCKED') entry.popupBlocked=true;
+      trace('AI 接管未完成',entry.fillNote);
+      return false;
+    } catch (error) {
+      entry.fillNote=error.message;
+      entry.interactionResult={status:'RECOVERED',code:'VALUE_UNCONFIRMED'};
+      return false;
+    }
   }
 
   async function handleAiFillClick(event, assisted = null) {
@@ -3511,6 +3546,22 @@
   const udDateAgent=self.ResumeProUdDateAgent.create({click:calendarClick,visible:isVisible,
     escape:node=>browserInputEnabled()?browserEscape(node):node.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true})),
     readPeer:readBackValue,refresh:entry=>entry.meta?refreshFieldEntry(entry.meta,entry):null});
+  const genericDateAgent=self.ResumeProGenericDateAgent.create({
+    visible:isVisible,click:calendarClick,
+    escape:node=>browserInputEnabled()?browserEscape(node):node.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true})),
+    dismiss:node=>browserInputEnabled()?browserAction(controlCatalog.dismissSurface(node)||node,{kind:'dismiss'}):null,
+    read:readBackValue,
+    peerValue:entry=>entry.rangePeer?readBackValue(entry.rangePeer):undefined,
+    refresh:entry=>entry.meta?refreshFieldEntry(entry.meta,entry):null,
+    input:async(node,text)=>{
+      if(browserInputEnabled())return browserInput(node,text,true);
+      node.focus();
+      const setter=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set;
+      setter.call(node,text);
+      node.dispatchEvent(new Event('input',{bubbles:true}));
+      node.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',code:'Enter',bubbles:true}));
+    }
+  });
 
   async function fillCombobox(entry, value) {
     return comboAgent.fill(entry,value);

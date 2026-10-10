@@ -82,6 +82,8 @@
         "capture-autoclick.js",
         "atsx-date-agent.js",
         "ud-date-agent.js",
+        "date-precision.js",
+        "date-agent.js",
         "content.js"
       ],
       "css": [
