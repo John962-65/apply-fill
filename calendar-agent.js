@@ -20,21 +20,37 @@
     const {visible,click} = config;
     const query = (node, selector) => Array.from(node?.querySelectorAll(selector) || []).filter(visible);
     const enabled = node => node && !node.closest('[disabled],[aria-disabled="true"],[class*="-disabled"],.disabled');
+    // 契约字段双形态：CSS 选择器字符串（目录契约），或 resolver 函数（动态契约，每次访问对当前作用域重新解析，不缓存节点）。
+    // inner 的作用域是格子本身，其余字段的作用域是面板或当前网格。
+    function resolveSpec(field, scope) {
+      if (!field) return [];
+      if (typeof field === 'function') {
+        try { return Array.from(field(scope) || []).filter(visible); } catch { return []; }
+      }
+      return query(scope, field);
+    }
     function recipe(panel) {
       return root.ResumeProControlCatalog.contracts.filter(c => c.calendar && (panel?.matches(c.calendar.panel) || panel?.querySelector(c.calendar.panel)));
     }
-    async function fill({entry,value,precision,panel:current,read,close,trace,readPeer}) {
-      const found = recipe(current());
-      if (!found.length) return null;
+    async function fill({entry,value,precision,panel:current,read,close,trace,readPeer,contract}) {
+      const found = contract
+        ? (validateContract(contract) ? [{name: contract.name || '动态合成日历契约', calendar: contract}] : null)
+        : recipe(current());
+      if (!found || !found.length) return null;
       let target = {value:String(value),padded:false};
       const fail = reason => {entry.fillNote=reason;trace('日历停止',reason);return {ok:false,value:target.value,padded:target.padded,reason};};
       if (found.length !== 1) return fail('同时出现多种日历结构，未猜测');
       const spec = found[0].calendar;
-      if (spec.unsupported && query(current(),spec.unsupported).length) return fail('该日历还需要选择时分，当前驱动只支持年月日');
+      const innerOf = cell => {
+        if (!spec.inner) return cell;
+        if (typeof spec.inner === 'function') { try { return spec.inner(cell) || cell; } catch { return cell; } }
+        return cell.querySelector(spec.inner) || cell;
+      };
+      if (spec.unsupported && resolveSpec(spec.unsupported,current()).length) return fail('该日历还需要选择时分，当前驱动只支持年月日');
       function observe() {
         const panel = current();
         if (!panel) return null;
-        const grids = ['year','month','day'].flatMap(mode => query(panel,spec[mode+'Grid']).map(grid => ({mode,grid,panel})));
+        const grids = ['year','month','day'].flatMap(mode => resolveSpec(spec[mode+'Grid'],panel).map(grid => ({mode,grid,panel})));
         return grids.length === 1 ? grids[0] : null;
       }
       const first = observe();
@@ -49,15 +65,15 @@
       const normalize = v => root.ResumeProAIHelpers.normalizeDateValue(v,'date');
       // rc-picker shows a preview while changing year/month. It is not a committed value.
       let selectedFinalCell=false;
-      let requiresConfirm=query(current(),spec.confirmButton).length>0,confirmed=false;
+      let requiresConfirm=resolveSpec(spec.confirmButton,current()).length>0,confirmed=false;
       const same = () => selectedFinalCell && (!requiresConfirm || confirmed) && normalize(read())===target.value;
       const peerBefore = readPeer?.();
       const peerChanged = () => peerBefore !== undefined && readPeer?.() !== peerBefore;
       const until = async predicate => {for(let i=0;i<20;i++){if(predicate())return true;await wait(80);}return false;};
-      const labels = s => query(s.panel,spec.yearButton);
+      const labels = s => resolveSpec(spec.yearButton,s.panel);
       const yearLabel = s => labels(s).filter(n=>/\d{4}/.test(n.textContent));
-      const monthLabel = s => query(s.panel,spec.monthButton).filter(n=>! /\d{4}/.test(n.textContent)&&monthNumber(n.textContent));
-      const fingerprint = s => s ? JSON.stringify([s.mode,query(s.panel,spec.header).map(n=>compact(n.textContent)),query(s.grid,spec[s.mode+'Cells']).map(n=>[compact(n.textContent),n.className])]) : '';
+      const monthLabel = s => resolveSpec(spec.monthButton,s.panel).filter(n=>! /\d{4}/.test(n.textContent)&&monthNumber(n.textContent));
+      const fingerprint = s => s ? JSON.stringify([s.mode,resolveSpec(spec.header,s.panel).map(n=>compact(n.textContent)),resolveSpec(spec[s.mode+'Cells'],s.grid).map(n=>[compact(n.textContent),n.className])]) : '';
       async function act(node,detail) {
         if (!enabled(node) || !visible(node)) return false;
         const before=fingerprint(observe());
@@ -72,7 +88,7 @@
       for(let step=0;step<45&&Date.now()-start<20000;step++) {
         if(peerChanged())return fail('操作后另一端日期被改变，已停止');
         if(selectedFinalCell && !confirmed) {
-          const buttons=query(current(),spec.confirmButton);
+          const buttons=resolveSpec(spec.confirmButton,current());
           if(buttons.length)requiresConfirm=true;
           if(requiresConfirm) {
             const usable=buttons.filter(enabled);
@@ -92,12 +108,12 @@
         if(!current()){await until(()=>same()||peerChanged());if(same()||peerChanged())continue;}
         const state=observe();
         if(!state)return fail('日历关闭、出现多个日期表或失去关联');
-        const cells=query(state.grid,spec[state.mode+'Cells']).filter(enabled);
+        const cells=resolveSpec(spec[state.mode+'Cells'],state.grid).filter(enabled);
         if(state.mode==='year') {
           const candidates=cells.filter(n=>compact(n.textContent)===String(yy));
           if(candidates.length>1)return fail('年份候选不唯一');
           if(candidates.length===1) {
-            const node=spec.inner?candidates[0].querySelector(spec.inner)||candidates[0]:candidates[0];
+            const node=innerOf(candidates[0]);
             if(targetPrecision==='year')selectedFinalCell=true;
             if(!await act(node,'选择有来源的年份'))return fail('选择年份后视图和值都未改变');
             continue;
@@ -106,7 +122,7 @@
           if(!years.length)return fail('无法读取当前年份范围');
           if(yy>=Math.min(...years)&&yy<=Math.max(...years))return fail('目标年份被禁用或候选缺失');
           const direction=yy<Math.min(...years)?'prevDecade':'nextDecade';
-          const buttons=query(state.panel,spec[direction]).filter(enabled);
+          const buttons=resolveSpec(spec[direction],state.panel).filter(enabled);
           if(buttons.length!==1||!await act(buttons[0],'切换年份范围'))return fail('年份翻页无效或按钮不唯一');
           continue;
         }
@@ -120,7 +136,7 @@
         if(state.mode==='month') {
           const candidates=cells.filter(n=>monthNumber(n.textContent)===mm);
           if(candidates.length!==1)return fail('目标月份被禁用或无法唯一确认');
-          const node=spec.inner?candidates[0].querySelector(spec.inner)||candidates[0]:candidates[0];
+          const node=innerOf(candidates[0]);
           if(targetPrecision==='month')selectedFinalCell=true;
           if(!await act(node,'选择有来源的月份'))return fail('选择月份后视图和值都未改变');
           continue;
@@ -141,6 +157,20 @@
     }
     return {fill};
   }
-  root.ResumeProCalendarAgent={create,monthNumber};
+  // 动态契约按声明的网格推导必需字段；缺导航链即判无效，调用方拿到 null 后转入 AI 接管，不猜测。
+  function validateContract(contract) {
+    if (!contract || typeof contract !== 'object') return null;
+    const grids = ['year','month','day'].filter(mode => contract[mode + 'Grid']);
+    if (!grids.length) return null;
+    for (const mode of grids) {
+      if (!contract[mode + 'Cells']) return null;
+      if (mode !== 'year' && !grids.includes('year')) return null;
+      if (mode === 'month' && !contract.yearButton) return null;
+      if (mode === 'day' && !contract.monthButton) return null;
+    }
+    if (grids.includes('year') && (!contract.prevDecade || !contract.nextDecade)) return null;
+    return contract;
+  }
+  root.ResumeProCalendarAgent={create,monthNumber,validateContract};
   if(typeof module!=='undefined'&&module.exports)module.exports=root.ResumeProCalendarAgent;
 })(typeof self!=='undefined'?self:globalThis);
