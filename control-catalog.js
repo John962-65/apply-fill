@@ -1,6 +1,9 @@
 /* Public DOM contracts. A component family does not prove which ATS hosts a page. */
 (function (root) {
   'use strict';
+  // Standard semantics are a separate layer; contracts below only supplement
+  // sites that omit ARIA, and never prove popup visibility or ownership.
+  const semantic={root:'[role="combobox"]',popup:'[role="listbox"],[role="tree"],[role="grid"]',option:'[role="option"],[role="treeitem"]'};
   const npm = (name, version) => `https://www.npmjs.com/package/${name}/v/${version}`;
   const contracts = [
     {
@@ -199,7 +202,7 @@
     const match = matches.find(m => !matches.some(other => other.n !== m.n && m.n.contains(other.n)));
     return match ? {id:match.c.id,name:match.c.name,evidence:match.c.evidence,version:match.c.version,driver:match.c.driver} : null;
   }
-  const api = {version:2,contracts,selector,popupRoot,isPopup,dismissSurface,identify,fieldRoot,sampleTargets};
+  const api = {version:2,semantic,contracts,selector,popupRoot,isPopup,dismissSurface,identify,fieldRoot,sampleTargets};
   root.ResumeProControlCatalog = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(typeof self !== 'undefined' ? self : globalThis);

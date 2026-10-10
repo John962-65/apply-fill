@@ -1,6 +1,6 @@
 {
   "name": "apply-fill",
-  "version": "0.8.20",
+  "version": "0.8.21",
   "private": true,
   "scripts": {
     "test": "node --test tests/*.test.js",
@@ -24,7 +24,8 @@
     "test:feishu-ud-captured": "node tests/feishu-ud-captured.cjs",
     "test:phoenix-published": "node tests/published-phoenix.cjs",
     "test:controls": "node tests/published-controls.cjs",
-    "test:startup": "node tests/fill-startup-browser.cjs"
+    "test:startup": "node tests/fill-startup-browser.cjs",
+    "test:popup-lifecycle": "node tests/popup-lifecycle.cjs"
   },
   "devDependencies": {
     "playwright": "1.62.1"

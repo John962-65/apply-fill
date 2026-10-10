@@ -22,7 +22,7 @@ const root=path.resolve(__dirname,'..');
     modelCalls++;assert.equal(message.formFields.length,103);
     const city=message.formFields.find(f=>f.idAttr==='city'),language=message.formFields.find(f=>f.idAttr==='language');
     assert.equal(city.optionsSource,'unobserved');assert.deepEqual(city.options,[]);assert.equal(city.optionsComplete,false);
-    assert.equal(language.optionsSource,'live');assert.deepEqual(language.options,['英语']);
+    assert.equal(language.optionsSource,'unobserved');assert.deepEqual(language.options,[]);assert.equal(inputCalls,0,'matching is independent of dropdown interaction');
     if(mode==='ai-failure')return {success:false,error:'接口暂不可用',diagnostics:{errorCode:'network',aiFields:103}};
     const targets={name:['匿名候选人','source-name'],email:['candidate@example.invalid','source-email'],city:['成都','source-city'],language:['英语','source-language'],note:['简历备注','source-note']};
     const proposed=message.formFields.filter(f=>targets[f.idAttr]).map(f=>({fieldId:f.fieldId,value:targets[f.idAttr][0],sourceId:targets[f.idAttr][1]}));
@@ -96,15 +96,15 @@ const root=path.resolve(__dirname,'..');
    if(mode==='ai-failure'){
     assert.equal(modelCalls,1);assert.equal(result.name,'');assert.equal(result.email,'');assert.equal(result.note,'人工备注');assert.equal(result.language,'');
     assert.match(result.diagnostic,/结果：失败；错误类别：network/);assert.match(result.diagnostic,/中断阶段：AI 匹配/);
-    assert.match(result.diagnostic,/尝试 2；读到选项 1；失败 1/);assert.match(result.diagnostic,/input_target_covered/);
+    assert.match(result.diagnostic,/填写时按需读取/);assert.doesNotMatch(result.diagnostic,/input_target_covered/);assert.equal(inputCalls,0);
     assert.equal(result.enabled,true);assert.deepEqual(errors,[]);
     console.log('PASS diagnostic: model failure is identified at AI matching and keeps the earlier option-read report');
    }else{
     assert.equal(modelCalls,1);assert.equal(result.name,'匿名候选人');assert.equal(result.email,'candidate@example.invalid');assert.equal(result.note,'人工备注');assert.equal(result.language,'英语');
-    assert.equal(result.city,mode==='covered'?'':'成都');assert.equal(result.triggerIsControl,true);
-    assert.match(result.status,new RegExp('已填写 '+(mode==='covered'?3:4)+' 个字段'));
-    assert.match(result.diagnostic,/中断阶段：无/);assert.match(result.diagnostic,/网页字段：103/);assert.match(result.diagnostic,/尝试 2；读到选项 1；失败 1/);
-    assert.match(result.diagnostic,new RegExp(mode==='covered'?'input_target_covered':'input_attach'));assert.match(result.trace,/选项预读未完成/);
+    assert.equal(result.city,'');assert.equal(result.triggerIsControl,true);
+    assert.match(result.status,/已填写 3 个字段/);
+    assert.match(result.diagnostic,/中断阶段：无/);assert.match(result.diagnostic,/网页字段：103/);assert.match(result.diagnostic,/填写时按需读取/);
+    assert.match(result.diagnostic,new RegExp(mode==='covered'?'input_target_covered':'input_attach'));assert.doesNotMatch(result.trace,/选项预读未完成/);
     assert.equal(result.wrongClicks,0);assert.equal(result.untrustedClicks,0);assert.equal(result.extra,false);assert.equal(result.enabled,true);assert.deepEqual(errors,[]);
     console.log('PASS full 103-field flow:',mode,'; AI started; other fields filled; failed option read identified; manual value retained');
    }

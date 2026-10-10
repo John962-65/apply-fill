@@ -5,18 +5,19 @@ const root=path.resolve(__dirname,'..');
  const {performInput}=await import('../browser-input.mjs');
  const browser=await chromium.launch({headless:true,executablePath:process.env.CHROMIUM_EXECUTABLE_PATH,args:['--no-sandbox']});
  try{
-  for(const mode of ['normal','sticky','discard','date-discard','reverse-nav']){
+  for(const mode of ['normal','sticky','inline-list','local-sticky','global-modal','focus-lock','target-covered','unknown-popup','initial-unknown','discard','date-discard','reverse-nav']){
    const page=await browser.newPage({viewport:{width:1100,height:900}}),errors=[];page.on('pageerror',e=>errors.push(e.message));
    const cdp=await page.context().newCDPSession(page);await page.exposeFunction('realInput',a=>performInput((m,p)=>cdp.send(m,p),a));
    await page.route('https://fixture.invalid/**',r=>r.fulfill({contentType:'text/html',body:fs.readFileSync(path.join(__dirname,'fixtures/feishu-ud-captured.html'),'utf8')}));
    await page.goto('https://fixture.invalid/form?mode='+mode);
    await page.evaluate(()=>{
     self.__RESUME_PRO_TEST__=true;const host=document.createElement('div');host.id='resume-pro-sidebar';document.body.append(host);
-    self.facts={'姓名':'示例应聘者','手机号码':'13900000000','邮箱':'applicant@example.invalid','性别':'男','学校名称':'示例大学','学历':'硕士研究生','出生日期':'2002-05','自我评价':'示例评价'};
+    self.facts={'姓名':'示例应聘者','手机号码':'13900000000','邮箱':'applicant@example.invalid','性别':'男','学校名称':'示例大学','学历':'硕士研究生','出生日期':'2001-03','自我评价':'示例评价'};
+    self.optionsSeenByModel=null;
     self.fixtureStore={templates:[{id:'t',name:'匿名资料',groups:[{id:'g',name:'个人资料',fields:Object.entries(facts).map(([label,value],i)=>({id:'s'+i,key:label,label,value}))}]}],activeTemplateId:'t',aiConfig:{apiUrl:'https://fixture.invalid/api',model:'fixture',apiKey:'fixture'}};
     self.chrome={runtime:{id:'fixture',getManifest:()=>({version:'test'}),getURL:p=>new URL(p,location.origin).href,sendMessage:async m=>{
      if(m.type==='BROWSER_INPUT')return realInput(m.action);
-     if(m.type==='AI_FILL')return {success:true,matches:m.formFields.flatMap(f=>facts[f.label]?[{fieldId:f.fieldId,value:facts[f.label],resumeKey:f.label,source:'ai'}]:[])};
+     if(m.type==='AI_FILL'){optionsSeenByModel={selections:stats.selections,opens:document.querySelectorAll('.ud__select__dropdown').length};return {success:true,matches:m.formFields.flatMap(f=>facts[f.label]?[{fieldId:f.fieldId,value:facts[f.label],resumeKey:f.label,source:'ai'}]:[])};}
      if(m.type==='AI_INTERACTION_STEP')return {success:true,action:{id:(m.observation.candidates.find(c=>c.kind==='write')||m.observation.candidates.find(c=>c.kind==='stop')).id}};
      return {ready:true};
     }},storage:{local:{get:async()=>structuredClone(fixtureStore),set:async c=>Object.assign(fixtureStore,c)},onChanged:{addListener(){}}}};
@@ -36,17 +37,24 @@ const root=path.resolve(__dirname,'..');
       .map(t=>t.node.className);diagnosticNodes.forEach(n=>n.remove());
     const initial={labels:scan.fields.map(f=>f.label),schoolPanel:Boolean(api.comboAgent.panel(scan.fieldMap.get(school.fieldId))),schoolTrigger:scan.fieldMap.get(school.fieldId).trigger.id,
      bare:document.elementFromPoint(20,20)===document.body,fieldContext:captured.fieldContext?.attrs.class,panels:recorder.panels().length,diagnostic};
-    if(['normal','sticky'].includes(mode)){
+    if(!['discard','date-discard','reverse-nav'].includes(mode)){
+     if(['initial-unknown','inline-list'].includes(mode)){const other=document.createElement('div');other.setAttribute('role','listbox');other.innerHTML='<div role="option">其他候选</div>';if(mode==='initial-unknown')other.style.cssText='position:fixed;left:10px;top:10px;background:white';other.onclick=()=>stats.dangerClicks++;document.body.append(other);}
      await api.handleAiFillClick({currentTarget:h.querySelector('button')});
-     return {initial,status:h.querySelector('#resume-pro-status').textContent,trace:h.querySelector('textarea').value,diagnostics:h.querySelector('#resume-pro-diagnostics-text').value,
+     const first={initial,status:h.querySelector('#resume-pro-status').textContent,trace:h.querySelector('textarea').value,diagnostics:h.querySelector('#resume-pro-diagnostics-text').value,
       values:Object.fromEntries(['name','phone','email','school','birth','summary'].map(id=>[id,document.getElementById(id).value])),
       gender:document.getElementById('gender').querySelector('.ud__select__selector__selectItem').textContent,
       degree:document.getElementById('degree').querySelector('.ud__select__selector__selectItem').textContent,
-      stats,open:Array.from(document.querySelectorAll('.ud__select__dropdown,.ud__picker-dropdown')).filter(n=>getComputedStyle(n).display!=='none').length,
+      stats,optionsSeenByModel,open:Array.from(document.querySelectorAll('.ud__select__dropdown,.ud__picker-dropdown')).filter(n=>getComputedStyle(n).display!=='none').length,
       before,after:fixtureStore.templates};
+     if(mode==='local-sticky'){
+      window.disableStuck=true;await api.handleAiFillClick({currentTarget:h.querySelector('button')});
+      first.retry={status:h.querySelector('#resume-pro-status').textContent,trace:h.querySelector('textarea').value,values:{school:document.getElementById('school').value,birth:document.getElementById('birth').value},
+       gender:document.getElementById('gender').querySelector('.ud__select__selector__selectItem').textContent,open:Array.from(document.querySelectorAll('.ud__select__dropdown,.ud__picker-dropdown')).filter(n=>getComputedStyle(n).display!=='none').length};
+     }
+     return first;
     }
     const f=scan.fields.find(f=>f.label===(mode==='discard'?'学校名称':'出生日期')),e=scan.fieldMap.get(f.fieldId);e.meta=f;
-    const filled=await api.setElementValue(e,mode==='discard'?'示例大学':'2002-05');
+    const filled=await api.setElementValue(e,mode==='discard'?'示例大学':'2001-03');
     return {initial,filled,read:api.readBackValue(e),note:e.fillNote,stats,collected:api.readFilledFields()};
    },mode);
    assert.equal(result.initial.schoolPanel,false,'the input dropdown-open wrapper is never a popup');
@@ -55,22 +63,33 @@ const root=path.resolve(__dirname,'..');
    assert.ok(result.initial.diagnostic.includes('ud__picker')&&result.initial.diagnostic.includes('throne-biz-date-range-picker-input'),'repeated dropdown labels must leave a slot for each distinct date shape');
    assert.deepEqual(result.initial.labels,['姓名','手机区号','手机号码','邮箱','性别','学校名称','学历','出生日期','自我评价']);
    assert.equal(result.stats.submissions,0);assert.equal(result.stats.untrusted,0);assert.deepEqual(errors,[]);
-   if(mode==='normal'){
+   if(result.diagnostics)assert.doesNotMatch(result.diagnostics,/示例应聘者|13900000000|applicant@example|示例大学/,'failure evidence must not contain resume values');
+   if(['normal','sticky','inline-list'].includes(mode)){
     assert.match(result.status,/已填写 8 个字段/,JSON.stringify(result));assert.doesNotMatch(result.trace,/未完成填写|尚未尝试|没写进去|没有任何标签/);
-    assert.deepEqual(result.values,{name:'示例应聘者',phone:'13900000000',email:'applicant@example.invalid',school:'示例大学',birth:'2002-05',summary:'示例评价'});
+    assert.deepEqual(result.values,{name:'示例应聘者',phone:'13900000000',email:'applicant@example.invalid',school:'示例大学',birth:'2001-03',summary:'示例评价'});
     assert.equal(result.gender,'男');assert.equal(result.degree,'硕士研究生');assert.equal(result.open,0);assert.deepEqual(result.before,result.after);
-    assert.ok(result.stats.dismissed>=3,'prefetch must actually dismiss the owned list');
-   }else if(mode==='sticky'){
-    assert.match(result.trace,/尚未尝试/);assert.doesNotMatch(result.trace,/写了但页面没认|8 个字段未完成填写/);
-    assert.match(result.diagnostics,/尚未尝试：8/);assert.match(result.diagnostics,/没填上：0/);
-    assert.equal(result.values.name,'');assert.equal(result.values.summary,'');assert.ok(result.open>0);assert.deepEqual(result.before,result.after);
+    assert.ok(result.stats.dismissed>=3,'field transactions commit and dismiss their own menus');assert.equal(result.stats.dangerClicks,0);
+   }else if(mode==='initial-unknown'){
+    assert.equal(result.values.name,'');assert.equal(result.values.summary,'');assert.equal(result.stats.selections,0);assert.equal(result.stats.dangerClicks,0);
+    assert.match(result.diagnostics,/尚未尝试：8/);assert.match(result.diagnostics,/没填上：0/);assert.match(result.diagnostics,/OTHER_POPUP_UNCONFIRMED/);assert.deepEqual(result.before,result.after);
+   }else if(['local-sticky','global-modal','focus-lock','target-covered','unknown-popup'].includes(mode)){
+    assert.equal(result.values.name,'示例应聘者');assert.equal(result.values.phone,'13900000000');assert.equal(result.values.email,'applicant@example.invalid');
+    assert.equal(result.gender,'');assert.equal(result.values.school,'');assert.equal(result.degree,'');assert.equal(result.values.birth,'');assert.ok(result.open>0);assert.deepEqual(result.before,result.after);
+    assert.equal(result.stats.dangerClicks,0);assert.match(result.diagnostics,/没填上：1/);assert.match(result.diagnostics,/交互失败证据/);
+    if(mode==='local-sticky'){
+     assert.equal(result.values.summary,'示例评价');assert.match(result.status,/已填写 4 个字段/);assert.match(result.diagnostics,/局部跳过：3/);assert.doesNotMatch(result.trace,/尚未尝试/);
+     assert.match(result.retry.status,/已填写 4 个字段/);assert.match(result.retry.status,/4 项页面上已经有内容/);assert.doesNotMatch(result.retry.trace,/局部跳过|尚未尝试|没写进去/);
+     assert.equal(result.retry.values.school,'示例大学');assert.equal(result.retry.values.birth,'2001-03');assert.equal(result.retry.gender,'男');assert.equal(result.retry.open,0);
+    }
+    else{assert.equal(result.values.summary,'');assert.match(result.trace,/尚未尝试/);assert.match(result.diagnostics,new RegExp(({ 'global-modal':'PAGE_MODAL_BLOCKED','focus-lock':'PAGE_FOCUS_LOCKED','target-covered':'TARGET_COVERED','unknown-popup':'POPUP_OWNERSHIP_UNCONFIRMED'})[mode]));}
    }else if(mode==='discard'){
     assert.equal(result.filled,false);assert.equal(result.read,'');assert.ok(!result.collected.some(f=>f.label==='学校名称'&&f.value==='示例大学'));
    }else{
     assert.equal(result.filled.ok,false);assert.equal(result.read,'');
-    assert.ok(!result.collected.some(f=>f.label==='出生日期'&&f.value==='2002-05'));
+    assert.ok(!result.collected.some(f=>f.label==='出生日期'&&f.value==='2001-03'));
     if(mode==='reverse-nav')assert.match(result.note,/未按目标方向/);
    }
+   if(result.optionsSeenByModel)assert.deepEqual(result.optionsSeenByModel,{selections:0,opens:0},'AI matching must run without opening or selecting a single dropdown');
    console.log('PASS captured UD shape / full prefetch-fill / commit proof:',mode);await page.close();
   }
  }finally{await browser.close();}

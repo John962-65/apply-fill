@@ -56,7 +56,8 @@
     statusTimer: null,
     lastFocusedField: null,
     chipAction: null,
-    lastCaptureTargets: []
+    lastCaptureTargets: [],
+    lastInteractionFailures: []
   };
 
   // Read-modify-write must not interleave with the manager page's own per-key diff write,
@@ -354,7 +355,7 @@
     openManagerButton?.addEventListener("click", () => openManager());
     sidebar.querySelector("#resume-pro-profile-offer-add")?.addEventListener("click", addUnansweredToProfile);
     sidebar.querySelector("#resume-pro-profile-offer-skip")?.addEventListener("click", closeProfileOffer);
-    const controlCapture=self.ResumeProControlCapture.create({onUpdate:info=>{
+    const controlCapture=self.ResumeProControlCapture.create({getInteractionFailures:()=>state.lastInteractionFailures,onUpdate:info=>{
       sidebar.querySelector('#resume-pro-capture-status').textContent=`${info.active?'采集中':'未在采集'} · ${info.count} 次快照。${info.message}`;
       sidebar.querySelector('#resume-pro-capture-preview').value=controlCapture.preview();
       sidebar.querySelector('#resume-pro-capture-start').textContent=info.active?'重新选择控件（清空本次采集）':'开始采集控件结构';
@@ -1012,19 +1013,11 @@
     return Boolean(normalized && normalized !== expected && actual === normalized);
   }
 
-  // 先点开下拉拿真实选项，再让 AI 从选项里选 —— 而不是 AI 先说一个值再去选项里找。
-  // 「简历写六级、页面只有 CET 6」这类错从根上没了。
+  // 匹配前只观察已展开的选项；实际填写时再打开、读取并确认选择。
   async function prefetchComboOptions(fields, fieldMap) {
-    let opened = 0;
-    const report = { optionAttempts: 0, optionObserved: 0, optionFailures: 0, optionErrors: [] };
-    // Clean up owned lists left open by an older fill before probing another field.
-    for(const field of fields){
-      const entry=fieldMap.get(field.fieldId);
-      if(entry?.kind==='combobox'&&(comboAgent.panel(entry)||comboAgent.pending(entry))&&!await closeCombobox(entry)){
-        entry.prefetchError='候选列表未能关闭，已暂停选项预读';
-        report.optionFailures++;report.optionErrors.push('unknown');return report;
-      }
-    }
+    // Passive observation only. Opening/searching/scrolling belongs to the
+    // grounded field transaction, after AI matching, never to whole-page setup.
+    const report = { optionMode:'on-demand', optionAttempts:0, optionObserved:0, optionFailures:0, optionErrors:[] };
     for (const field of fields) {
       if (field.inputType !== "combobox") {
         continue;
@@ -1034,39 +1027,13 @@
       field.options = [];
       field.optionsSource = "unobserved";
       field.optionsComplete = false;
-      if (!entry || entry.kind !== "combobox" || opened >= 25) {
+      if (!entry || entry.kind !== "combobox") {
         continue;
       }
       entry.meta=field;
-      // Existing selections are protected by the fill policy and need no probing.
-      if (hasExistingValue(entry)) continue;
-      opened += 1;
-      report.optionAttempts += 1;
-      let closeFailed=false;
-      try {
-        const options = await openComboboxOptions(entry);
-        // A virtualized list may expose only part of the vocabulary.
-        const texts = (await collectAllComboOptions(entry, options)).filter(text=>!isFormatPlaceholder(text)).slice(0, 60);
-        if (texts.length) {
-          field.options = texts;
-          field.optionsSource = "live";
-          entry.observedOptions = texts;
-          report.optionObserved += 1;
-        }
-      } catch (error) {
-        // Reading options is optional. One inaccessible control must not abort
-        // matching for all the other fields, nor imply that its vocabulary is empty.
-        report.optionFailures += 1;
-        const code = safeInputErrorCode(error.code) || 'unknown';
-        report.optionErrors.push(code);
-        entry.prefetchError = error.message || '未能读取当前控件的选项';
-        entry.interactions ??= [];
-        entry.interactions.push({action: '预读跳过', detail: entry.prefetchError});
-      } finally {
-        try { closeFailed=!await closeCombobox(entry); } catch { closeFailed=true; }
-      }
-      if(closeFailed){report.optionFailures++;report.optionErrors.push('unknown');entry.prefetchError='候选列表未能关闭，已暂停选项预读';break;}
-      await new Promise((resolve) => setTimeout(resolve, 60));
+      const texts=comboAgent.observe(entry).map(n=>(n.getAttribute('aria-label')||n.textContent||'').trim())
+        .filter(text=>!isFormatPlaceholder(text)).slice(0,60);
+      if(texts.length){field.options=texts;field.optionsSource='live';entry.observedOptions=texts;report.optionObserved++;}
     }
     return report;
   }
@@ -1166,7 +1133,7 @@
     return `${meta.group ? `[${meta.group}] ` : ''}${meta.recordIndex ? `第 ${meta.recordIndex} 条 · ` : ''}${name || `未识别名称的${kind}（${meta.fieldId || '位置未知'}）`}${part ? ` · ${part}` : ''}`;
   }
 
-  async function verifyWrittenValues(written, outcomes) {
+  async function verifyWrittenValues(written, outcomes, {focus=true}={}) {
     if (!written.size) {
       return { drift: 0, swapped: 0, manual: [] };
     }
@@ -1211,7 +1178,7 @@
       if (other) swapped += 1;
     });
 
-    firstFocus?.focus?.();
+    if(focus)firstFocus?.focus?.();
     return { drift, swapped, manual };
   }
 
@@ -1326,6 +1293,7 @@
     }
 
     button.disabled = true;
+    state.lastInteractionFailures=[];
     // Warm the desktop modules while the fill runs, so that when it ends the page can be read
     // for the archive offer without waiting on anything (see offerFillRecord).
     loadDesktopModules().catch(() => {});
@@ -1346,6 +1314,7 @@
     let unconfirmedCount = 0;
     const unfilledLabels = [];
     const notAttemptedLabels = [];
+    const locallySkippedLabels = [];
     const traceOutcomes = new Map();
     const writtenEntries = new Map();
     let traceText = "";
@@ -1391,11 +1360,12 @@
       );
       // 平台映射：上次在这套表单上确认过的对应关系，直接按简历字段填，不再问模型。
       const platformSnapshot = assisted ? null : await loadPlatformSnapshot();
-      // Read this page's options. Historical/seed lists may be partial or belong to a different employer.
+      // Observe visible lists without opening anything. Missing lists remain
+      // unknown until the actual field is filled, not a forbidden empty enum.
       stage = 'options';
       phase = 'optionsMs';
       phaseStart = performance.now();
-      button.textContent = '正在读取网页选项...';
+      button.textContent = '正在整理网页字段...';
       diagnostics = await prefetchComboOptions(fields, fieldMap);
       timing.optionsMs = performance.now() - phaseStart;
       phase = null;
@@ -1509,16 +1479,6 @@
 
         if (!element) continue;
         fieldMap.set(match.fieldId, element);
-        if(!await comboAgent.ready(element)){
-          const blocker=comboAgent.blocking();
-          const blockerName=blocker?.meta?reviewFieldName(blocker.meta):'前一控件';
-          for(const pending of sortedMatches.slice(sortedMatches.indexOf(match))){
-            const pendingEntry=fieldMap.get(pending.fieldId),pendingMeta=fieldMetaMap.get(pending.fieldId);
-            if(pendingEntry)pendingEntry.fillNote=`${blockerName}的候选列表仍未关闭，本字段尚未尝试`;
-            traceOutcomes.set(pending.fieldId,{ok:false,notAttempted:true,blockedBy:blockerName});notAttemptedLabels.push(reviewFieldName(pendingMeta));
-          }
-          break;
-        }
         if (assisted && (!isAssistedTextField(element) || hasExistingValue(element) || !assisted.scopes.some(scope => scope.isConnected && scope.contains(element.element)))) continue;
 
         // 用户定的规则：网页上已经有内容的字段，插件一律不动 —— 哪怕 AI 认为该改。
@@ -1530,10 +1490,10 @@
         }
 
         const meta=fieldMetaMap.get(match.fieldId);
+        element.meta=meta;
         const recordChanged=currentRecordStateReason(meta,fields,fieldMap);
         if(recordChanged){element.fillNote=recordChanged;traceOutcomes.set(match.fieldId,{ok:false});unfilledLabels.push(reviewFieldName(meta));continue;}
         if(/勾选|同意|承诺书|用户协议|隐私声明/.test(meta.label||'')){element.fillNote='协议和承诺请本人确认';traceOutcomes.set(match.fieldId,{ok:false});continue;}
-        element.meta=meta;
         element.recordContext=fields.filter(f=>f.group===meta.group&&f.recordIndex===meta.recordIndex).map(f=>({label:f.label,current:readBackValue(fieldMap.get(f.fieldId))})).slice(0,20);
         element.decide=observation=>decideInteraction(observation,aiConfig,button);
         if(meta.rangeId){
@@ -1542,6 +1502,23 @@
           if(reason){element.fillNote=reason;traceOutcomes.set(match.fieldId,{ok:false});unfilledLabels.push(reviewFieldName(meta));continue;}
         }else if(/起止|起讫/.test(meta.label)){
           element.fillNote='未能明确日期区间的开始和结束，已停止';traceOutcomes.set(match.fieldId,{ok:false});unfilledLabels.push(reviewFieldName(meta));continue;
+        }
+        const readiness=await comboAgent.prepare(element);
+        if(readiness.status==='SKIPPED'){
+          const blockerName=readiness.blocker?.meta?reviewFieldName(readiness.blocker.meta):'前一控件';
+          element.fillNote=`${blockerName}的弹层仍未收起，本字段局部跳过`;
+          traceOutcomes.set(match.fieldId,{ok:false,notAttempted:true,isolated:true,blockedBy:blockerName,failureCode:readiness.code});
+          locallySkippedLabels.push(reviewFieldName(meta));continue;
+        }
+        if(readiness.status==='BLOCKED'){
+          const blockerName=readiness.blocker?.meta?reviewFieldName(readiness.blocker.meta):'未确认的页面弹层';
+          for(const pending of sortedMatches.slice(sortedMatches.indexOf(match))){
+            const pendingEntry=fieldMap.get(pending.fieldId),pendingMeta=fieldMetaMap.get(pending.fieldId);
+            if(pendingEntry&&hasExistingValue(pendingEntry)){keptCount++;traceOutcomes.set(pending.fieldId,{ok:false,kept:true});continue;}
+            if(pendingEntry)pendingEntry.fillNote=`页面状态不安全（${readiness.code}），本字段尚未尝试`;
+            traceOutcomes.set(pending.fieldId,{ok:false,notAttempted:true,blockedBy:blockerName,failureCode:readiness.code});notAttemptedLabels.push(reviewFieldName(pendingMeta));
+          }
+          break;
         }
         let filled = element.kind==='combobox'?setElementValue(element,match.value)
           : (element.dateLike||element.pickerType)?fillDateWithAgent(element,match.value,meta):setElementValue(element, match.value);
@@ -1603,7 +1580,7 @@
         }
       }
 
-      const verified = await verifyWrittenValues(writtenEntries, traceOutcomes);
+      const verified = await verifyWrittenValues(writtenEntries, traceOutcomes,{focus:!notAttemptedLabels.length&&!locallySkippedLabels.length});
       writtenEntries.forEach((record, id) => fieldMap.set(id, record.entry));
       driftCount = verified.drift;
       filledCount = Math.max(0, filledCount - driftCount);
@@ -1616,6 +1593,15 @@
       // 写不进去的控件也要把类名线索带出来：用户不会去 F12 里抓 DOM，
       // 这些线索是下次能补上驱动的唯一依据。
       const controlHints = collectControlHints({ fields, fieldMap, outcomes: traceOutcomes, dropped: droppedControls });
+      // Only enum codes and structural booleans/counts: never copy values,
+      // option text, page IDs, URLs or provider errors into failure evidence.
+      diagnostics.interactionFailures=self.ResumeProPopupController.sanitizeFailures(fields.flatMap(field=>{
+        const entry=fieldMap.get(field.fieldId),result=entry?.interactionResult,out=traceOutcomes.get(field.fieldId);
+        if(out?.ok||out?.kept||!result&&!out?.failureCode)return [];
+        return [{fieldId:field.fieldId,status:out?.failureCode?(out.isolated?'SKIPPED':'BLOCKED'):result.status,
+          code:out?.failureCode||result.code,observation:result?.observation,recovery:result?.recovery}];
+      }));
+      state.lastInteractionFailures=diagnostics.interactionFailures;
       // 这一轮没填上的控件，活引用只在本轮有效：自动点击采集要用，所以每次填写整体替换。
       state.lastCaptureTargets = buildCaptureTargets({ fields, fieldMap, outcomes: traceOutcomes });
       traceText = formatFieldTrace({ fields, fieldMap, matches: allMatches, outcomes: traceOutcomes, unlabeledCombos, notices: dateNotices, dropped: controlHints.list, droppedTotal: controlHints.total });
@@ -1631,13 +1617,14 @@
       const sourceNote = blockedFields.length
         ? `${blockedFields.length} 项被来源校验拦截，未写入；请查看字段对照表中的原因。`
         : "";
-      outcome = response.warning || unconfirmedCount || unfilledLabels.length || notAttemptedLabels.length || driftCount || blockedFields.length ? "partial" : "success";
+      outcome = response.warning || unconfirmedCount || unfilledLabels.length || notAttemptedLabels.length || locallySkippedLabels.length || driftCount || blockedFields.length ? "partial" : "success";
       const driftNote = driftCount
         ? `${driftCount} 项未通过页面读回校验${swappedCount ? `（其中 ${swappedCount} 项可能与其他字段串值）` : ""}，已标红可定位的控件，请核对后再提交。`
         : "";
       const unfilledNote = (unfilledLabels.length
         ? `${unfilledLabels.length} 项没填上：${summarizeLabels(unfilledLabels)}，请手动补上。`
-        : "")+(notAttemptedLabels.length?`${notAttemptedLabels.length} 项尚未尝试：前一控件弹层未关闭，请关闭弹层后重新填写。`:"");
+        : "")+(locallySkippedLabels.length?`${locallySkippedLabels.length} 项因局部弹层跳过，收起弹层后可补填。`:"")
+        +(notAttemptedLabels.length?`${notAttemptedLabels.length} 项尚未尝试：无法确认页面操作安全，请收起弹层后重新填写。`:"");
       const mappingNote = mappingFilledCount
         ? `其中 ${mappingFilledCount} 项按这套平台的快照映射直接填，未请求 AI${aiFields.length ? `（只把剩下 ${aiFields.length} 个字段送去匹配）` : "（本次没有字段发出去）"}。`
         : "";
@@ -1674,6 +1661,7 @@
       if (!diagnostics.errorCode || diagnostics.errorCode === 'none') diagnostics.errorCode = safeInputErrorCode(error.code) || 'unknown';
       showStatus(error.message || "AI 填写失败。", "error");
     } finally {
+      comboAgent.suspend();
       if (cancelButton) {
         cancelButton.hidden = true;
         cancelButton.onclick = null;
@@ -1683,7 +1671,7 @@
       if (phase) timing[phase] = performance.now() - phaseStart;
       const totalMs = performance.now() - totalStart;
       const summary = formatFillDiagnostics({ ...timing, totalMs,
-        fieldCount, filledCount, unfilledCount: unfilledLabels.length, notAttemptedCount:notAttemptedLabels.length, outcome, stage, diagnostics });
+        fieldCount, filledCount, unfilledCount: unfilledLabels.length, notAttemptedCount:notAttemptedLabels.length, locallySkippedCount:locallySkippedLabels.length, outcome, stage, diagnostics });
       const panel = shadowRoot?.querySelector("#resume-pro-diagnostics");
       const text = shadowRoot?.querySelector("#resume-pro-diagnostics-text");
       if (panel && text) {
@@ -1766,6 +1754,7 @@
     const missing = [];
     const failed = [];
     const notAttempted = [];
+    const locallySkipped = [];
     let localCount = 0;
     let mappingCount = 0;
     let aiCount = 0;
@@ -1792,7 +1781,8 @@
       let result;
 
       if (!outcome) { result = "尚未尝试"; notAttempted.push(title); }
-      else if (outcome.notAttempted) {result=`尚未尝试（${oneLine(outcome.blockedBy)||'前一控件'}的弹层未关闭）`;notAttempted.push(title);}
+      else if (outcome.notAttempted&&outcome.isolated) {result=`局部跳过（${oneLine(outcome.blockedBy)||'前一控件'}的弹层未关闭）`;locallySkipped.push(title);}
+      else if (outcome.notAttempted) {result=`尚未尝试（页面操作安全检查未通过：${outcome.failureCode||'POPUP_CLOSE_UNCONFIRMED'}）`;notAttempted.push(title);}
       else if (outcome.kept) {
         result = "页面上已有内容，按规则未改动";
         kept.push(title);
@@ -1817,6 +1807,8 @@
 
       const actions = fieldMap?.get(field.fieldId)?.interactions;
       if (actions?.length) rows.push(`${title} · 操作：${actions.map(item => item.action + (item.detail ? `（${item.detail}）` : "")).join(" → ")}`);
+      const transaction=fieldMap?.get(field.fieldId)?.interactionResult;
+      if(transaction&&!outcome?.ok&&!outcome?.kept)rows.push(`${title} · 交互结果：${transaction.status} / ${transaction.code}；状态 ${transaction.observation.state}；面板候选 ${transaction.observation.popupCandidates}`);
       const notice = notices?.get(field.fieldId);
       rows.push(`${title} → ${result} · ${match.source === "local" ? "规则补空" : (match.source === "mapping" ? "快照映射" : "AI")} · ${sourceOf(match)} = ${oneLine(match.value) || "空"}${notice ? `（${notice}）` : ""}`);
     });
@@ -1828,6 +1820,7 @@
     if (invented.length) notes.push(`${invented.length} 个字段的值在简历里找不到出处（${invented.slice(0, 6).join("、")}）`);
     if (blocked.length) notes.push(`${blocked.length} 个字段被来源校验拦截，未写入（${blocked.slice(0, 6).join("、")}），原因见明细`);
     if (failed.length) notes.push(`${failed.length} 个字段未完成填写（${failed.slice(0, 6).join("、")}）`);
+    if (locallySkipped.length) notes.push(`${locallySkipped.length} 个字段因局部弹层跳过（${locallySkipped.slice(0,6).join('、')}），已继续检查其他字段`);
     if (notAttempted.length) {
       const blockers=[...new Set(fields.map(f=>outcomes.get(f.fieldId)?.blockedBy).filter(Boolean))];
       notes.push(`${notAttempted.length} 个字段尚未尝试${blockers.length?`（${blockers.slice(0,2).join('、')}的弹层未关闭，收起后重试）`:'，本轮未执行到写入'}`);
@@ -2172,6 +2165,7 @@
     const seconds = (value) => typeof value === "number" && Number.isFinite(value) ? `${(value / 1000).toFixed(2)} s` : "未执行 / 未取得";
     const count = (value) => Number.isInteger(value) && value >= 0 ? value : "未取得";
     const d = result.diagnostics;
+    const interactionFailures=self.ResumeProPopupController.sanitizeFailures(d.interactionFailures);
     // Explicit allowlist: never copy provider messages, URL, keys or field values.
     const code = /^(none|cancelled|network|format|http_\d{3})$/.test(d.errorCode) ? d.errorCode : safeInputErrorCode(d.errorCode) || "unknown";
     const stage = ({scan:'扫描',options:'读取控件选项',match:'AI 匹配',fill:'填写与核对'})[result.stage] || '未取得';
@@ -2181,16 +2175,19 @@
       `中断阶段：${result.outcome === 'failed' ? stage : '无'}`,
       `网页字段：${count(result.fieldCount)}；成功填写：${count(result.filledCount)}；没填上：${count(result.unfilledCount)}`,
       ...(result.notAttemptedCount?[`尚未尝试：${count(result.notAttemptedCount)}（前一控件弹层未关闭）`]:[]),
+      ...(result.locallySkippedCount?[`局部跳过：${count(result.locallySkippedCount)}（其他可安全操作的字段继续）`]:[]),
       `AI 匹配：${count(d.aiMatches)}；规则补空：${count(d.ruleMatches)}；来源校验拦截：${count(d.rejectedSources)}`,
       `送 AI 字段：${count(d.aiFields)}（全部网页字段）`,
       `候选 / 简历字段：${count(d.candidateFields)} / ${count(d.resumeFields)}`,
       `用户 prompt：${count(d.promptBytes)} bytes`,
       `扫描：${seconds(result.scanMs)}`,
-      `选项预读：${seconds(result.optionsMs)}；尝试 ${count(d.optionAttempts)}；读到选项 ${count(d.optionObserved)}；失败 ${count(d.optionFailures)}`,
+      d.optionMode==='on-demand'?`候选选项：填写时按需读取；扫描已展开列表 ${count(d.optionObserved)}；主动预读 0`
+        :`选项预读：${seconds(result.optionsMs)}；尝试 ${count(d.optionAttempts)}；读到选项 ${count(d.optionObserved)}；失败 ${count(d.optionFailures)}`,
       ...(d.optionFailures ? [`预读错误：${[...new Set(d.optionErrors || [])].map(c=>safeInputErrorCode(c)||'unknown').join('、')}`] : []),
       `匹配往返（含后台处理）：${seconds(result.roundTripMs)}`,
       `API（含响应读取）：${seconds(d.apiMs)}`,
-      `填写：${seconds(result.fillMs)}；总计：${seconds(result.totalMs)}`
+      `填写：${seconds(result.fillMs)}；总计：${seconds(result.totalMs)}`,
+      ...(interactionFailures.length?[`交互失败证据（无资料值）：${JSON.stringify(interactionFailures)}`]:[])
     ].join("\n");
   }
 

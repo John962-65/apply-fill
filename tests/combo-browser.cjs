@@ -6,7 +6,7 @@ const assert=require('node:assert/strict');const path=require('node:path');
  try{
  const page=await browser.newPage();const errors=[];page.on('pageerror',e=>errors.push(e.message));
  await page.setContent('<body></body>');
- for(const file of ['ai-helpers.js','interaction-agent.js','combo-agent.js'])await page.addScriptTag({path:path.resolve(__dirname,'..',file)});
+ for(const file of ['ai-helpers.js','interaction-agent.js','popup-controller.js','combo-agent.js'])await page.addScriptTag({path:path.resolve(__dirname,'..',file)});
  for(const planning of [false,true]) for(const mode of ['delayed','unlinked','search','preopened-search','cascade','rerender','duplicate','discard','existing']){
   const result=await page.evaluate(async ({mode,planning})=>{
    document.body.innerHTML='<div role="listbox" id="unrelated"><div role="option">杭州</div></div><div id="field"><span class="selectedValue"></span><input placeholder="请选择"></div>';

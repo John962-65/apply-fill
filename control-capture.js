@@ -8,7 +8,7 @@
   const OMIT = 'script,style,link,iframe,object,embed,svg,canvas';
   const ATTRS = ['class','role','type','placeholder','aria-expanded','aria-hidden','aria-disabled','aria-haspopup','aria-selected','tabindex','readonly','disabled','contenteditable'];
   const visible = n => {const r=n.getBoundingClientRect(),s=getComputedStyle(n);return r.width>0&&r.height>0&&s.display!=='none'&&s.visibility!=='hidden'&&s.opacity!=='0';};
-  function create({onUpdate=()=>{}}={}) {
+  function create({onUpdate=()=>{},getInteractionFailures=()=>[]}={}) {
     let data, active=false, auto=false, root=null, target=null, baseline=new Set(), discovered=new Set(), observer=null, deadline=null, debounce=null;
     let timers=new Set(), ids=new WeakMap(), nextId=0, count=0;
     const id=n=>{if(!n)return null;if(!ids.has(n))ids.set(n,'n'+(++nextId));return ids.get(n);};
@@ -100,6 +100,7 @@
     function start({deadlineMs=60000}={}) {
       stop('',false);ids=new WeakMap();nextId=0;root=null;target=null;discovered=new Set();auto=false;
       data={kind:'apply-fill/control-dom',schemaVersion:1,pluginVersion:chrome.runtime.getManifest().version,host:location.hostname,startedAt:Date.now(),notice:'输入框值已移除；页面文字可能包含个人信息。无自动上传。',snapshots:[]};
+      data.interactionFailures=self.ResumeProPopupController?.sanitizeFailures(getInteractionFailures())||[];
       active=true;document.addEventListener('pointerdown',pointer,true);document.addEventListener('keydown',key,true);
       observer=new MutationObserver(records=>{
         if(!root)return;

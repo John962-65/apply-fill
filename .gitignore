@@ -13,3 +13,4 @@ Thumbs.db
 # 插件导出的设置备份：明文含简历、证件号、可能的 API Key，绝不能提交
 apply-fill-backup-*.json
 resume-pro-backup-*.json
+.zcode/

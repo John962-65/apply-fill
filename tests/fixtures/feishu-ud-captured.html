@@ -40,13 +40,20 @@ document.getElementById('submit').onclick=()=>stats.submissions++;
 let active=null;
 const accept=e=>{if(!e.isTrusted){stats.untrusted++;return false;}return true;};
 function close(){if(!active)return;active.menu.style.display='none';active.trigger?.classList.remove('ud__select__selector-open');active.root?.classList.remove('ud__select--focus');active=null;stats.dismissed++;}
-document.addEventListener('mousedown',e=>{if(active&&!active.menu.contains(e.target)&&!active.root.contains(e.target)&&mode!=='sticky')close();});
+const stuck=()=>!window.disableStuck&&active?.root.id==='gender'&&['local-sticky','global-modal','focus-lock','target-covered','unknown-popup'].includes(mode);
+document.addEventListener('mousedown',e=>{if(active&&!active.menu.contains(e.target)&&!active.root.contains(e.target)&&mode!=='sticky'&&!stuck())close();});
 function open(root,trigger,items){
  if(active?.root===root)return;
  close();let menu=document.getElementById(root.id+'-menu');if(!menu){menu=document.createElement('div');menu.id=root.id+'-menu';menu.className='ud__select__dropdown ud__select__dropdown-placement-bottomLeft';document.body.append(menu);}
  menu.style.display='block';menu.innerHTML='<div><div class="ud__select__list"><div class="ud__select__list__menu"><div class="rc-virtual-list"><div class="rc-virtual-list-holder"><div><div class="rc-virtual-list-holder-inner"></div></div></div></div></div></div></div>';
  for(const value of items){const row=document.createElement('div');row.innerHTML=`<div class="ud__select__list__item"><div class="ud__select__list__item__content"><span><span>${value}</span></span></div><div class="ud__select__list__item__check"></div></div>`;
   row.querySelector('.ud__select__list__item').onclick=e=>{if(!accept(e))return;stats.selections++;if(mode==='discard')return;
+   if(stuck()){
+    if(mode==='global-modal'&&!document.getElementById('blocking-modal')){const modal=document.createElement('div');modal.id='blocking-modal';modal.setAttribute('role','dialog');modal.setAttribute('aria-modal','true');modal.style.cssText='position:fixed;inset:0;background:#eee;z-index:99';document.body.append(modal);}
+    if(mode==='target-covered'){const box=document.getElementById('summary').getBoundingClientRect();menu.style.left=box.left+'px';menu.style.top=box.top+'px';}
+    if(mode==='unknown-popup'&&!document.getElementById('other-popup')){const other=document.createElement('div');other.id='other-popup';other.setAttribute('role','listbox');other.innerHTML='<div role="option">其他选项</div>';other.style.cssText='position:fixed;top:10px;left:10px;background:white';other.onclick=()=>stats.dangerClicks++;document.body.append(other);}
+    return;
+   }
    const caption=root.querySelector('.ud__select__selector__selectItem'),input=root.querySelector('input');if(caption)caption.textContent=value;else input.value=value;
    close();};menu.querySelector('.rc-virtual-list-holder-inner').append(row);}
  trigger.classList.add('ud__select__selector-open');root.classList.add('ud__select--focus');active={root,trigger,menu};
@@ -55,6 +62,7 @@ function open(root,trigger,items){
 }
 document.querySelectorAll('.ud__select__selector').forEach(trigger=>{trigger.onclick=e=>{if(accept(e))open(trigger.closest('.ud__select'),trigger,trigger.closest('.ud__select').dataset.options.split('|'));};});
 const school=document.getElementById('school');school.oninput=e=>{if(accept(e)&&school.value)open(school.closest('.ud__select'),school,['示例大学']);};
+document.addEventListener('focusin',e=>{if(mode==='focus-lock'&&stuck()&&!active.root.contains(e.target))active.root.querySelector('input').focus();});
 let datePanel=null;
 document.getElementById('birth').onclick=e=>{
  if(!accept(e))return;close();datePanel?.remove();const input=e.target,p=document.createElement('div');datePanel=p;

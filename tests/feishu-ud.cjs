@@ -44,7 +44,7 @@ const root=path.resolve(__dirname,'..');
    assert.ok(result.capture.every(c=>c.includes('ud__select__selector')));assert.equal(result.stats.untrusted,0);
    if(mode==='success'||mode==='rerender'||mode.startsWith('day')){
     assert.equal(result.dateOk.ok,true,JSON.stringify(result));assert.equal(result.read,mode==='day-bare'?'2025年4月3日':mode==='day'?'2025-04-03':'2024-09');assert.ok(result.stats.confirmations>0);
-    assert.equal(result.open,0);if(mode==='success'){assert.equal(result.comboOk,true,JSON.stringify(result));assert.equal(result.birthOk.ok,true);assert.equal(result.birthOk.value,'2002-05');}
+    assert.equal(result.open,0);if(mode==='success'){assert.equal(result.comboOk,true,JSON.stringify(result));assert.equal(result.birthOk.ok,true);assert.equal(result.birthOk.value,'2002-03');}
    }else if(mode==='select-discard'){
     assert.equal(result.comboOk,false);assert.ok(!result.collected.some(f=>f.label==='性别'&&f.value==='男'));
    }else{

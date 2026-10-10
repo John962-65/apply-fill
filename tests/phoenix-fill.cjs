@@ -10,8 +10,8 @@ const root=path.resolve(__dirname,'..');
   await page.exposeFunction('realInput',a=>performInput((m,p)=>cdp.send(m,p),a));
   await page.exposeFunction('workerFill',async message=>{
    const language=message.formFields.find(f=>f.idAttr==='language');
-   assert.deepEqual(language.options,['英语'],'stale cached options and placeholders must not replace live choices');
-   assert.equal(language.optionsSource,'live');
+   assert.deepEqual(language.options,[],'closed cached lists must not become an observed vocabulary');
+   assert.equal(language.optionsSource,'unobserved');
    const values={language:['英语','lang'],existing:['硕士','degree'],award:['2021-12','award-date'],birthday:['2000-05','birth-source'],
     'project-one':['示例项目甲','name1'],'project-two':['示例项目乙','name2'],
     'start-one':['2022-02','start1'],'end-one':['2024-06','end1'],'start-two':['2020-01','start2'],'end-two':['2021-12','end2'],
@@ -47,6 +47,9 @@ const root=path.resolve(__dirname,'..');
   await page.goto('https://fixture.invalid/form');
   await page.evaluate(()=>{
    self.mode='normal';self.__RESUME_PRO_TEST__=true;
+   // Retain the unrelated list as a closed cache. Truly visible unowned lists
+   // now have their own explicit unsafe-page regression in the UD full flow.
+   document.getElementById('unrelated').style.opacity='0';
    document.body.classList.add('beisen-fixture');
    document.getElementById('existing').closest('section').insertAdjacentHTML('beforeend','<div class="form-item--phoenix"><label>手机号码<input id="mobile" type="tel"></label></div>');
    document.getElementById('existing').closest('section').insertAdjacentHTML('beforeend','<div class="form-item--phoenix"><label>出生日期<input id="birthday" type="date"></label></div>');

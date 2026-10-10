@@ -23,6 +23,7 @@ const root=path.resolve(__dirname,'..');
    await page.goto('https://fixture.invalid/form');
    await page.evaluate(mode=>{
     self.mode=mode;self.__RESUME_PRO_TEST__=true;
+   document.getElementById('unrelated').style.opacity='0';
     const text=(id,label)=>`<div class="form-item--phoenix"><label>${label}<input id="${id}"></label></div>`;
     const combo=(id,label)=>`<div class="form-item--phoenix"><div class="field-label">${label}</div><div id="${id}" class="phoenix-select"></div></div>`;
     document.querySelector('main').innerHTML=`<section><h2>教育经历</h2><article class="record">${text('school','学校名称')}${combo('education','学历')}<div class="form-item--phoenix"><label>学位<select id="degree"><option value="">请选择</option><option value="bachelor">学士</option><option>硕士</option></select></label></div></article></section>

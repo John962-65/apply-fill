@@ -11,6 +11,9 @@
     const selectionProofs=new WeakMap();
     const uncommittedRoots=new WeakSet();
     const trace=(entry,action,detail='')=>{entry.interactions??=[];entry.interactions.push({action,detail});entry.interactions=entry.interactions.slice(-20);};
+    const popup=root.ResumeProPopupController.create({visible,panelSelector,optionSelector,popupRoot,live,localInput});
+    const states=root.ResumeProPopupController.STATES;
+    const rememberError=(entry,error)=>{if(/^input_(?:invalid|too_long|target_(?:missing|ambiguous|disabled|moving|hidden|covered)|observation|focus|context|busy|foreground|page_changed|attach|transport)$/.test(error?.code||''))entry.failureCode=error.code;};
     function live(entry){
       if(entry.root?.isConnected&&entry.trigger?.isConnected)return true;
       const next=refresh(entry);
@@ -28,7 +31,7 @@
       return Array.from(entry.root.querySelectorAll('input[type="hidden"]')).map(n=>({name:n.name||n.id,value:n.value}));
     }
     const tokenValue=list=>list.some(t=>String(t.value||'').trim());
-    const pending=entry=>entry.trigger?.getAttribute('aria-expanded')==='true'||entry.root?.getAttribute('aria-expanded')==='true';
+    const pending=entry=>popup.inspect(entry).expanded;
     function closedCaption(entry,owned,input,stored,proof){
       if(owned||pending(entry))return '';
       if(stored.length&&!tokenValue(stored))return '';
@@ -83,48 +86,13 @@
       if(!value&&!entry.structuralChoice&&entry.trigger.matches('input[readonly]'))value=entry.trigger.value;
       return placeholder(value)?'':value;
     }
-    const isPopup=n=>root.ResumeProControlCatalog?.isPopup(n)!==false;
-    function panels(){return [...new Set(Array.from(document.querySelectorAll(panelSelector)).filter(isPopup).map(popupRoot))].filter(visible);}
-    function localFloatingPanels(entry){
-      if(!entry.structuralChoice)return [];
-      // No page-wide geometry or text guessing: only a popup inside the bounded
-      // single-input widget can be inferred when its CSS names/ARIA are absent.
-      return Array.from(entry.root.querySelectorAll('*')).filter(p=>visible(p)&&!p.contains(entry.trigger)
-        &&['absolute','fixed'].includes(getComputedStyle(p).position)
-        &&!p.matches('input,textarea,select,button,svg,label')
-        &&Array.from(p.children).some(n=>visible(n)&&n.textContent.trim()
-          &&!n.matches('input,textarea,select,button,a,svg,form')
-          &&!n.querySelector('input,textarea,select,button,a,form')
-          &&(n.matches('li,[role="option"],[tabindex]')||getComputedStyle(n).cursor==='pointer')));
-    }
-    function panel(entry){
-      if(!live(entry))return null;
-      entry.panelAmbiguous=false;
-      const owners=[entry.trigger,entry.root,...entry.root.querySelectorAll('[aria-controls],[aria-owns]')];
-      const ids=new Set(owners.flatMap(n=>`${n.getAttribute('aria-controls')||''} ${n.getAttribute('aria-owns')||''}`.trim().split(/\s+/)).filter(Boolean));
-      const input=localInput(entry);
-      const eligible=n=>n&&isPopup(n)&&visible(n)&&!n.contains(entry.root)&&!n.contains(entry.trigger)&&!n.contains(input);
-      const linkedCandidates=[...new Set([...ids].map(id=>document.getElementById(id)).filter(eligible).map(popupRoot))];
-      const linked=linkedCandidates.filter(n=>!linkedCandidates.some(other=>other!==n&&other.contains(n)));
-      if(linked.length===1)return linked[0];
-      if(linked.length>1){entry.panelAmbiguous=true;return null;}
-      const selectors=entry.structuralChoice?`${panelSelector},ul,[class*="dropdown" i],[class*="suggest" i],[class*="menu" i],[class*="list" i]`:panelSelector;
-      const nested=[...new Set([...Array.from(entry.root.querySelectorAll(selectors)).map(popupRoot),...localFloatingPanels(entry)])]
-        .filter(eligible);
-      const nestedOuter=nested.filter(p=>!nested.some(other=>other!==p&&other.contains(p)));
-      if(nestedOuter.length===1)return nestedOuter[0];
-      if(nestedOuter.length>1){entry.panelAmbiguous=true;return null;}
-      if(!entry.opened||!entry.beforePanels)return null;
-      if(entry.ownedPanel?.isConnected&&eligible(entry.ownedPanel))return entry.ownedPanel;
-      const appeared=panels().filter(p=>eligible(p)&&!entry.beforePanels?.has(p));
-      // Nested wrappers are one popup, not multiple independent popups.
-      const outer=appeared.filter(p=>!appeared.some(other=>other!==p&&other.contains(p)));
-      if(outer.length===1){entry.ownedPanel=outer[0];return outer[0];}
-      if(outer.length>1)entry.panelAmbiguous=true;return null;
-    }
+    function panels(){return popup.candidates();}
+    function panel(entry){return popup.inspect(entry).panel;}
     function options(entry){
       const scope=panel(entry);if(!scope)return [];
-      let nodes=Array.from(scope.querySelectorAll(optionSelector));
+      // Semantic options lead; platform selectors supplement missing ARIA.
+      let nodes=Array.from(scope.querySelectorAll(root.ResumeProControlCatalog?.semantic?.option||'[role="option"],[role="treeitem"]'));
+      if(!nodes.length)nodes=Array.from(scope.querySelectorAll(optionSelector));
       if(entry.structuralChoice){
         nodes=Array.from(new Set([...nodes,...scope.querySelectorAll('li,[class*="option" i],[class*="item" i],[class*="suggestion" i]')]))
           .filter(n=>n.matches('li,[role="option"]')||!/(?:options|option[-_]?list|option[-_]?wrapper|suggestions|suggestion[-_]?list)/i.test(n.className||''));
@@ -151,17 +119,23 @@
       return null;
     }
     async function close(entry){
-      const cleared=()=>{entry.opened=false;entry.beforePanels=null;entry.ownedPanel=null;entry.popupBlocked=false;if(activeEntry===entry)activeEntry=null;return true;};
-      if(!live(entry))return entry.ownedPanel?.isConnected&&visible(entry.ownedPanel)?false:cleared();
+      const cleared=()=>{entry.opened=false;entry.beforePanels=null;entry.ownedPanel=null;entry.popupBlocked=false;popup.finish(entry);if(activeEntry===entry)activeEntry=null;return true;};
+      if(!live(entry)){
+        if(entry.ownedPanel?.isConnected&&visible(entry.ownedPanel)){activeEntry=entry;entry.popupBlocked=true;popup.transition(entry,states.BLOCKED,'POPUP_OWNERSHIP_UNCONFIRMED');return false;}
+        return cleared();
+      }
       const owned=panel(entry);
       if(entry.structuralChoice&&(owned||pending(entry)||entry.opened)&&localInput(entry)?.value?.trim()
         &&!tokenValue(tokens(entry))&&!entry.selectionProof&&!selectionProofs.get(entry.root))uncommittedRoots.add(entry.root);
-      if(!owned&&entry.panelAmbiguous){activeEntry=entry;entry.popupBlocked=true;trace(entry,'关闭未完成','无法唯一确认关联面板，暂停后续填写');return false;}
+      if(!owned&&entry.panelAmbiguous){activeEntry=entry;entry.popupBlocked=true;popup.transition(entry,states.BLOCKED,'POPUP_OWNERSHIP_UNCONFIRMED');trace(entry,'关闭未完成','无法唯一确认关联面板');return false;}
       // An empty async popup can have zero height and no ARIA, but still be
       // waiting to render options. Dismiss every opening attempt before advancing.
       if(!owned&&!pending(entry)&&!entry.opened)return cleared();
+      if(!owned&&!entry.panelAmbiguous&&popup.closed(entry))return cleared();
       activeEntry=entry;
-      const closed=()=>!panel(entry)&&!entry.panelAmbiguous&&!pending(entry)&&(!owned||!owned.isConnected||!visible(owned));
+      popup.transition(entry,states.RECOVERING);
+      entry.recoveryEvidence={escapeAttempted:true,blurAttempted:false,dismissAttempted:false,toggleAttempted:false};
+      const closed=()=>popup.closed(entry);
       try{
         const delegated=config.escape?.(entry.trigger);
         if(delegated)await delegated;
@@ -169,16 +143,18 @@
           entry.trigger.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',code:'Escape',bubbles:true}));
           document.body.dispatchEvent(new MouseEvent('mousedown',{bubbles:true}));
         }
-        localInput(entry)?.blur();entry.trigger.blur?.();
+        localInput(entry)?.blur();entry.trigger.blur?.();entry.recoveryEvidence.blurAttempted=true;
       }catch(error){trace(entry,'关闭未完成',error.message);}
       if(!await until(closed,180)&&config.dismiss){
+        entry.recoveryEvidence.dismissAttempted=true;
         try{await config.dismiss(entry.trigger);}catch(error){trace(entry,'关闭未完成',error.message);}
       }
       // React portals can close on the next render/animation frame. A subsequent control
       // must not be clicked through the preceding list. Only toggle our own confirmed trigger.
       if(!await until(closed,700)){
-        try{await click(entry.trigger);}catch(error){trace(entry,'关闭未完成',error.message);entry.popupBlocked=true;return false;}
-        if(!await until(closed,700)){trace(entry,'关闭未完成','关联面板仍可见，暂停后续填写');entry.popupBlocked=true;return false;}
+        entry.recoveryEvidence.toggleAttempted=true;
+        try{await click(entry.trigger);}catch(error){trace(entry,'关闭未完成',error.message);entry.popupBlocked=true;popup.transition(entry,states.BLOCKED,'POPUP_CLOSE_UNCONFIRMED');return false;}
+        if(!await until(closed,700)){trace(entry,'关闭未完成','关联面板仍可见');entry.popupBlocked=true;popup.transition(entry,states.BLOCKED,'POPUP_CLOSE_UNCONFIRMED');return false;}
       }
       return cleared();
     }
@@ -189,9 +165,44 @@
       }
       return true;
     }
+    async function prepare(entry){
+      if(!activeEntry){
+        // A pre-existing, unowned popup or modal is never silently ignored by
+        // the production scheduler. Passive scanning adopts known owners.
+        if(popup.hazards().length||Array.from(document.querySelectorAll('[aria-modal="true"],[role="dialog"],dialog[open]')).some(popup.painted))return {status:'BLOCKED',code:'OTHER_POPUP_UNCONFIRMED'};
+        return {status:'SUCCESS'};
+      }
+      if(activeEntry===entry)return {status:'SUCCESS'};
+      if(entry.kind==='combobox'&&activeEntry.root===entry.root){
+        // A new user-initiated fill can retry the same uniquely located owner;
+        // it must not be mistaken for an unrelated subsequent control.
+        entry.opened=activeEntry.opened;entry.ownedPanel=activeEntry.ownedPanel;entry.beforePanels=activeEntry.beforePanels;
+        activeEntry=entry;return {status:'SUCCESS'};
+      }
+      const blocker=activeEntry;
+      // Do not repeat the same failed cleanup for every subsequent field. A
+      // disappeared panel can still be recovered after a manual dismissal.
+      if(popup.state(blocker)!==states.BLOCKED||!panel(blocker)&&!blocker.panelAmbiguous){
+        if(await close(blocker))return {status:'RECOVERED',code:'POPUP_RECOVERED'};
+      }
+      const result=await popup.continuation(blocker,entry);
+      if(result.isolated)trace(entry,'局部继续','目标稳定、未遮挡且焦点可切换');
+      return {...result,blocker};
+    }
+    function result(entry,ok,code=''){
+      entry.interactionResult={status:ok?'SUCCESS':entry.popupBlocked?'BLOCKED':'RECOVERED',code:entry.failureCode||code|| (ok?'VALUE_VERIFIED':entry.popupBlocked?'POPUP_CLOSE_UNCONFIRMED':'VALUE_UNCONFIRMED'),
+        observation:popup.snapshot(entry),recovery:{...entry.recoveryEvidence}};
+      return ok;
+    }
     function adoptPanel(entry,related){
       if(!entry.opened||!entry.beforePanels)entry.beforePanels=new Set(panels().filter(p=>p!==related));
       entry.ownedPanel=related;entry.opened=true;activeEntry=entry;
+      popup.transition(entry,states.OPEN);
+    }
+    function observe(entry){
+      const related=panel(entry);
+      if(related&&!activeEntry)adoptPanel(entry,related);
+      return related?options(entry):[];
     }
     async function open(entry){
       if(!live(entry))return [];
@@ -202,10 +213,11 @@
         adoptPanel(entry,related);return options(entry);
       }
       if(entry.panelAmbiguous)throw new Error('无法唯一确认当前控件的候选列表');
-      entry.beforePanels=new Set(panels());entry.ownedPanel=null;entry.opened=true;
+      const wasPending=pending(entry);
+      entry.beforePanels=new Set(panels());entry.ownedPanel=null;entry.opened=true;popup.begin(entry);
       activeEntry=entry;
       trace(entry,'打开');
-      if(!pending(entry)){entry.trigger.focus?.();await click(entry.trigger);}
+      if(!wasPending){entry.trigger.focus?.();await click(entry.trigger);}
       await until(()=>options(entry).length||dateAgent?.recognizes(panel(entry)));
       const found=options(entry);trace(entry,'观察',`读取 ${found.length} 个选项`);return found;
     }
@@ -233,6 +245,7 @@
     async function search(entry,wanted){
       const input=searchInput(entry);
       if(!input||!visible(input))return false;
+      popup.transition(entry,states.SELECTING);
       uncommittedRoots.add(entry.root);entry.selectionProof=null;selectionProofs.delete(entry.root);
       const setter=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set;
       const part=root.ResumeProAIHelpers.normalizeDatePart(wanted,entry.meta?.datePart);
@@ -247,7 +260,9 @@
       entry.selectionProof=null;
       selectionProofs.delete(entry.root);
       if(entry.structuralChoice)uncommittedRoots.add(entry.root);
+      popup.transition(entry,states.SELECTING);
       if(!await click(node))return false;
+      popup.transition(entry,states.VERIFYING);
       // Editable autocomplete controls often render the chosen caption in the same input.
       // When a stored ID exists it must actually change; otherwise require automatic menu
       // closure caused by this option click, before any forced Escape/blur cleanup.
@@ -260,7 +275,7 @@
         if(entry.structuralChoice){
           // A forced Escape must never turn query text into successful selection.
           // This single-select popup must close because the option was clicked.
-          if(panel(entry)||entry.panelAmbiguous||pending(entry))return false;
+          if(!popup.closed(entry))return false;
           const input=localInput(entry),caption=closedCaption(entry,null,input,stored,null);
           const selected=caption||input?.value?.trim()||'';
           if(norm(selected)!==norm(selectedText)&&norm(selected)!==norm(value))return false;
@@ -283,7 +298,7 @@
       entry.interactions=[];entry.verifiedChoice='';entry.fillIssue='';
       const strict=entry.meta?.datePart||root.ResumeProAIHelpers.selectEnumTopic(entry.meta);
       const start=Date.now();const parts=String(value).split(/[\/／]/).map(s=>s.trim()).filter(Boolean);
-      const fail=async note=>{entry.fillNote=note;trace(entry,'停止',note);await close(entry);return false;};
+      const fail=async note=>{entry.fillNote=note;trace(entry,'停止',note);await close(entry);return result(entry,false);};
       if(!live(entry))return fail('控件已替换，无法唯一定位');
       if(read(entry))return fail('控件已有内容，未覆盖');
       const query=entry.structuralChoice?localInput(entry)?.value?.trim():'';
@@ -306,8 +321,10 @@
             const selectedText=optionText(fresh[0]);
             trace(entry,'选择',`第 ${level+1} 级：${selectedText}`);clicked=true;
             if(level<parts.length-1){
+              popup.transition(entry,states.SELECTING);
               await click(fresh[0]);
               await until(()=>unique(options(entry),parts[level+1],entry).length>0);
+              popup.transition(entry,states.OPEN);
               break;
             }
             let success;
@@ -316,12 +333,13 @@
               // The CDP channel rechecks hover changes before any mouse press. A replaced
               // node may be retried only after another unique, local observation.
               if(error.code==='input_target_missing'&&live(entry)&&unique(options(entry),wanted,entry).length===1){trace(entry,'重新观察','候选在点击前被替换');continue;}
+              rememberError(entry,error);
               return fail(error.message);
             }
             if(success){
-              entry.verifiedChoice=read(entry);entry.fillNote='';trace(entry,'核对','页面保留选中内容');return true;
+              entry.verifiedChoice=read(entry);entry.fillNote='';trace(entry,'核对','页面保留选中内容');return result(entry,true);
             }
-            return fail('点击后未确认选中；搜索文字不算选择成功');
+            await fail('点击后未确认选中；搜索文字不算选择成功');return result(entry,false,'OPTION_COMMIT_UNCONFIRMED');
           }
           // Searching an unavailable level must not erase a populated finite
           // vocabulary and disguise its mismatch as a driver failure.
@@ -340,7 +358,7 @@
       }
       return fail('交互次数或等待时间达到上限');
     }
-    async function fill(entry,value){
+    async function fillControl(entry,value){
       if(!await ready(entry))return false;
       if(live(entry)&&phoenix(entry)&&!read(entry)){
         try{
@@ -350,11 +368,11 @@
             if(!closed)entry.fillNote='日历仍未关闭，已暂停后续填写';
             return ok&&closed;
           }
-        }catch(error){entry.fillNote=error.message;await close(entry);return false;}
+        }catch(error){rememberError(entry,error);entry.fillNote=error.message;await close(entry);return false;}
       }
       if(!entry.decide||entry.structuralChoice||entry.meta?.datePart||root.ResumeProAIHelpers.selectEnumTopic(entry.meta)){
         try{return await fillRules(entry,value);}
-        catch(error){entry.fillNote=error.message;trace(entry,'停止',error.message);await close(entry);return false;}
+        catch(error){rememberError(entry,error);entry.fillNote=error.message;trace(entry,'停止',error.message);await close(entry);return false;}
       }
       entry.interactions=[];entry.verifiedChoice='';entry.fillIssue='';
       if(read(entry)){entry.fillNote='控件已有内容，未覆盖';return false;}
@@ -387,8 +405,10 @@
             if(action.kind==='wait')await wait(600);
             if(action.kind==='scroll'){scroll(entry);await wait(200);}
             if(action.kind==='choose'){
+              popup.transition(entry,states.SELECTING);
               const node=options(entry)[action.index];selected=optionText(node);await click(node);
-              if(level<parts.length-1){level++;searched=false;selected='';await wait(250);}
+              if(level<parts.length-1){level++;searched=false;selected='';await wait(250);popup.transition(entry,states.OPEN);}
+              else popup.transition(entry,states.VERIFYING);
             }
           },
           verify:async()=>{
@@ -400,11 +420,16 @@
             entry.verifiedChoice=read(entry);trace(entry,'核对','页面保留选中内容');return true;
           }});
         entry.fillNote=ok?'':`AI 未确认结果；当前选项：${options(entry).map(optionText).slice(0,12).join('、')||'未读到'}`;return ok;
-      }catch(error){entry.fillNote=error.message;trace(entry,'停止',error.message);return false;}
+      }catch(error){rememberError(entry,error);entry.fillNote=error.message;trace(entry,'停止',error.message);return false;}
       finally{await close(entry);}
     }
+    async function fill(entry,value){
+      entry.interactionResult=null;entry.recoveryEvidence={};entry.failureCode='';
+      const ok=await fillControl(entry,value);
+      return result(entry,ok,entry.interactionResult?.code||'');
+    }
     const dateAgent=root.ResumeProPhoenixDateAgent?.create({visible,panel,read,click,close,trace,until,readPeer:entry=>entry.rangePeer?config.readPeer?.(entry.rangePeer):undefined});
-    return {read,panel,options,open,close,fill,ready,pending,blocking:()=>activeEntry};
+    return {read,panel,options,observe,open,close,fill,ready,prepare,pending,observation:popup.snapshot,blocking:()=>activeEntry,suspend:()=>{if(activeEntry)popup.pause(activeEntry);}};
   }
   root.ResumeProComboAgent={create};
 })(typeof self!=='undefined'?self:globalThis);
