@@ -21,11 +21,16 @@
     const query = (node, selector) => Array.from(node?.querySelectorAll(selector) || []).filter(visible);
     const enabled = node => node && !node.closest('[disabled],[aria-disabled="true"],[class*="-disabled"],.disabled');
     // 契约字段双形态：CSS 选择器字符串（目录契约），或 resolver 函数（动态契约，每次访问对当前作用域重新解析，不缓存节点）。
-    // inner 的作用域是格子本身，其余字段的作用域是面板或当前网格。
+    // resolver 可返回单个元素、元素数组或 null/空；inner 的作用域是格子本身，其余字段的作用域是面板或当前网格。
     function resolveSpec(field, scope) {
       if (!field) return [];
       if (typeof field === 'function') {
-        try { return Array.from(field(scope) || []).filter(visible); } catch { return []; }
+        try {
+          const value = field(scope);
+          if (!value) return [];
+          const list = (value.nodeType === 1 || typeof Element !== 'undefined' && value instanceof Element) ? [value] : Array.from(value);
+          return list.filter(visible);
+        } catch { return []; }
       }
       return query(scope, field);
     }

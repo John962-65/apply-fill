@@ -25,7 +25,9 @@
     "test:phoenix-published": "node tests/published-phoenix.cjs",
     "test:controls": "node tests/published-controls.cjs",
     "test:startup": "node tests/fill-startup-browser.cjs",
-    "test:popup-lifecycle": "node tests/popup-lifecycle.cjs"
+    "test:popup-lifecycle": "node tests/popup-lifecycle.cjs",
+    "test:generic-date": "node tests/generic-date-agent.cjs",
+    "test:date-benchmark": "node tests/date-benchmark.cjs"
   },
   "devDependencies": {
     "playwright": "1.62.1"

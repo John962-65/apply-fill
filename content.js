@@ -5394,6 +5394,7 @@
       setElementValue,
       fillCombobox,
       fillDateWithAgent,
+      genericDateAgent,
       validDateOrder,
       rangeMatchReason,
       scanFillableFields,

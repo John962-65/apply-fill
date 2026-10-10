@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>未知日期控件 fixture（无平台类名依赖）</title>
+<style>
+  body{font:14px/1.6 sans-serif;margin:40px}
+  .acme-field{display:block;margin:12px 0}
+  .acme-date-input{width:160px;padding:4px 8px;border:1px solid #bbb}
+  .acme-picker-portal{position:absolute;z-index:50;display:none;background:#fff;border:1px solid #ccc;box-shadow:0 4px 16px rgba(0,0,0,.15);padding:8px}
+  .acme-picker-portal.open{display:block}
+  .acme-picker-head{display:flex;align-items:center;gap:8px;margin-bottom:6px}
+  .acme-picker-nav{cursor:pointer;padding:0 8px;user-select:none}
+  .acme-picker-title{cursor:pointer;min-width:72px;text-align:center}
+  .acme-picker-grid{display:grid;grid-template-columns:repeat(7,32px);gap:2px}
+  .acme-picker-months,.acme-picker-years{display:grid;grid-template-columns:repeat(4,48px);gap:4px}
+  .acme-picker-cell{text-align:center;padding:2px 0;cursor:pointer}
+  .acme-picker-cell.sel{background:#2563eb;color:#fff}
+  .acme-picker-cell.selected{background:#2563eb;color:#fff}
+  .acme-picker-junk{display:flex;gap:8px;padding:8px}
+  .acme-picker-foot{margin-top:8px;text-align:right}
+  .acme-picker-time{display:flex;gap:6px;margin-top:6px;flex-wrap:wrap}
+</style>
+</head>
+<body>
+<form>
+  <label class="acme-field">入学时间 <input id="edu-start" class="acme-date-input" type="text" readonly autocomplete="off"></label>
+  <label class="acme-field">毕业时间 <input id="edu-end" class="acme-date-input" type="text" readonly autocomplete="off"></label>
+</form>
+<script>
+(() => {
+  const mode = new URLSearchParams(location.search).get('mode') || 'day';
+  const pad = n => String(n).padStart(2, '0');
+  const stats = window.stats = { opens: 0, commits: 0, renders: 0, escapes: 0, submissions: 0 };
+  const state = { open: false, view: 'day', year: mode === 'far' ? 2035 : 2026, month: 10, decadeBase: null, sel: null, pending: null, target: null };
+  // 组件自己持有已提交值：任何绕过组件提交路径的直写都会在下一个渲染周期被还原。
+  const committed = new Map([['edu-start', ''], ['edu-end', '']]);
+  const placeholder = mode === 'month' ? 'YYYY-MM' : 'YYYY-MM-DD';
+  for (const id of committed.keys()) document.getElementById(id).placeholder = placeholder;
+  if (mode === 'single') document.getElementById('edu-end').closest('.acme-field').style.display = 'none';
+  window.fixtureSet = (id, value) => { committed.set(id, value); document.getElementById(id).value = value; };
+  let portal = null;
+
+  setInterval(() => {
+    for (const [id, value] of committed) {
+      const input = document.getElementById(id);
+      if (input.value !== value) input.value = value;
+    }
+  }, 60);
+
+  function commit(value) { committed.set(state.target.id, value); state.target.value = value; stats.commits++; }
+
+  function render() {
+    stats.renders++;
+    if (portal) portal.remove();
+    portal = document.createElement('div');
+    portal.className = 'acme-picker-portal' + (state.open ? ' open' : '');
+    if (state.open && state.target) {
+      const r = state.target.getBoundingClientRect();
+      portal.style.left = Math.max(8, r.left) + 'px';
+      portal.style.top = (r.bottom + 2) + 'px';
+      portal.innerHTML = buildPanel();
+      wire();
+    }
+    document.body.appendChild(portal);
+  }
+  function head(inner) {
+    const labels = state.view === 'year' ? ['上一年代', '下一年代'] : ['上一月', '下一月'];
+    return `<div class="acme-picker-head"><span class="acme-picker-nav" data-nav="prev" aria-label="${labels[0]}">‹</span>${inner}<span class="acme-picker-nav" data-nav="next" aria-label="${labels[1]}">›</span></div>`;
+  }
+  function buildPanel() {
+    if (mode === 'junk') {
+      return '<div class="acme-picker-junk"><button type="button">A</button><button type="button">B</button><button type="button">C</button></div>';
+    }
+    if (state.view === 'year') {
+      if (state.decadeBase == null) state.decadeBase = Math.floor(state.year / 10) * 10;
+      const cells = Array.from({ length: 12 }, (_, i) => `<span class="acme-picker-cell" data-year="${state.decadeBase + i}">${state.decadeBase + i}</span>`).join('');
+      return head('<span class="acme-picker-title">选择年份</span>') + `<div class="acme-picker-years">${cells}</div>`;
+    }
+    if (state.view === 'month') {
+      const cells = Array.from({ length: 12 }, (_, i) => `<span class="acme-picker-cell" data-month="${i + 1}">${i + 1}月</span>`).join('');
+      return head(`<span class="acme-picker-title acme-picker-title-year">${state.year}年</span>`) + `<div class="acme-picker-months">${cells}</div>`;
+    }
+    const startDow = new Date(state.year, state.month - 1, 1).getDay();
+    const start = new Date(state.year, state.month - 1, 1 - startDow);
+    let cells = '';
+    for (let i = 0; i < 42; i++) {
+      const d = new Date(start.getFullYear(), start.getMonth(), start.getDate() + i);
+      const key = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+      cells += `<span class="acme-picker-cell${state.sel === key ? ' selected' : ''}" data-date="${key}">${d.getDate()}</span>`;
+    }
+    const time = mode === 'time' ? `<div class="acme-picker-time">${Array.from({ length: 12 }, (_, i) => `<span class="acme-picker-time-cell">${pad(i + 6)}:00</span>`).join('')}</div>` : '';
+    const foot = (mode === 'confirm' || mode === 'time') ? '<div class="acme-picker-foot"><button type="button" class="acme-picker-ok">确定</button></div>' : '';
+    const title = mode === 'messy'
+      ? `<span class="acme-picker-title acme-picker-title-combined">${state.year}年${state.month}月</span>`
+      : `<span class="acme-picker-title acme-picker-title-year">${state.year}年</span><span class="acme-picker-title acme-picker-title-month">${state.month}月</span>`;
+    return head(title) + `<div class="acme-picker-grid">${cells}</div>` + time + foot;
+  }
+  function wire() {
+    portal.querySelectorAll('[data-nav]').forEach(n => n.onclick = () => {
+      if (state.view === 'year') state.decadeBase += n.dataset.nav === 'prev' ? -10 : 10;
+      else {
+        const d = n.dataset.nav === 'prev' ? -1 : 1;
+        let m = state.month + d, y = state.year;
+        if (m < 1) { m = 12; y--; } if (m > 12) { m = 1; y++; }
+        state.month = m; state.year = y;
+      }
+      render();
+    });
+    const titleYear = portal.querySelector('.acme-picker-title-year,.acme-picker-title-combined');
+    if (titleYear) titleYear.onclick = () => { state.view = 'year'; state.decadeBase = null; render(); };
+    const titleMonth = portal.querySelector('.acme-picker-title-month');
+    if (titleMonth) titleMonth.onclick = () => { state.view = 'month'; state.decadeBase = null; render(); };
+    portal.querySelectorAll('[data-year]').forEach(n => n.onclick = () => { state.year = Number(n.dataset.year); state.view = 'month'; state.decadeBase = null; render(); });
+    portal.querySelectorAll('[data-month]').forEach(n => n.onclick = () => {
+      const m = Number(n.dataset.month);
+      if (mode === 'month') { commit(`${state.year}-${pad(m)}`); stats.submissions++; state.open = false; render(); return; }
+      state.month = m; state.view = 'day'; render();
+    });
+    portal.querySelectorAll('[data-date]').forEach(n => n.onclick = () => {
+      if (mode === 'confirm' || mode === 'time') { state.pending = n.dataset.date; state.sel = n.dataset.date; render(); return; }
+      if (mode === 'stuckclose') { commit(n.dataset.date); stats.submissions++; render(); return; }
+      commit(n.dataset.date); stats.submissions++; state.open = false; render();
+    });
+    const ok = portal.querySelector('.acme-picker-ok');
+    if (ok) ok.onclick = () => {
+      if (!state.pending) return;
+      commit(mode === 'time' ? `${state.pending} 12:00` : state.pending);
+      stats.submissions++; state.open = false; state.pending = null; render();
+    };
+  }
+  for (const id of committed.keys()) {
+    const input = document.getElementById(id);
+    input.addEventListener('click', () => {
+      if (mode === 'stuckclose' && state.open) return;
+      state.target = input; state.open = true; state.sel = null; state.pending = null;
+      state.view = mode === 'month' ? 'month' : 'day';
+      state.decadeBase = mode === 'far' ? state.decadeBase : null;
+      stats.opens++;
+      if (mode === 'async') setTimeout(() => { if (state.open) render(); }, 500);
+      else render();
+    });
+  }
+  document.addEventListener('keydown', e => {
+    if (e.key !== 'Escape') return;
+    stats.escapes++;
+    if (mode === 'stuckclose') return;
+    if (state.open) { state.open = false; render(); }
+  });
+  state.target = document.getElementById('edu-start');
+  render();
+})();
+</script>
+</body>
+</html>

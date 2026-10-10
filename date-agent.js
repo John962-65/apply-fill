@@ -30,7 +30,8 @@
       visible,
       panelSelector: '[role="dialog"],[class*="picker" i]:not([class*="picker-input" i]):not([class*="picker-label" i]),[class*="calendar" i]:not(input),[class*="datepicker" i],[class*="date-picker" i]',
       optionSelector: '[role="gridcell"],[role="option"],td,[data-date],[class*="cell" i]',
-      localInput: entry => entry.element
+      localInput: entry => entry.element,
+      live: entry => Boolean(entry?.element?.isConnected)
     });
     const states = root.ResumeProPopupController.STATES;
     let activeEntry = null;
@@ -169,11 +170,18 @@
       const pool = Array.from(panelNode.querySelectorAll('button,[role="button"],a,span,div,[class*="btn" i],[class*="header" i] *')).filter(n => visible(n) && outsideGrids(n));
       const yearButtons = innermost(pool.filter(n => YEAR_TEXT.test(compact(n.textContent)))).slice(0, 3);
       const monthButtons = innermost(pool.filter(n => !/\d{4}/.test(n.textContent) && monthNumber(compact(n.textContent)) >= 1 && monthNumber(compact(n.textContent)) <= 12)).slice(0, 3);
+      // 合并式表头（「2026年10月」一个元素）：当作年/月两个入口的候选，点击后的视图变化再验证。
+      if (!yearButtons.length && !monthButtons.length) {
+        const combined = innermost(pool.filter(n => /^(\d{4})年(\d{1,2})月$/.test(compact(n.textContent)))).slice(0, 1);
+        if (combined.length) { yearButtons.push(...combined); monthButtons.push(...combined); }
+      }
       const headerYearNode = yearButtons[0] || pool.find(n => /(\d{4})/.test(n.textContent) && n.textContent.length <= 32);
       const headerMonthNode = monthButtons[0];
+      const monthText = headerMonthNode ? compact(headerMonthNode.textContent) : '';
+      const combinedMonth = /^(?:\d{4})年(\d{1,2})月$/.exec(monthText);
       const header = {
         year: headerYearNode ? Number((/\d{4}/.exec(headerYearNode.textContent) || [])[0]) || null : null,
-        month: headerMonthNode ? monthNumber(compact(headerMonthNode.textContent)) : null
+        month: headerMonthNode ? (monthNumber(monthText) ?? (combinedMonth ? Number(combinedMonth[1]) : null)) : null
       };
 
       const navPool = Array.from(panelNode.querySelectorAll('button,[role="button"],a,[aria-label],[class*="prev" i],[class*="next" i],[class*="arrow" i],[class*="super" i]')).filter(n => visible(n) && outsideGrids(n) && !grids.some(g => g.container === n));
@@ -186,6 +194,16 @@
         if (direction) paging.push({ node, direction, claim, label: compact(node.getAttribute('aria-label') || node.textContent).slice(0, 20) });
       }
       const pagingOuter = paging.filter(p => !paging.some(o => o.node !== p.node && o.node.contains(p.node))).slice(0, 8);
+      // 无标签时的几何回退：面板内恰好一对箭头字形元素，左为 prev 右为 next。方向仍需点击后验证。
+      if (!pagingOuter.length) {
+        const glyphs = Array.from(panelNode.querySelectorAll('*')).filter(n => visible(n) && enabled(n) && outsideGrids(n)
+          && /^[«‹<←]$|^[»›>→]$/.test(compact(n.textContent)) && n.children.length === 0);
+        const outermost = glyphs.filter(n => !glyphs.some(o => o !== n && o.contains(n)));
+        if (outermost.length === 2) {
+          const [a, b] = outermost.sort((x, y) => x.getBoundingClientRect().left - y.getBoundingClientRect().left);
+          pagingOuter.push({ node: a, direction: 'prev', claim: 'glyph', label: compact(a.textContent) }, { node: b, direction: 'next', claim: 'glyph', label: compact(b.textContent) });
+        }
+      }
 
       const confirm = Array.from(panelNode.querySelectorAll('button,[role="button"],a,input[type="button"],[class*="btn" i]'))
         .filter(n => visible(n) && enabled(n) && outsideGrids(n) && CONFIRM_TEXT.test(compact(n.getAttribute('aria-label') || n.textContent))).slice(0, 2);
@@ -206,29 +224,34 @@
             selected: selectedCell ? selectedCell.text : null, modes, uniquePerMode, confidence
           };
         },
-        /* 合成契约：resolver 每次访问重新分类当前面板；字段形态与 control-catalog 契约一致。 */
-        contract() {
+        /* 合成契约：resolver 每次访问重新分类当前面板；字段形态与 control-catalog 契约一致。
+           三种视图无条件声明（rc-picker 类面板一次只显示一种视图，切换后 resolver 自然命中），
+           这样校验器要求的完整导航链在单视图面板上也成立。 */
+        contract(panelGetter) {
           if (confidence !== 'high' || !uniquePerMode) return null;
-          const cellsOf = mode => () => {
-            const fresh = classifyCalendar(panelNode)?.grids.filter(g => g.mode === mode) || [];
-            return fresh.length === 1 ? fresh[0].cells.map(c => c.node) : [];
-          };
+          const now = () => classifyCalendar(panelGetter ? panelGetter() : panelNode);
           const containerOf = mode => () => {
-            const fresh = classifyCalendar(panelNode)?.grids.filter(g => g.mode === mode) || [];
-            return fresh.length === 1 ? fresh[0].container : null;
+            const fresh = now();
+            const grids = (fresh?.grids || []).filter(g => g.mode === mode);
+            return grids.length === 1 ? grids[0].container : null;
+          };
+          const cellsOf = mode => () => {
+            const fresh = now();
+            const grids = (fresh?.grids || []).filter(g => g.mode === mode);
+            return grids.length === 1 ? grids[0].cells.map(c => c.node) : [];
           };
           const contract = { name: '通用日历结构分类' };
-          for (const mode of modes) { contract[mode + 'Grid'] = containerOf(mode); contract[mode + 'Cells'] = cellsOf(mode); }
-          if (yearButtons.length) contract.yearButton = () => (classifyCalendar(panelNode)?.yearButtons || []).slice(0, 3);
-          if (monthButtons.length) contract.monthButton = () => (classifyCalendar(panelNode)?.monthButtons || []).slice(0, 3);
+          for (const mode of ['year', 'month', 'day']) { contract[mode + 'Grid'] = containerOf(mode); contract[mode + 'Cells'] = cellsOf(mode); }
+          contract.yearButton = () => (now()?.yearButtons || []).slice(0, 3);
+          contract.monthButton = () => (now()?.monthButtons || []).slice(0, 3);
           const decade = direction => () => {
-            const fresh = classifyCalendar(panelNode)?.paging || [];
+            const fresh = now()?.paging || [];
             const usable = fresh.filter(p => p.direction === direction || (direction === 'prev-decade' && p.direction === 'prev') || (direction === 'next-decade' && p.direction === 'next'));
             return usable.map(p => p.node);
           };
           contract.prevDecade = decade('prev-decade'); contract.nextDecade = decade('next-decade');
-          if (confirm.length) contract.confirmButton = () => (classifyCalendar(panelNode)?.confirm || []).slice(0, 2);
-          if (timeNodes.length >= 6) contract.unsupported = () => timeNodes.filter(n => n.isConnected && visible(n));
+          contract.confirmButton = () => (now()?.confirm || []).slice(0, 2);
+          if (timeNodes.length >= 6) contract.unsupported = () => (now() ? timeNodes : []).filter(n => n.isConnected && visible(n));
           return contract;
         }
       };
@@ -273,7 +296,8 @@
       return hit && hit !== node ? denyReason(hit) : null;
     }
     function tier2Elements(entry, panelNode, view) {
-      const taken = [...view.yearButtons, ...view.monthButtons, ...view.paging.map(p => p.node), ...view.confirm, ...view.grids.flatMap(g => g.cells.map(c => c.node))];
+      const safe = view || { grids: [], yearButtons: [], monthButtons: [], paging: [], confirm: [] };
+      const taken = [...safe.yearButtons, ...safe.monthButtons, ...safe.paging.map(p => p.node), ...safe.confirm, ...safe.grids.flatMap(g => g.cells.map(c => c.node))];
       return Array.from(panelNode.querySelectorAll('button,[role="button"],a,[role="gridcell"],[role="option"],td,li,[class*="cell" i],[class*="item" i],[class*="btn" i]'))
         .filter(n => visible(n) && enabled(n) && !taken.some(t => t === n || t.contains(n) || n.contains(t)))
         .filter(n => { const reason = denyReason(n); return !reason && !denyAtPoint(n); })
@@ -283,14 +307,17 @@
       const out = [];
       const panelNode = panelOf(entry);
       if (!panelNode) { out.push({ id: 'open', kind: 'open', label: '打开当前日期控件' }); return out; }
+      const view2 = view || { grids: [], yearButtons: [], monthButtons: [], paging: [], confirm: [], confidence: null };
+      // 时分面板：规则与 AI 都只支持到年月日，识别出时分即暂停，不给可点击候选。
+      if (view2.timePanel) { out.push({ id: 'wait', kind: 'wait', label: '等待异步渲染' }, { id: 'stop', kind: 'stop', label: '该日历需要选择时分，已暂停' }); return out; }
       const parts = targetParts(entry.targetValue);
-      view.yearButtons.slice(0, 2).forEach((n, i) => out.push({ id: `year-view-${i}`, kind: 'open-year-view', index: i, label: `点击「${compact(n.textContent).slice(0, 12)}」打开年份选择` }));
-      view.monthButtons.slice(0, 2).forEach((n, i) => out.push({ id: `month-view-${i}`, kind: 'open-month-view', index: i, label: `点击「${compact(n.textContent).slice(0, 12)}」打开月份选择` }));
+      view2.yearButtons.slice(0, 2).forEach((n, i) => out.push({ id: `year-view-${i}`, kind: 'open-year-view', index: i, label: `点击「${compact(n.textContent).slice(0, 12)}」打开年份选择` }));
+      view2.monthButtons.slice(0, 2).forEach((n, i) => out.push({ id: `month-view-${i}`, kind: 'open-month-view', index: i, label: `点击「${compact(n.textContent).slice(0, 12)}」打开月份选择` }));
       const uniqueMatch = (grid, predicate) => {
         const matches = grid.cells.filter(predicate);
         return matches.length === 1 ? matches[0] : null;
       };
-      for (const grid of view.grids) {
+      for (const grid of view2.grids) {
         if (grid.mode === 'year' && parts?.y != null) {
           const match = uniqueMatch(grid, c => c.value === parts.y || c.attr?.y === parts.y);
           if (match) out.push({ id: 'pick-year', kind: 'choose-year', grid: grid.mode, match: { y: parts.y }, label: `选择年份 ${parts.y}` });
@@ -305,12 +332,13 @@
           if (match) out.push({ id: 'pick-day', kind: 'choose-day', grid: grid.mode, match: { y: parts.y, m: parts.m, d: parts.d }, label: `选择日期 ${parts.y}-${String(parts.m).padStart(2, '0')}-${String(parts.d).padStart(2, '0')}` });
         }
       }
-      view.paging.forEach((p, i) => out.push({ id: `nav-${p.direction}-${i}`, kind: 'nav', index: i, direction: p.direction, label: `点击翻页「${p.label || p.direction}」（点击后需按方向核对）` }));
-      if (view.confirm.length === 1) out.push({ id: 'confirm', kind: 'confirm', label: '点击日历的确认按钮' });
+      view2.paging.forEach((p, i) => out.push({ id: `nav-${p.direction}-${i}`, kind: 'nav', index: i, direction: p.direction, label: `点击翻页「${p.label || p.direction}」（点击后需按方向核对）` }));
+      if (view2.confirm.length === 1) out.push({ id: 'confirm', kind: 'confirm', label: '点击日历的确认按钮' });
       const editable = entry.element instanceof HTMLInputElement && !entry.element.readOnly && !entry.element.disabled
         && !entry.element.matches('[type="checkbox"],[type="radio"],[type="date"],[type="month"]');
       if (editable) out.push({ id: 'type', kind: 'type', label: `在输入框直接输入目标日期 ${entry.targetValue}` });
-      if (view.confidence !== 'high') {
+      // tier-2 兜底：分类置信度低，或表头没有任何可导航按钮（执行器不能让 AI 无路可走）。
+      if (view2.confidence !== 'high' || (!view2.yearButtons.length && !view2.monthButtons.length && view2.grids.length)) {
         tier2Elements(entry, panelNode, view).forEach((n, i) => out.push({
           id: `element-${i}`, kind: 'click-element', index: i,
           label: `点击面板内显示为「${compact(n.textContent).slice(0, 12)}」的可交互元素`
@@ -386,7 +414,7 @@
           if (!input) throw new Error('当前没有可用的文本输入通道');
           await input(entry.element, entry.targetValue);
         } else {
-          if (!await click(node)) throw new Error(`点击失败：${expect}`);
+          if (await click(node) === false) throw new Error(`点击失败：${expect}`);
         }
         // 翻页方向核对：声称的方向未让面板前进时记入观察，由模型下次决定或停止。
         if (action.kind === 'nav' && view) {
@@ -481,7 +509,7 @@
 
         // 快路径：结构高置信 → 合成契约交给 CalendarAgent，0 次模型调用。基准 C 组用开关关掉它。
         if (!root.__APPLY_FILL_DATE_DISABLE_CONTRACT__ && view?.confidence === 'high' && view.uniquePerMode) {
-          const contract = view.contract();
+          const contract = view.contract(() => panelOf(entry));
           if (contract) {
             const agent = root.ResumeProCalendarAgent.create({ visible, click });
             const result = await agent.fill({
@@ -492,6 +520,9 @@
               readPeer: () => (peerValue ? peerValue(entry) : undefined), contract
             });
             if (result?.ok) {
+              // 与 ud 的最严成功语义一致：值读回通过还不够，弹层必须真的收起。
+              const closed = await closePanel(entry);
+              if (!closed) return { ok: false, status: 'BLOCKED', code: 'POPUP_CLOSE_UNCONFIRMED', value, reason: '日历未关闭，已暂停后续填写' };
               const final = finalize(entry, { target: entry.targetValue, precision, peerBefore: entry.peerBefore });
               if (final.ok) { trace(entry, '核对', '通用规则驱动完成并读回通过'); return { ...final, status: 'SUCCESS', code: 'VALUE_VERIFIED', via: 'contract' }; }
             } else if (result) {
@@ -503,7 +534,8 @@
 
         // AI 逐步接管：模型每次从最新观察的候选里选一个 id。
         if (!entry.decide) {
-          await closePanel(entry);
+          const closed = await closePanel(entry);
+          if (!closed) return { ok: false, status: 'BLOCKED', code: 'POPUP_CLOSE_UNCONFIRMED', value, reason: '日历未关闭，已暂停后续填写' };
           return { ok: false, status: 'FAILED', code: '', value, reason: '通用结构未能规则驱动，且 AI 交互不可用' };
         }
         const completed = await runLoop(entry, { target: entry.targetValue, precision, start });
