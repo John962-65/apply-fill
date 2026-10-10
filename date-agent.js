@@ -303,10 +303,36 @@
         .filter(n => { const reason = denyReason(n); return !reason && !denyAtPoint(n); })
         .slice(0, MAX_TIER2);
     }
+    // 字段附近可能打开日历的图标/按钮：点击输入框无效时的备选触发器（上限 3 个，全部过危险动作黑名单）。
+    function nearbyTriggers(entry) {
+      const el = entry.element;
+      if (!el?.isConnected) return [];
+      let scope = el.closest('label');
+      if (!scope) {
+        for (let node = el.parentElement, i = 0; node && node !== document.body && i < 3; i++, node = node.parentElement) {
+          const found = Array.from(node.querySelectorAll('svg,[class*="icon" i],[class*="calendar" i],button,[role="button"],[aria-label]')).some(n => n !== el && !el.contains(n) && visible(n));
+          if (found) { scope = node; break; }
+        }
+      }
+      if (!scope) return [];
+      return Array.from(scope.querySelectorAll('svg,[class*="icon" i],[class*="calendar" i],button,[role="button"],[aria-label]'))
+        .filter(n => n !== el && !el.contains(n) && visible(n) && enabled(n) && !denyReason(n) && !denyAtPoint(n))
+        .filter(n => { const r = n.getBoundingClientRect(); return r.width > 0 && r.width <= 96 && r.height <= 96; })
+        .slice(0, 3);
+    }
     function buildCandidates(entry, view) {
       const out = [];
       const panelNode = panelOf(entry);
-      if (!panelNode) { out.push({ id: 'open', kind: 'open', label: '打开当前日期控件' }); return out; }
+      if (!panelNode) {
+        // 弹层尚未归属：只提供「尝试打开」类候选；归属唯一确认之前不给任何面板内部动作。
+        out.push({ id: 'open', kind: 'open', label: '点击当前日期控件尝试打开日历' });
+        nearbyTriggers(entry).forEach((n, i) => out.push({ id: `open-icon-${i}`, kind: 'open-icon', index: i, label: `点击「${compact(n.getAttribute('aria-label') || n.textContent).slice(0, 12)}」尝试打开日历` }));
+        const editable = entry.element instanceof HTMLInputElement && !entry.element.readOnly && !entry.element.disabled
+          && !entry.element.matches('[type="checkbox"],[type="radio"],[type="date"],[type="month"]');
+        if (editable && entry.targetValue) out.push({ id: 'type', kind: 'type', label: `在输入框直接输入目标日期 ${entry.targetValue}` });
+        out.push({ id: 'wait', kind: 'wait', label: '等待异步渲染' }, { id: 'stop', kind: 'stop', label: '停止并交给用户' });
+        return out.slice(0, 100);
+      }
       const view2 = view || { grids: [], yearButtons: [], monthButtons: [], paging: [], confirm: [], confidence: null };
       // 时分面板：规则与 AI 都只支持到年月日，识别出时分即暂停，不给可点击候选。
       if (view2.timePanel) { out.push({ id: 'wait', kind: 'wait', label: '等待异步渲染' }, { id: 'stop', kind: 'stop', label: '该日历需要选择时分，已暂停' }); return out; }
@@ -359,10 +385,43 @@
       return matches.length === 1 ? matches[0].node : null;
     }
 
+    /* ---------- 精度惰性解析：弹层未归属时也能先进入 AI 打开阶段 ---------- */
+
+    function ensurePrecision(entry, value) {
+      if (entry.precisionState) return entry.precisionState;
+      const panelNode = panelOf(entry);
+      const view = panelNode ? classifyCalendar(panelNode) : null;
+      const resolved = root.ResumeProDatePrecision.resolve({ element: entry.element, calendar: { grids: view?.modes || [] } });
+      entry.precisionEvidence = resolved.evidence;
+      if (!resolved.precision) return null;
+      let targetValue, padded;
+      if (resolved.precision === 'year') {
+        targetValue = String((/^(\d{4})/.exec(String(value ?? '').trim()) || [])[1] || '');
+        padded = false;
+      } else {
+        const normalized = root.ResumeProAIHelpers.normalizeDateForPrecision(value, resolved.precision);
+        targetValue = normalized.value; padded = Boolean(normalized.padded);
+      }
+      entry.precisionState = { precision: resolved.precision, targetValue, padded };
+      entry.targetValue = targetValue; entry.padded = padded;
+      return entry.precisionState;
+    }
+    // 动作反馈：before/after 全部来自真实页面观察，模型据此区分「点击成功且页面变化」「点击无效」「方向不符」。
+    function captureState(entry) {
+      const panelNode = panelOf(entry);
+      const view = panelNode ? classifyCalendar(panelNode) : null;
+      return { value: String(read(entry) || ''), view: view ? { modes: view.modes, header: view.header } : null };
+    }
+    function diffState(entry, before) {
+      const after = captureState(entry);
+      const changed = after.value !== before.value || JSON.stringify(after.view) !== JSON.stringify(before.view);
+      return { before, after, outcome: changed ? 'PAGE_CHANGED' : 'NO_CHANGE' };
+    }
+
     /* ---------- 逐步 AI 循环（观察 → 模型选 id → 执行 → 重观察） ---------- */
 
-    async function runLoop(entry, { target, precision, start }) {
-      const states0 = { lastAction: '尚未操作', stalls: 0, previous: '', waits: 0 };
+    async function runLoop(entry, { start }) {
+      const states0 = { lastAction: '尚未操作', stalls: 0, previous: '' };
       const observe = () => {
         if (Date.now() - start > BUDGET_MS) return { blocked: '日期交互时间达到上限' };
         if (!entry.element?.isConnected) {
@@ -373,6 +432,9 @@
         if (entry.peerBefore !== undefined && peerValue?.(entry) !== entry.peerBefore) return { blocked: '另一端日期被改变，已停止' };
         const panelNode = panelOf(entry);
         const view = panelNode ? classifyCalendar(panelNode) : null;
+        // 弹层已归属但精度无法从页面证据确定：保守停止，不按资料日期猜。
+        const state = panelNode ? ensurePrecision(entry, entry.rawValue) : null;
+        if (panelNode && !state) return { blocked: '无法从页面证据确定日期精度，未按资料日期猜测' };
         const current = String(read(entry) || '').trim();
         const candidates = buildCandidates(entry, view);
         const fingerprint = JSON.stringify([Boolean(panelNode), view?.summary(), current, candidates.map(c => c.id)]);
@@ -380,56 +442,78 @@
         states0.previous = fingerprint;
         if (states0.stalls >= STALL_LIMIT) return { blocked: '日历操作没有推进，停止重复点击' };
         entry.lastView = view;
+        // 只发送日期导航需要的字段，其余个人信息不出观察负载。
+        const fieldSlim = entry.meta ? (({ label, inputType, datePart, rangeRole, recordIndex, recordTotal }) => ({ label, inputType, datePart, rangeRole, recordIndex, recordTotal }))(entry.meta) : null;
         return {
-          field: entry.meta, record: entry.recordContext, target: entry.targetValue, precision,
+          field: fieldSlim, target: entry.targetValue || null, precision: entry.precisionState?.precision || null,
           precisionEvidence: entry.precisionEvidence, current, panel: view ? view.summary() : null,
           lastAction: states0.lastAction, candidates, fingerprint
         };
       };
       const execute = async action => {
-        states0.lastAction = action.kind; states0.waits = action.kind === 'wait' ? states0.waits + 1 : 0;
-        const view = entry.lastView || classifyCalendar(panelOf(entry));
+        const before = captureState(entry);
+        let intent = action.kind;
         if (action.kind === 'open') {
+          intent = '点击日期控件';
           if (!panelOf(entry)) { popup.transition(entry, states.SELECTING); await click(entry.trigger); await until(() => panelOf(entry), 1500); }
-          return;
-        }
-        if (action.kind === 'wait') { await wait(600); return; }
-        if (action.kind === 'stop') return;
-        const panelNode = panelOf(entry);
-        if (!panelNode) throw new Error('弹层未打开，无法执行日期操作');
-        popup.transition(entry, states.SELECTING);
-        let node = null, expect = '';
-        if (action.kind === 'choose-year') { node = resolveCell(entry, 'year', action.match); expect = `年份 ${action.match.y}`; }
-        else if (action.kind === 'choose-month') { node = resolveCell(entry, 'month', action.match); expect = `月份 ${action.match.m}`; }
-        else if (action.kind === 'choose-day') { node = resolveCell(entry, 'day', action.match); expect = `日期 ${action.match.d}`; }
-        else if (action.kind === 'open-year-view') { node = classifyCalendar(panelNode)?.yearButtons?.[action.index] || null; expect = '年份标题'; }
-        else if (action.kind === 'open-month-view') { node = classifyCalendar(panelNode)?.monthButtons?.[action.index] || null; expect = '月份标题'; }
-        else if (action.kind === 'nav') { node = classifyCalendar(panelNode)?.paging?.[action.index]?.node || null; expect = action.direction; }
-        else if (action.kind === 'confirm') { node = classifyCalendar(panelNode)?.confirm?.[0] || null; expect = '确认按钮'; }
-        else if (action.kind === 'click-element') { node = tier2Elements(entry, panelNode, view)[action.index] || null; expect = '面板元素'; }
-        if (!node || !node.isConnected || !visible(node) || !enabled(node)) throw new Error(`候选元素已失效：${expect}`);
-        const reason = denyReason(node) || denyAtPoint(node);
-        if (reason) throw new Error(`候选元素未通过安全检查（${reason}）`);
-        if (action.kind === 'type') {
+        } else if (action.kind === 'open-icon') {
+          const icons = nearbyTriggers(entry);
+          const node = icons[action.index];
+          if (!node?.isConnected || !visible(node) || !enabled(node)) throw new Error('日历图标已失效');
+          const denied = denyReason(node) || denyAtPoint(node);
+          if (denied) throw new Error(`日历图标未通过安全检查（${denied}）`);
+          intent = `点击「${compact(node.getAttribute('aria-label') || node.textContent).slice(0, 12)}」打开日历`;
+          popup.transition(entry, states.SELECTING);
+          if (await click(node) === false) throw new Error('点击日历图标失败');
+          await until(() => panelOf(entry), 1500);
+        } else if (action.kind === 'wait') {
+          intent = '等待异步渲染';
+          await wait(600);
+        } else if (action.kind === 'stop') {
+          // 无操作，由 verify/收尾处理。
+        } else if (action.kind === 'type') {
+          // 直接输入不依赖弹层节点：只验证输入框本身可编辑、未被替换；readonly 一律拒绝。
+          const el = entry.element;
+          if (!el?.isConnected || el.readOnly || el.disabled || el.matches('[type="checkbox"],[type="radio"],[type="date"],[type="month"]')) throw new Error('输入框不可编辑，不能直接输入日期');
           if (!input) throw new Error('当前没有可用的文本输入通道');
-          await input(entry.element, entry.targetValue);
+          intent = '直接输入目标日期';
+          popup.transition(entry, states.SELECTING);
+          await input(el, entry.targetValue);
         } else {
+          const panelNode = panelOf(entry);
+          if (!panelNode) throw new Error('弹层未打开，无法执行日期操作');
+          popup.transition(entry, states.SELECTING);
+          let node = null, expect = '';
+          if (action.kind === 'choose-year') { node = resolveCell(entry, 'year', action.match); expect = `年份 ${action.match.y}`; }
+          else if (action.kind === 'choose-month') { node = resolveCell(entry, 'month', action.match); expect = `月份 ${action.match.m}`; }
+          else if (action.kind === 'choose-day') { node = resolveCell(entry, 'day', action.match); expect = `日期 ${action.match.d}`; }
+          else if (action.kind === 'open-year-view') { node = classifyCalendar(panelNode)?.yearButtons?.[action.index] || null; expect = '年份标题'; }
+          else if (action.kind === 'open-month-view') { node = classifyCalendar(panelNode)?.monthButtons?.[action.index] || null; expect = '月份标题'; }
+          else if (action.kind === 'nav') { node = classifyCalendar(panelNode)?.paging?.[action.index]?.node || null; expect = action.direction; }
+          else if (action.kind === 'confirm') { node = classifyCalendar(panelNode)?.confirm?.[0] || null; expect = '确认按钮'; }
+          else if (action.kind === 'click-element') { node = tier2Elements(entry, panelNode, entry.lastView)[action.index] || null; expect = '面板元素'; }
+          else throw new Error('未知动作类型');
+          if (!node || !node.isConnected || !visible(node) || !enabled(node)) throw new Error(`候选元素已失效：${expect}`);
+          const denied = denyReason(node) || denyAtPoint(node);
+          if (denied) throw new Error(`候选元素未通过安全检查（${denied}）`);
+          intent = expect;
           if (await click(node) === false) throw new Error(`点击失败：${expect}`);
-        }
-        // 翻页方向核对：声称的方向未让面板前进时记入观察，由模型下次决定或停止。
-        if (action.kind === 'nav' && view) {
-          await wait(180);
-          const fresh = classifyCalendar(panelOf(entry));
-          if (fresh && view.header.year != null && fresh.header.year != null) {
-            const wentBack = /prev/.test(action.direction) && fresh.header.year > view.header.year
-              || /next/.test(action.direction) && fresh.header.year < view.header.year;
-            if (wentBack) states0.lastAction = `翻页方向与声称不符（${action.direction}）`;
+          // 翻页方向核对：声称的方向未让面板前进时记入动作反馈，由模型下次决定或停止。
+          if (action.kind === 'nav') {
+            await wait(180);
+            const fresh = classifyCalendar(panelOf(entry));
+            if (fresh && before.view && before.view.header.year != null && fresh.header.year != null) {
+              if (/prev/.test(action.direction) && fresh.header.year > before.view.header.year
+                || /next/.test(action.direction) && fresh.header.year < before.view.header.year) intent += '（方向与声称不符）';
+            }
           }
         }
+        states0.lastAction = { kind: action.kind, intent, ...diffState(entry, before) };
       };
       const verify = async () => {
         popup.transition(entry, states.VERIFYING);
-        const ok = valueMatches(String(read(entry) || ''), targetParts(entry.targetValue), precision);
+        const state = entry.precisionState;
+        const ok = state ? valueMatches(String(read(entry) || ''), targetParts(state.targetValue), state.precision) : false;
         popup.transition(entry, states.OPEN);
         return ok;
       };
@@ -478,74 +562,84 @@
 
     async function fill(entry, value, precision, handoff) {
       entry.interactions = [];
+      entry.rawValue = value;
+      entry.precisionState = null;
       const start = Date.now();
       try {
         if (entry.element?.matches?.('[type="checkbox"],[type="radio"]')) return { ok: false, status: 'SKIPPED', code: '', value, reason: '勾选控件不能按日期填写' };
-        const panelNode = handoff?.panel || await openPanel(entry);
-        if (!panelNode) {
-          const blocked = Boolean(entry.popupBlocked || entry.panelAmbiguous);
-          return { ok: false, status: blocked ? 'BLOCKED' : 'FAILED', code: blocked ? 'POPUP_OWNERSHIP_UNCONFIRMED' : '', value, reason: entry.fillNote || '未出现可识别的关联日历' };
-        }
-        let view = classifyCalendar(panelNode);
-        const resolved = root.ResumeProDatePrecision.resolve({ element: entry.element, calendar: { grids: view?.modes || [] } });
-        entry.precisionEvidence = resolved.evidence;
-        if (!resolved.precision) {
-          await closePanel(entry);
-          return { ok: false, status: 'FAILED', code: 'PRECISION_UNRESOLVED', value, reason: '无法从页面证据确定日期精度，未按资料日期猜测' };
-        }
-        precision = resolved.precision;
-        if (precision === 'year') {
-          entry.targetValue = String((/^(\d{4})/.exec(String(value ?? '').trim()) || [])[1] || '');
-          entry.padded = false;
-        } else {
-          const normalized = root.ResumeProAIHelpers.normalizeDateForPrecision(value, precision);
-          entry.targetValue = normalized.value; entry.padded = Boolean(normalized.padded);
-        }
-        const parts = targetParts(entry.targetValue);
-        if (!parts) { await closePanel(entry); return { ok: false, status: 'FAILED', code: '', value, reason: '目标日期格式不明确' }; }
-        // 接管前的 peer 基线来自路由（适配器尝试之前），适配器已改坏的另一端不会被当成基线。
+        // 接管前的 peer 基线来自路由（适配器尝试之前），适配器改坏的另一端不会被当成基线。
         entry.peerBefore = handoff?.peerBefore !== undefined ? handoff.peerBefore : (peerValue ? peerValue(entry) : undefined);
-        trace(entry, '识别日历', `精度 ${precision}；视图 ${(view?.modes || []).join('/') || '未分类'}`);
-
-        // 快路径：结构高置信 → 合成契约交给 CalendarAgent，0 次模型调用。基准 C 组用开关关掉它。
-        if (!root.__APPLY_FILL_DATE_DISABLE_CONTRACT__ && view?.confidence === 'high' && view.uniquePerMode) {
-          const contract = view.contract(() => panelOf(entry));
-          if (contract) {
-            const agent = root.ResumeProCalendarAgent.create({ visible, click });
-            const result = await agent.fill({
-              entry: { fillNote: '' }, value: entry.targetValue, precision,
-              panel: () => panelOf(entry), read: () => read(entry),
-              close: async () => { await closePanel(entry); },
-              trace: (a, d) => trace(entry, `规则驱动·${a}`, d),
-              readPeer: () => (peerValue ? peerValue(entry) : undefined), contract
-            });
-            if (result?.ok) {
-              // 与 ud 的最严成功语义一致：值读回通过还不够，弹层必须真的收起。
-              const closed = await closePanel(entry);
-              if (!closed) return { ok: false, status: 'BLOCKED', code: 'POPUP_CLOSE_UNCONFIRMED', value, reason: '日历未关闭，已暂停后续填写' };
-              const final = finalize(entry, { target: entry.targetValue, precision, peerBefore: entry.peerBefore });
-              if (final.ok) { trace(entry, '核对', '通用规则驱动完成并读回通过'); return { ...final, status: 'SUCCESS', code: 'VALUE_VERIFIED', via: 'contract' }; }
-            } else if (result) {
-              trace(entry, '规则驱动未完成', result.reason || '');
+        let panelNode = handoff?.panel || await openPanel(entry);
+        if (panelNode && handoff?.panel) {
+          // 脏状态接管的弹层没有经过 openPanel：补上 adopt 纪律，否则 popup 状态停在
+          // CLOSED，panelOf 解析为 null，execute 的状态转换也会抛异常。
+          adopt(entry, panelNode);
+        }
+        if (panelNode) {
+          const view = classifyCalendar(panelNode);
+          const state = ensurePrecision(entry, value);
+          trace(entry, '识别日历', `精度 ${state?.precision || '未定'}；视图 ${(view?.modes || []).join('/') || '未分类'}`);
+          if (!state) {
+            await closePanel(entry);
+            return { ok: false, status: 'FAILED', code: 'PRECISION_UNRESOLVED', value, reason: '无法从页面证据确定日期精度，未按资料日期猜测' };
+          }
+          if (!targetParts(entry.targetValue)) {
+            await closePanel(entry);
+            return { ok: false, status: 'FAILED', code: '', value, reason: '目标日期格式不明确' };
+          }
+          // 快路径：结构高置信 → 合成契约交给 CalendarAgent，0 次模型调用。基准 C 组用开关关掉它。
+          if (!root.__APPLY_FILL_DATE_DISABLE_CONTRACT__ && view?.confidence === 'high' && view.uniquePerMode) {
+            const contract = view.contract(() => panelOf(entry));
+            if (contract) {
+              const agent = root.ResumeProCalendarAgent.create({ visible, click });
+              const result = await agent.fill({
+                entry: { fillNote: '' }, value: entry.targetValue, precision: state.precision,
+                panel: () => panelOf(entry), read: () => read(entry),
+                close: async () => { await closePanel(entry); },
+                trace: (a, d) => trace(entry, `规则驱动·${a}`, d),
+                readPeer: () => (peerValue ? peerValue(entry) : undefined), contract
+              });
+              if (result?.ok) {
+                // 与 ud 的最严成功语义一致：值读回通过还不够，弹层必须真的收起。
+                const closed = await closePanel(entry);
+                if (!closed) return { ok: false, status: 'BLOCKED', code: 'POPUP_CLOSE_UNCONFIRMED', value, reason: '日历未关闭，已暂停后续填写' };
+                const final = finalize(entry, { target: entry.targetValue, precision: state.precision, peerBefore: entry.peerBefore });
+                if (final.ok) { trace(entry, '核对', '通用规则驱动完成并读回通过'); return { ...final, status: 'SUCCESS', code: 'VALUE_VERIFIED', via: 'contract' }; }
+              } else if (result) {
+                trace(entry, '规则驱动未完成', result.reason || '');
+              }
             }
-            view = classifyCalendar(panelOf(entry) || panelNode);
+          }
+        } else {
+          // 弹层未归属：先用静态证据（占位符/控件类型）尝试定精度，type 候选才有目标值；
+          // 静态也定不了就留给循环——打开类候选不需要精度，归属后再按结构证据重解析。
+          ensurePrecision(entry, value);
+          if (!entry.decide) {
+            // 归属失败且没有 AI 决策器：维持 0.8.21 的失败语义。
+            const blocked = Boolean(entry.popupBlocked || entry.panelAmbiguous);
+            return { ok: false, status: blocked ? 'BLOCKED' : 'FAILED', code: blocked ? 'POPUP_OWNERSHIP_UNCONFIRMED' : '', value, reason: entry.fillNote || '未出现可识别的关联日历' };
           }
         }
-
         // AI 逐步接管：模型每次从最新观察的候选里选一个 id。
+        // 弹层尚未归属时 observe 只给「尝试打开」类候选（点击输入框/日历图标/等待），
+        // 归属唯一确认之前不会出现任何面板内部动作。
         if (!entry.decide) {
           const closed = await closePanel(entry);
           if (!closed) return { ok: false, status: 'BLOCKED', code: 'POPUP_CLOSE_UNCONFIRMED', value, reason: '日历未关闭，已暂停后续填写' };
           return { ok: false, status: 'FAILED', code: '', value, reason: '通用结构未能规则驱动，且 AI 交互不可用' };
         }
-        const completed = await runLoop(entry, { target: entry.targetValue, precision, start });
+        const completed = await runLoop(entry, { start });
         const closed = await closePanel(entry);
         if (!closed) return { ok: false, status: 'BLOCKED', code: 'POPUP_CLOSE_UNCONFIRMED', value, reason: '日历未关闭，已暂停后续填写' };
-        if (!completed) {
-          const reason = entry.fillNote || 'AI 未确认结果';
-          return { ok: false, status: 'FAILED', code: 'VALUE_UNCONFIRMED', value, reason };
+        const state = entry.precisionState;
+        if (!completed || !state) {
+          return {
+            ok: false, status: 'FAILED',
+            code: !state ? 'PRECISION_UNRESOLVED' : 'VALUE_UNCONFIRMED',
+            value, reason: !state ? '无法从页面证据确定日期精度，未按资料日期猜测' : (entry.fillNote || 'AI 未确认结果')
+          };
         }
-        const final = finalize(entry, { target: entry.targetValue, precision, peerBefore: entry.peerBefore });
+        const final = finalize(entry, { target: state.targetValue, precision: state.precision, peerBefore: entry.peerBefore });
         if (!final.ok) return { ok: false, status: 'FAILED', code: 'VALUE_UNCONFIRMED', value, reason: final.reason };
         trace(entry, '核对', 'AI 逐步交互完成并读回通过');
         return { ...final, status: 'SUCCESS', code: 'VALUE_VERIFIED', via: 'ai-loop' };

@@ -11,6 +11,12 @@ const POLICY=`(observation)=>{
   const y=parts[0],m=parts[1]||null,d=parts[2]||null;
   const modes=panel.modes||[],header=panel.header||{};
   const one=kind=>c.find(x=>x.kind===kind);
+  if(!observation.panel){
+    const t=one('type');if(t)return {id:t.id};
+    const icon=one('open-icon');if(icon)return {id:icon.id};
+    const open=one('open');if(open)return {id:open.id};
+    return {id:(c.find(x=>x.kind==='stop')||{id:'stop'}).id};
+  }
   if(modes.includes('year')){const a=one('choose-year');if(a)return {id:a.id};}
   if(modes.includes('month')){
     if(header.year!==y){const a=one('open-year-view');if(a)return {id:a.id};}
@@ -200,6 +206,34 @@ async function scenario(browser,{mode,script=[],policy=false,target='2024-09-15'
     r=await scenario(browser,{mode:'single',pipeline:true,checkbox:false});
     assert.equal(r.value,'','flag off must leave the field empty: '+JSON.stringify(r));
     assert.match(r.status,/1 项没填上/);console.log('PASS generic date / full pipeline flag off keeps old behavior');
+
+    // 16. 核心接管场景：点击输入框无效，AI 通过日历图标打开 —— v0.8.21 真实日志的主故障。
+    r=await scenario(browser,{mode:'icononly',policy:true});
+    assert.equal(r.result.ok,true,JSON.stringify({r:r.result,note:r.note,trace:r.trace}));
+    assert.equal(r.value,'2024-09-15');assert.equal(r.result.via,'ai-loop');
+    assert.match(JSON.stringify(r.trace),/尝试打开日历/,'AI must use the icon to open: '+JSON.stringify(r.trace));
+    assert.equal(JSON.stringify(r.trace).match(/点击日期控件/g).length,1,'trigger clicked exactly once before falling to the icon');
+    assert.deepEqual(r.errors,[]);console.log('PASS generic date / AI opens via calendar icon: '+r.modelCalls+' calls');
+    // 没有 AI 决策器时保持原有失败语义。
+    r=await scenario(browser,{mode:'icononly'});
+    assert.equal(r.result,false,JSON.stringify({r:r.result,note:r.note}));
+    assert.match(r.note,/未出现可识别的关联日历/);console.log('PASS generic date / icon-only without AI keeps old failure');
+
+    // 17. 脏状态接管：面板已由上一次操作打开（extraInit 阶段点击），接管时从已有状态继续，不重新点击输入框。
+    r=await scenario(browser,{mode:'day',policy:true,extraInit:`document.getElementById('edu-start').click();`});
+    assert.equal(r.result.ok,true,JSON.stringify({r:r.result,note:r.note,trace:r.trace}));
+    assert.equal(r.value,'2024-09-15');
+    assert.match(JSON.stringify(r.trace),/识别日历/,'panel must be adopted from the dirty state');
+    assert.doesNotMatch(JSON.stringify(r.trace),/点击日期控件/,'dirty handoff must not re-click the trigger');
+    console.log('PASS generic date / dirty handoff continues from open panel');
+
+    // 18. type 动作：输入框可编辑且无日历时，AI 选择直接输入（此前该分支不可达）。
+    r=await scenario(browser,{mode:'typeable',policy:true});
+    assert.equal(r.result.ok,true,JSON.stringify({r:r.result,note:r.note,trace:r.trace}));
+    assert.equal(r.value,'2024-09-15');
+    assert.match(JSON.stringify(r.trace),/直接输入目标日期/,JSON.stringify(r.trace));
+    assert.equal(r.modelCalls,1,'type should resolve in one decision: '+r.modelCalls);
+    console.log('PASS generic date / type action commits typed date');
 
     await browser.close();
   }catch(error){await browser.close();throw error;}

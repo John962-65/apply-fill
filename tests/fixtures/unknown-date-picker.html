@@ -129,9 +129,33 @@
       stats.submissions++; state.open = false; state.pending = null; render();
     };
   }
+  if (mode === 'icononly') {
+    for (const id of committed.keys()) {
+      const icon = document.createElement('span');
+      icon.className = 'acme-icon-btn';
+      icon.textContent = '📅';
+      icon.setAttribute('aria-label', '打开日历');
+      icon.style.cssText = 'cursor:pointer;margin-left:6px';
+      icon.onclick = () => {
+        state.target = document.getElementById(id); state.open = true;
+        state.sel = null; state.pending = null; state.view = 'day'; state.decadeBase = null;
+        stats.opens++; render();
+      };
+      document.getElementById(id).after(icon);
+    }
+  }
   for (const id of committed.keys()) {
     const input = document.getElementById(id);
+    if (mode === 'typeable') {
+      input.removeAttribute('readonly');
+      input.addEventListener('keydown', e => {
+        if (e.key !== 'Enter') return;
+        const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(input.value.trim());
+        if (m && +m[2] >= 1 && +m[2] <= 12 && +m[3] >= 1 && +m[3] <= 31) { committed.set(id, input.value.trim()); stats.commits++; }
+      });
+    }
     input.addEventListener('click', () => {
+      if (mode === 'icononly' || mode === 'typeable') return;
       if (mode === 'stuckclose' && state.open) return;
       state.target = input; state.open = true; state.sel = null; state.pending = null;
       state.view = mode === 'month' ? 'month' : 'day';

@@ -10,6 +10,12 @@ const POLICY=`(observation)=>{
   const y=parts[0],m=parts[1]||null,d=parts[2]||null;
   const modes=panel.modes||[],header=panel.header||{};
   const one=kind=>c.find(x=>x.kind===kind);
+  if(!observation.panel){
+    const t=one('type');if(t)return {id:t.id};
+    const icon=one('open-icon');if(icon)return {id:icon.id};
+    const open=one('open');if(open)return {id:open.id};
+    return {id:(c.find(x=>x.kind==='stop')||{id:'stop'}).id};
+  }
   if(modes.includes('year')){
     const a=one('choose-year');
     if(a)return {id:a.id};
@@ -35,7 +41,7 @@ const POLICY=`(observation)=>{
   if(navElement)return {id:navElement.id};
   return {id:(c.find(x=>x.kind==='stop')||c[0]||{}).id};
 }`;
-const MODES=['day','month','far','confirm','async','messy','stuckclose','time','junk'];
+const MODES=['day','month','far','confirm','async','icononly','messy','stuckclose','time','junk'];
 
 async function runScenario(browser,{mode,arm,target='2024-09-15'}){
   const page=await browser.newPage({viewport:{width:1100,height:900}});
@@ -71,7 +77,7 @@ async function runScenario(browser,{mode,arm,target='2024-09-15'}){
     const field=scan.fields.find(f=>scan.fieldMap.get(f.fieldId).element?.id==='edu-start');
     if(!field)return {skip:true};
     const entry=scan.fieldMap.get(field.fieldId);entry.meta=field;
-    if(arm==='C')entry.decide=async observation=>{self.modelCalls++;return (new Function('return '+self.__BENCH_POLICY))()(observation);};
+    if(arm==='C'||arm==='D')entry.decide=async observation=>{self.modelCalls++;return (new Function('return '+self.__BENCH_POLICY))()(observation);};
     const started=Date.now();
     const result=await api.fillDateWithAgent(entry,target,entry.meta);
     return {ok:Boolean(result&&(typeof result!=='object'||result.ok)),value:document.getElementById('edu-start').value,
@@ -97,13 +103,13 @@ async function runScenario(browser,{mode,arm,target='2024-09-15'}){
         const expected=mode==='month'?'2024-09':'2024-09-15';
         // 误填=写进了错误的日期；值正确但面板收不起属于 BLOCKED（如实报告，不算误填）。
         const wrongDate=r.value&&r.value!==expected;
+        const outcome=r.ok?'成功':wrongDate?'误填':r.status&&r.status.status==='BLOCKED'?'BLOCKED':'失败';
         if(r.ok)table[arm].success++;
         else if(wrongDate)table[arm].misfill++;
         else if(r.status&&r.status.status==='BLOCKED')table[arm].blocked++;
         else table[arm].fail++;
         table[arm].ms+=r.ms;table[arm].calls+=r.modelCalls;
-        details[arm][mode]=`${r.ok?'成功':wrongDate?'误填':r.status&&r.status.status==='BLOCKED'?'BLOCKED':'失败'}${r.value?`(${r.value})`:''}/${r.modelCalls}次/${r.ms}ms`;
-        if(r.errors.length)details[arm][mode]+=' 页面异常:'+r.errors[0];
+        details[arm][mode]={outcome,value:r.value||'',calls:r.modelCalls,ms:r.ms};
       }
       table[arm].ms=Math.round(table[arm].ms/MODES.length);
       table[arm].calls=Math.round(table[arm].calls/MODES.length);
@@ -118,14 +124,15 @@ async function runScenario(browser,{mode,arm,target='2024-09-15'}){
     console.log('\n明细（结果/模型调用/耗时）：');
     for(const [arm,name] of Object.entries(arms)){
       console.log(`  ${arm} ${name}:`);
-      for(const mode of MODES)console.log(`    ${mode.padEnd(12)} ${details[arm][mode]}`);
+      for(const mode of MODES){const d=details[arm][mode];console.log(`    ${mode.padEnd(12)} ${d.outcome}${d.value?`(${d.value})`:''}/${d.calls}次/${d.ms}ms`);}
     }
     // 消融结论的硬断言：分类器与 AI 各自的价值必须有可见差异。
     assertAblation(table,'A 在未知控件上全部失败',null,table.A.success===0);
     assertAblation(table,'B 分类器规则解出全部结构可分类场景(≥4)',null,table.B.success>=4);
-    assertAblation(table,'D 混合臂与 B 至少持平（规则失败后接管）',null,table.D.success>=table.B.success);
-    assertAblation(table,'C 纯 AI 在 B/D 失败的 messy 场景上成功',null,details.C.messy.startsWith('成功'));
-    assertAblation(table,'D 的模型调用为 0（可分类场景全部走规则快路径）',null,table.D.calls===0);
+    assertAblation(table,'C 纯 AI 在 B/D 失败的 messy 场景上成功',null,details.C.messy.outcome==='成功');
+    assertAblation(table,'D 混合臂至少与 B 持平并拿到 B 拿不到的场景',null,table.D.success>=table.B.success&&details.D.messy.outcome==='成功'&&details.D.icononly.outcome==='成功');
+    assertAblation(table,'D 在结构可分类场景保持 0 模型调用',null,['day','month','far','confirm','async'].every(m=>details.D[m].calls===0));
+    assertAblation(table,'D 在规则失败的 messy/icononly 场景真正调用了 AI',null,details.D.messy.calls>0&&details.D.icononly.calls>0);
     assertAblation(table,'没有任何一臂写进错误的日期',null,Object.values(table).every(t=>t.misfill===0));
     await browser.close();
   }catch(error){await browser.close();throw error;}
