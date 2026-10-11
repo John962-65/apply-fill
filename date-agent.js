@@ -524,7 +524,13 @@
         return ok;
       };
       const completed = await root.ResumeProInteractionAgent.run({
-        observe, decide: entry.decide, execute, verify,
+        observe,
+        decide: async observation => {
+          const action = await entry.decide(observation);
+          if (action?.kind === 'stop') states0.endReason ||= 'AI 无法确认下一步，选择停止';
+          return action;
+        },
+        execute, verify,
         maxSteps: MAX_ACTIONS,
         trace: (action, detail) => trace(entry, action, detail)
       });
@@ -539,6 +545,7 @@
       if (/精度/.test(reason)) return 'PRECISION_UNRESOLVED';
       if (/时间达到上限/.test(reason)) return 'BUDGET_EXCEEDED';
       if (/被替换/.test(reason)) return 'TARGET_REPLACED';
+      if (/选择停止/.test(reason)) return 'AI_STOPPED';
       return '';
     }
 
@@ -651,15 +658,15 @@
         if (!closed) return { ok: false, status: 'BLOCKED', code: 'POPUP_CLOSE_UNCONFIRMED', value, reason: '日历未关闭，已暂停后续填写' };
         const state = entry.precisionState;
         if (!completed || !state) {
-          // 结构化失败原因：无进展/另一端被改/精度不定/超时各自有码，不再统统归为「值未确认」。
+          // 结构化失败原因：无进展/另一端被改/精度不定/超时/模型放弃各自有码，不再统统归为「值未确认」。
           const code = !state ? 'PRECISION_UNRESOLVED' : (endCodeOf(endReason) || 'VALUE_UNCONFIRMED');
           return {
-            ok: false, status: 'FAILED', code,
+            ok: false, status: 'FAILED', code, observation: popup.snapshot(entry),
             value, reason: !state ? '无法从页面证据确定日期精度，未按资料日期猜测' : (endReason || entry.fillNote || 'AI 未确认结果')
           };
         }
         const final = finalize(entry, { target: state.targetValue, precision: state.precision, peerBefore: entry.peerBefore });
-        if (!final.ok) return { ok: false, status: 'FAILED', code: 'VALUE_UNCONFIRMED', value, reason: final.reason };
+        if (!final.ok) return { ok: false, status: 'FAILED', code: 'VALUE_UNCONFIRMED', observation: popup.snapshot(entry), value, reason: final.reason };
         trace(entry, '核对', 'AI 逐步交互完成并读回通过');
         return { ...final, status: 'SUCCESS', code: 'VALUE_VERIFIED', via: 'ai-loop' };
       } catch (error) {
@@ -669,7 +676,7 @@
       }
     }
 
-    return { fill, inspectHandoff, classifyCalendar };
+    return { fill, inspectHandoff, classifyCalendar, snapshot: entry => { try { return popup.snapshot(entry); } catch { return undefined; } } };
   }
   root.ResumeProGenericDateAgent = { create };
   if (typeof module !== 'undefined' && module.exports) module.exports = root.ResumeProGenericDateAgent;

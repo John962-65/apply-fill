@@ -1238,6 +1238,7 @@
   }
 
   async function decideInteraction(observation,aiConfig,button){
+    state.interactionSteps=(state.interactionSteps||0)+1;
     const requestId='interaction-'+crypto.randomUUID();
     const stop=document.createElement('button');stop.type='button';stop.textContent='停止 AI 交互';
     let stopped=false;
@@ -1297,13 +1298,14 @@
       const takeover = await genericDateAgent.fill(entry, value, null, { ...inspect, peerBefore });
       if (takeover.ok) { entry.fillNote=''; return takeover; }
       entry.fillNote = takeover.reason || reason;
-      entry.interactionResult={status:takeover.status==='BLOCKED'?'BLOCKED':takeover.status==='SKIPPED'?'SKIPPED':'RECOVERED',code:takeover.code||'VALUE_UNCONFIRMED'};
+      entry.interactionResult={status:takeover.status==='BLOCKED'?'BLOCKED':takeover.status==='SKIPPED'?'SKIPPED':'RECOVERED',
+        code:takeover.code||'VALUE_UNCONFIRMED',observation:takeover.observation};
       if (takeover.status==='BLOCKED') entry.popupBlocked=true;
       trace('AI 接管未完成',entry.fillNote);
       return false;
     } catch (error) {
       entry.fillNote=error.message;
-      entry.interactionResult={status:'RECOVERED',code:'VALUE_UNCONFIRMED'};
+      entry.interactionResult={status:'RECOVERED',code:'VALUE_UNCONFIRMED',observation:genericDateAgent.snapshot?.(entry)};
       return false;
     }
   }
@@ -1329,6 +1331,7 @@
 
     button.disabled = true;
     state.lastInteractionFailures=[];
+    state.interactionSteps=0;
     // Warm the desktop modules while the fill runs, so that when it ends the page can be read
     // for the archive offer without waiting on anything (see offerFillRecord).
     loadDesktopModules().catch(() => {});
@@ -1705,6 +1708,7 @@
       if (timer !== null) window.clearInterval(timer);
       if (phase) timing[phase] = performance.now() - phaseStart;
       const totalMs = performance.now() - totalStart;
+      diagnostics.interactionSteps = state.interactionSteps || 0;
       const summary = formatFillDiagnostics({ ...timing, totalMs,
         fieldCount, filledCount, unfilledCount: unfilledLabels.length, notAttemptedCount:notAttemptedLabels.length, locallySkippedCount:locallySkippedLabels.length, outcome, stage, diagnostics });
       const panel = shadowRoot?.querySelector("#resume-pro-diagnostics");
@@ -2221,6 +2225,7 @@
       ...(d.optionFailures ? [`预读错误：${[...new Set(d.optionErrors || [])].map(c=>safeInputErrorCode(c)||'unknown').join('、')}`] : []),
       `匹配往返（含后台处理）：${seconds(result.roundTripMs)}`,
       `API（含响应读取）：${seconds(d.apiMs)}`,
+      ...(Number.isInteger(d.interactionSteps)?[`AI 交互步数：${d.interactionSteps}（每步一次模型调用，来自下拉/日期的逐步交互）`]:[]),
       `填写：${seconds(result.fillMs)}；总计：${seconds(result.totalMs)}`,
       ...(interactionFailures.length?[`交互失败证据（无资料值）：${JSON.stringify(interactionFailures)}`]:[])
     ].join("\n");
