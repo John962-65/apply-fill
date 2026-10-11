@@ -32,7 +32,7 @@ const POLICY=`(observation)=>{
   return {id:(c.find(x=>x.kind==='stop')||c[0]||{}).id};
 }`;
 
-async function scenario(browser,{mode,script=[],policy=false,target='2024-09-15',contract=true,pipeline=false,checkbox=false,peer=false,handoff=false,useCdp=false,forceFirstOpen=false,extraInit=''}){
+async function scenario(browser,{mode,script=[],policy=false,target='2024-09-15',contract=true,pipeline=false,checkbox=false,peer=false,handoff=false,useCdp=false,forceFirstOpen=false,traceCheck=false,extraInit=''}){
   const {performInput}=await import('../browser-input.mjs');
   const page=await browser.newPage({viewport:{width:1100,height:900}});
   const errors=[];page.on('pageerror',e=>errors.push(e.message));
@@ -74,7 +74,7 @@ async function scenario(browser,{mode,script=[],policy=false,target='2024-09-15'
       +'<p id="resume-pro-wait-hint" role="status"></p>';
   });
   for(const script of JSON.parse(fs.readFileSync(path.join(root,'manifest.json'))).content_scripts[0].js)await page.addScriptTag({path:path.join(root,script)});
-  const result=await page.evaluate(async ({target,pipeline,checkbox,policy,peer,handoff,forceFirstOpen,useCdp})=>{
+  const result=await page.evaluate(async ({target,pipeline,checkbox,policy,peer,handoff,forceFirstOpen,useCdp,traceCheck})=>{
     const api=ResumeProHighlightTest;
     const makeEntry=()=>{
       const scan=api.scanFillableFields();
@@ -98,6 +98,16 @@ async function scenario(browser,{mode,script=[],policy=false,target='2024-09-15'
       const hostShadow=document.getElementById('resume-pro-sidebar').shadowRoot;
       api.setShadowRoot(hostShadow);
       hostShadow.querySelector('#resume-pro-browser-input').checked=useCdp;
+      if(traceCheck){
+        // 失败记录缺 observation（实站出现过的形态）不得让报告阶段抛异常。
+        const fields=[{fieldId:'f1',label:'开始时间',inputType:'text'},{fieldId:'f2',label:'学历',inputType:'combobox'}];
+        const fieldMap=new Map([['f1',{interactionResult:{status:'RECOVERED',code:'VALUE_UNCONFIRMED'}}],['f2',{}]]);
+        const outcomes=new Map([['f1',{ok:false}],['f2',{ok:false}]]);
+        try{
+          const text=api.formatFieldTrace({fields,fieldMap,matches:[{fieldId:'f1',source:'ai',value:'2024-09-15'},{fieldId:'f2',source:'ai',value:'硕士'}],outcomes,unlabeledCombos:0,notices:new Map(),dropped:[],droppedTotal:0});
+          return {traceOk:true,traceRow:text.split('\n').find(l=>l.includes('交互结果'))||''};
+        }catch(error){return {traceOk:false,traceError:{message:error.message}};}
+      }
       const entry=makeEntry();
       if(handoff){
         const rejected=api.genericDateAgent.inspectHandoff(entry,{peerBefore:'1999-01-01'});
@@ -121,7 +131,7 @@ async function scenario(browser,{mode,script=[],policy=false,target='2024-09-15'
     return {fillError,status:h.querySelector('#resume-pro-status').textContent,diagnostics:h.querySelector('#resume-pro-diagnostics-text').value,
       value:document.getElementById('edu-start').value,modelCalls:self.modelCalls,
       trace:h.querySelector('#resume-pro-trace-text').value};
-  },{target,pipeline,checkbox,policy,peer,handoff,forceFirstOpen,useCdp});
+  },{target,pipeline,checkbox,policy,peer,handoff,forceFirstOpen,useCdp,traceCheck});
   result.errors=errors;
   await page.close();
   return result;
@@ -189,7 +199,7 @@ async function scenario(browser,{mode,script=[],policy=false,target='2024-09-15'
     // 10. 时分面板：规则路径拒绝，不误报成功。
     r=await scenario(browser,{mode:'time',policy:true});
     assert.equal(r.result,false,JSON.stringify({r:r.result,note:r.note}));
-    assert.equal(r.status&&r.status.status,'RECOVERED');assert.match(r.note,/时分|未确认|精度/);
+    assert.equal(r.status&&r.status.status,'RECOVERED');assert.match(r.note,/时分|未确认|精度|停止/);
     console.log('PASS generic date / time panel refuses to fake success:',r.note);
 
     // 11. 面板无日期结构：没有等价动作必须停止，不猜测。
@@ -290,6 +300,13 @@ async function scenario(browser,{mode,script=[],policy=false,target='2024-09-15'
     assert.equal(r.result.ok,true,JSON.stringify({r:r.result,note:r.note}));
     assert.equal(r.value,'2024-09-15');
     console.log('PASS generic date / same covered fixture passes with synthetic clicks (control)');
+
+    // 25. 对照表回归：失败记录缺 observation 时报告阶段不得崩溃（实站 63/85 却整体 failed 的根因）。
+    r=await scenario(browser,{mode:'day',traceCheck:true});
+    assert.equal(r.traceOk,true,JSON.stringify(r.traceError||{}));
+    assert.match(r.traceRow,/无弹层结构快照/);
+    assert.match(r.traceRow,/VALUE_UNCONFIRMED/);
+    console.log('PASS generic date / trace survives interactionResult without observation');
 
     await browser.close();
   }catch(error){await browser.close();throw error;}

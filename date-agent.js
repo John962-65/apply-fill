@@ -514,7 +514,7 @@
         // 无进展按动作结算：连续 STALL_LIMIT 次动作后页面无实际变化才判停，
         // AI 中途换策略（失败后改点图标/换翻页方向）不会被观察次数误杀。
         states0.stalls = feedback.outcome === 'PAGE_CHANGED' ? 0 : states0.stalls + 1;
-        if (states0.stalls >= STALL_LIMIT) states0.stalled = true;
+        if (states0.stalls >= STALL_LIMIT) { states0.stalled = true; states0.endReason ||= '日历操作没有推进，停止重复点击'; }
       };
       const verify = async () => {
         popup.transition(entry, states.VERIFYING);
@@ -527,7 +527,8 @@
         observe,
         decide: async observation => {
           const action = await entry.decide(observation);
-          if (action?.kind === 'stop') states0.endReason ||= 'AI 无法确认下一步，选择停止';
+          // 兼容两种返回形态：worker 校验后返回完整候选（带 kind），测试桩可能只返回 {id}。
+          if (action?.kind === 'stop' || action?.id === 'stop') states0.endReason ||= 'AI 无法确认下一步，选择停止';
           return action;
         },
         execute, verify,
@@ -672,7 +673,7 @@
       } catch (error) {
         await closePanel(entry).catch(() => {});
         const blocked = Boolean(entry.popupBlocked);
-        return { ok: false, status: blocked ? 'BLOCKED' : 'FAILED', code: entry.failureCode || '', value, reason: error.message };
+        return { ok: false, status: blocked ? 'BLOCKED' : 'FAILED', code: entry.failureCode || '', value, reason: error.message, observation: popup.snapshot(entry) };
       }
     }
 

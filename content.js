@@ -1244,12 +1244,16 @@
     let stopped=false;
     stop.onclick=()=>{stopped=true;button.dataset.interactionStopped='true';stop.disabled=true;self.ResumeProAIClient.cancel(requestId).catch(()=>{});};
     button.insertAdjacentElement('afterend',stop);
+    const startedAt=performance.now();
     try{
       const response=await self.ResumeProAIClient.send({type:'AI_INTERACTION_STEP',requestId,aiConfig,observation});
       if(stopped)throw new Error('已停止 AI 交互');
       if(!response?.success)throw new Error(response?.error||'AI 交互未返回有效操作');
       return response.action;
-    }finally{stop.remove();}
+    }finally{
+      state.interactionMs=(state.interactionMs||0)+(performance.now()-startedAt);
+      stop.remove();
+    }
   }
 
   // 日期填写路由：规则适配器先行（0 次模型调用），失败后按实验开关交给通用日期 Agent 接管。
@@ -1332,6 +1336,7 @@
     button.disabled = true;
     state.lastInteractionFailures=[];
     state.interactionSteps=0;
+    state.interactionMs=0;
     // Warm the desktop modules while the fill runs, so that when it ends the page can be read
     // for the archive offer without waiting on anything (see offerFillRecord).
     loadDesktopModules().catch(() => {});
@@ -1359,11 +1364,13 @@
     const traceOutcomes = new Map();
     const writtenEntries = new Map();
     let traceText = "";
+    const fieldTimings = [];
     let structureText = "";
     let driftCount = 0;
     let swappedCount = 0;
     let mappingFilledCount = 0;
     let keptCount = 0;
+    let agreementSkipped = 0;
     const dateNotices = new Map();
     let unlabeledCombos = 0;
     let droppedControls = [];
@@ -1515,6 +1522,8 @@
       delete button.dataset.interactionStopped;
       for (const match of sortedMatches) {
         if(button.dataset.interactionStopped==='true')break;
+      const fieldTiming = { label: fieldMetaMap.get(match.fieldId)?.label || fieldMetaMap.get(match.fieldId)?.placeholder || '未命名字段', t0: performance.now(), s0: state.interactionSteps || 0, steps: 0, ms: 0 };
+      fieldTimings.push(fieldTiming);
       try {
         if (assisted && getActiveTemplate(state.currentStore) !== activeTemplate) throw new Error("模板已变化，已停止辅助填写，请核对网页。");
         let element = refreshFieldEntry(fieldMetaMap.get(match.fieldId), fieldMap.get(match.fieldId));
@@ -1535,7 +1544,7 @@
         element.meta=meta;
         const recordChanged=currentRecordStateReason(meta,fields,fieldMap);
         if(recordChanged){element.fillNote=recordChanged;traceOutcomes.set(match.fieldId,{ok:false});unfilledLabels.push(reviewFieldName(meta));continue;}
-        if(/勾选|同意|承诺书|用户协议|隐私声明/.test(meta.label||'')){element.fillNote='协议和承诺请本人确认';traceOutcomes.set(match.fieldId,{ok:false});continue;}
+        if(/勾选|同意|承诺书|用户协议|隐私声明/.test(meta.label||'')){element.fillNote='协议和承诺请本人确认';traceOutcomes.set(match.fieldId,{ok:false});agreementSkipped+=1;continue;}
         element.recordContext=fields.filter(f=>f.group===meta.group&&f.recordIndex===meta.recordIndex).map(f=>({label:f.label,current:readBackValue(fieldMap.get(f.fieldId))})).slice(0,20);
         element.decide=observation=>decideInteraction(observation,aiConfig,button);
         if(meta.rangeId){
@@ -1631,6 +1640,7 @@
       }
       }
 
+      fieldTimings.forEach(t=>{t.ms=performance.now()-t.t0;t.steps=(state.interactionSteps||0)-t.s0;});
       const verified = await verifyWrittenValues(writtenEntries, traceOutcomes,{focus:!notAttemptedLabels.length&&!locallySkippedLabels.length});
       writtenEntries.forEach((record, id) => fieldMap.set(id, record.entry));
       driftCount = verified.drift;
@@ -1656,6 +1666,8 @@
       // 这一轮没填上的控件，活引用只在本轮有效：自动点击采集要用，所以每次填写整体替换。
       state.lastCaptureTargets = buildCaptureTargets({ fields, fieldMap, outcomes: traceOutcomes });
       traceText = formatFieldTrace({ fields, fieldMap, matches: allMatches, outcomes: traceOutcomes, unlabeledCombos, notices: dateNotices, dropped: controlHints.list, droppedTotal: controlHints.total });
+      const slowest=fieldTimings.filter(t=>t.ms>0).sort((a,b)=>b.ms-a.ms).slice(0,8);
+      if(slowest.length)traceText+=`\n\n单字段耗时最高（定位长耗时用）：\n`+slowest.map((t,i)=>`${i+1}. ${t.label}：${(t.ms/1000).toFixed(1)}s${t.steps?`（AI 交互 ${t.steps} 步）`:''}`).join('\n');
       // 快照要带上每个字段实际的写入结果，所以放在复读校验之后。
       structureText = await recordStructureSnapshot({ fields, fieldMap, outcomes: traceOutcomes, unlabeledCombos, dropped: controlHints.list, droppedTotal: controlHints.total });
       // 这次填对的位置当场记成映射：下次同一套表单照映射直接填，不用再问模型。
@@ -1668,6 +1680,11 @@
       const sourceNote = blockedFields.length
         ? `${blockedFields.length} 项被来源校验拦截，未写入；请查看字段对照表中的原因。`
         : "";
+      // 字段分解：互斥分类，合计等于扫描字段数。
+      const rejectedCount=blockedFields.length;
+      const accounted=filledCount+unfilledLabels.length+keptCount+agreementSkipped+notAttemptedLabels.length+locallySkippedLabels.length+rejectedCount;
+      const noValueCount=Math.max(0,fieldCount-accounted);
+      diagnostics.fieldBreakdown={filled:filledCount,unfilled:unfilledLabels.length,kept:keptCount,noValue:noValueCount,rejected:rejectedCount,agreement:agreementSkipped,notAttempted:notAttemptedLabels.length,locallySkipped:locallySkippedLabels.length,total:fieldCount};
       outcome = response.warning || unconfirmedCount || unfilledLabels.length || notAttemptedLabels.length || locallySkippedLabels.length || driftCount || blockedFields.length ? "partial" : "success";
       const driftNote = driftCount
         ? `${driftCount} 项未通过页面读回校验${swappedCount ? `（其中 ${swappedCount} 项可能与其他字段串值）` : ""}，已标红可定位的控件，请核对后再提交。`
@@ -1726,6 +1743,7 @@
       if (phase) timing[phase] = performance.now() - phaseStart;
       const totalMs = performance.now() - totalStart;
       diagnostics.interactionSteps = state.interactionSteps || 0;
+      diagnostics.interactionMs = state.interactionMs || 0;
       const summary = formatFillDiagnostics({ ...timing, totalMs,
         fieldCount, filledCount, unfilledCount: unfilledLabels.length, notAttemptedCount:notAttemptedLabels.length, locallySkippedCount:locallySkippedLabels.length, outcome, stage, diagnostics });
       const panel = shadowRoot?.querySelector("#resume-pro-diagnostics");
@@ -1864,7 +1882,11 @@
       const actions = fieldMap?.get(field.fieldId)?.interactions;
       if (actions?.length) rows.push(`${title} · 操作：${actions.map(item => item.action + (item.detail ? `（${item.detail}）` : "")).join(" → ")}`);
       const transaction=fieldMap?.get(field.fieldId)?.interactionResult;
-      if(transaction&&!outcome?.ok&&!outcome?.kept)rows.push(`${title} · 交互结果：${transaction.status} / ${transaction.code}；状态 ${transaction.observation.state}；面板候选 ${transaction.observation.popupCandidates}`);
+      if(transaction&&!outcome?.ok&&!outcome?.kept){
+        const obs=transaction.observation;
+        const extra=obs?`；状态 ${obs.state??'unknown'}；面板候选 ${obs.popupCandidates??0}`:'；无弹层结构快照';
+        rows.push(`${title} · 交互结果：${transaction.status} / ${transaction.code}${extra}`);
+      }
       const notice = notices?.get(field.fieldId);
       rows.push(`${title} → ${result} · ${match.source === "local" ? "规则补空" : (match.source === "mapping" ? "快照映射" : "AI")} · ${sourceOf(match)} = ${oneLine(match.value) || "空"}${notice ? `（${notice}）` : ""}`);
     });
@@ -2244,6 +2266,8 @@
       `匹配往返（含后台处理）：${seconds(result.roundTripMs)}`,
       `API（含响应读取）：${seconds(d.apiMs)}`,
       ...(Number.isInteger(d.interactionSteps)?[`AI 交互步数：${d.interactionSteps}（每步一次模型调用，来自下拉/日期的逐步交互）`]:[]),
+      ...(Number.isInteger(d.interactionSteps)?[`AI 交互等待：${seconds(d.interactionMs)}；填写其余 ${seconds(Math.max(0,(result.fillMs||0)-(d.interactionMs||0)))} 为本地点击、页面等待与核对`]:[]),
+      ...(d.fieldBreakdown?[`字段分解：填写 ${d.fieldBreakdown.filled} · 尝试失败 ${d.fieldBreakdown.unfilled} · 已有值未覆盖 ${d.fieldBreakdown.kept} · 无匹配值 ${d.fieldBreakdown.noValue} · 来源拒绝 ${d.fieldBreakdown.rejected} · 协议跳过 ${d.fieldBreakdown.agreement} · 未尝试 ${d.fieldBreakdown.notAttempted} · 局部跳过 ${d.fieldBreakdown.locallySkipped}（合计 ${d.fieldBreakdown.total}）`]:[]),
       `填写：${seconds(result.fillMs)}；总计：${seconds(result.totalMs)}`,
       ...(interactionFailures.length?[`交互失败证据（无资料值）：${JSON.stringify(interactionFailures)}`]:[])
     ].join("\n");
