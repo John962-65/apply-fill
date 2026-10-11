@@ -673,7 +673,7 @@
       } catch (error) {
         await closePanel(entry).catch(() => {});
         const blocked = Boolean(entry.popupBlocked);
-        return { ok: false, status: blocked ? 'BLOCKED' : 'FAILED', code: entry.failureCode || '', value, reason: error.message, observation: popup.snapshot(entry) };
+        return { ok: false, status: blocked ? 'BLOCKED' : 'FAILED', code: entry.failureCode || 'AGENT_EXECUTION_ERROR', value, reason: error.message, observation: popup.snapshot(entry) };
       }
     }
 

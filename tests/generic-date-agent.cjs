@@ -32,7 +32,7 @@ const POLICY=`(observation)=>{
   return {id:(c.find(x=>x.kind==='stop')||c[0]||{}).id};
 }`;
 
-async function scenario(browser,{mode,script=[],policy=false,target='2024-09-15',contract=true,pipeline=false,checkbox=false,peer=false,handoff=false,useCdp=false,forceFirstOpen=false,traceCheck=false,extraInit=''}){
+async function scenario(browser,{mode,script=[],policy=false,target='2024-09-15',contract=true,pipeline=false,checkbox=false,peer=false,handoff=false,useCdp=false,forceFirstOpen=false,traceCheck=false,noFacts=false,extraInit=''}){
   const {performInput}=await import('../browser-input.mjs');
   const page=await browser.newPage({viewport:{width:1100,height:900}});
   const errors=[];page.on('pageerror',e=>errors.push(e.message));
@@ -40,7 +40,7 @@ async function scenario(browser,{mode,script=[],policy=false,target='2024-09-15'
   await page.exposeFunction('realInput',a=>performInput((m,p)=>cdp.send(m,p),a));
   await page.route('https://fixture.invalid/**',r=>r.fulfill({contentType:'text/html',body:FIXTURE}));
   await page.goto('https://fixture.invalid/form?mode='+mode);
-  await page.evaluate(({script,checkbox,contract,POLICY,pipeline})=>{
+  await page.evaluate(({script,checkbox,contract,POLICY,pipeline,noFacts})=>{
     self.__RESUME_PRO_TEST__=true;
     if(!pipeline){
       self.__APPLY_FILL_DATE_MODE__='agent-only';
@@ -49,7 +49,7 @@ async function scenario(browser,{mode,script=[],policy=false,target='2024-09-15'
     self.scriptedDecisions=script;
     self.POLICY_SRC=POLICY;
     self.modelCalls=0;
-    self.facts={'入学时间':'2024-09-15'};
+    self.facts=noFacts?{}:{'入学时间':'2024-09-15'};
     self.fixtureStore={templates:[{id:'t',name:'匿名资料',groups:[{id:'g',name:'教育背景',fields:Object.entries(facts).map(([label,value],i)=>({id:'s'+i,key:label,label,value}))}]}],activeTemplateId:'t',aiConfig:{apiUrl:'https://fixture.invalid/api',model:'fixture',apiKey:'fixture'}};
     self.checkboxOn=checkbox;
     self.chrome={runtime:{id:'fixture',getManifest:()=>({version:'test'}),getURL:p=>new URL(p,location.origin).href,sendMessage:async m=>{
@@ -60,7 +60,7 @@ async function scenario(browser,{mode,script=[],policy=false,target='2024-09-15'
         return {success:true,action:{id:(c.find(x=>x.kind==='stop')||c[0]).id}};}
       return {ready:true};
     }},storage:{local:{get:async()=>structuredClone(fixtureStore),set:async c=>Object.assign(fixtureStore,c)},onChanged:{addListener(){}}}};
-  },{script,checkbox,contract,POLICY,pipeline});
+  },{script,checkbox,contract,POLICY,pipeline,noFacts});
   if(extraInit)await page.evaluate(extraInit);
   // 侧边栏宿主必须在内容脚本加载前就存在：content.js 启动时会自建侧边栏并占用内部 shadowRoot 引用。
   await page.evaluate(()=>{
@@ -130,6 +130,7 @@ async function scenario(browser,{mode,script=[],policy=false,target='2024-09-15'
     catch(error){fillError=error&&error.stack||String(error);}
     return {fillError,status:h.querySelector('#resume-pro-status').textContent,diagnostics:h.querySelector('#resume-pro-diagnostics-text').value,
       value:document.getElementById('edu-start').value,modelCalls:self.modelCalls,
+      timings:api.lastFieldTimings(),breakdown:api.lastFieldBreakdown(),fillMs:api.lastFillMs(),
       trace:h.querySelector('#resume-pro-trace-text').value};
   },{target,pipeline,checkbox,policy,peer,handoff,forceFirstOpen,useCdp,traceCheck});
   result.errors=errors;
@@ -225,10 +226,30 @@ async function scenario(browser,{mode,script=[],policy=false,target='2024-09-15'
     assert.equal(r.value,'2024-09-15');assert.match(r.status,/已填写 1 个字段/);assert.deepEqual(r.errors,[]);
     console.log('PASS generic date / full pipeline takeover with flag on');
 
-    // 15. 完整管线：开关关闭时保持原有失败行为。
+    // 14b. 单字段计时按字段结算：各字段耗时之和不得超过整轮填写耗时（旧实现在循环末统一结算，早字段会吞掉整轮时长）。
+    assert.equal(r.timings.length,1,'one timing entry per processed field');
+    const timingSum=r.timings.reduce((a,t)=>a+(t.ms||0),0);
+    assert.ok(timingSum<=r.fillMs+300,'per-field timings must not overlap: sum '+Math.round(timingSum)+' vs fill '+Math.round(r.fillMs));
+    console.log('PASS generic date / per-field timing settled at field exit');
+
+    // 14c. 字段分解：合计=扫描数，对照表附最慢字段段。
+    assert.equal(r.breakdown.total,1,JSON.stringify(r.breakdown));assert.equal(r.breakdown.filled,1,JSON.stringify(r.breakdown));
+    assert.match(r.trace,/单字段耗时最高/);
+    console.log('PASS generic date / field breakdown sums to scanned count');
+
+    // 15. 完整管线：开关关闭时保持原有失败行为；失败字段计入 FAILED。
     r=await scenario(browser,{mode:'single',pipeline:true,checkbox:false});
     assert.equal(r.value,'','flag off must leave the field empty: '+JSON.stringify(r));
-    assert.match(r.status,/1 项没填上/);console.log('PASS generic date / full pipeline flag off keeps old behavior');
+    assert.match(r.status,/1 项没填上/);
+    assert.equal(r.breakdown.total,1,JSON.stringify(r.breakdown));assert.equal(r.breakdown.unfilled,1,JSON.stringify(r.breakdown));
+    console.log('PASS generic date / full pipeline flag off keeps old behavior, failed field categorized');
+
+    // 15b. 无匹配值字段：NO_MATCH 归类 + 整轮 partial 提示。
+    r=await scenario(browser,{mode:'single',pipeline:true,checkbox:true,noFacts:true});
+    assert.equal(r.value,'','no resume value must leave the field empty');
+    assert.equal(r.breakdown.noValue,1,JSON.stringify(r.breakdown));
+    assert.match(r.status,/找不到值/);
+    console.log('PASS generic date / unmatched field categorized NO_MATCH and reported');
 
     // 16. 核心接管场景：点击输入框无效，AI 通过日历图标打开 —— v0.8.21 真实日志的主故障。
     r=await scenario(browser,{mode:'icononly',policy:true});

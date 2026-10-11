@@ -1309,7 +1309,7 @@
       return false;
     } catch (error) {
       entry.fillNote=error.message;
-      entry.interactionResult={status:'RECOVERED',code:'VALUE_UNCONFIRMED',observation:genericDateAgent.snapshot?.(entry)};
+      entry.interactionResult={status:'RECOVERED',code:'AGENT_EXECUTION_ERROR',observation:genericDateAgent.snapshot?.(entry)};
       return false;
     }
   }
@@ -1365,12 +1365,13 @@
     const writtenEntries = new Map();
     let traceText = "";
     const fieldTimings = [];
+    const finalStates = new Map();
+    const markState = (fieldId, status) => { if (!finalStates.has(fieldId)) finalStates.set(fieldId, status); };
     let structureText = "";
     let driftCount = 0;
     let swappedCount = 0;
     let mappingFilledCount = 0;
     let keptCount = 0;
-    let agreementSkipped = 0;
     const dateNotices = new Map();
     let unlabeledCombos = 0;
     let droppedControls = [];
@@ -1528,7 +1529,7 @@
         if (assisted && getActiveTemplate(state.currentStore) !== activeTemplate) throw new Error("模板已变化，已停止辅助填写，请核对网页。");
         let element = refreshFieldEntry(fieldMetaMap.get(match.fieldId), fieldMap.get(match.fieldId));
 
-        if (!element) continue;
+        if (!element) { markState(match.fieldId, 'NOT_ATTEMPTED'); continue; }
         fieldMap.set(match.fieldId, element);
         if (assisted && (!isAssistedTextField(element) || hasExistingValue(element) || !assisted.scopes.some(scope => scope.isConnected && scope.contains(element.element)))) continue;
 
@@ -1536,6 +1537,7 @@
         // 跳过不算失败，单独计数；对照表里会点名，免得看起来像漏填。
         if (!assisted && hasExistingValue(element)) {
           keptCount += 1;
+          markState(match.fieldId, 'KEPT');
           traceOutcomes.set(match.fieldId, { ok: false, kept: true });
           continue;
         }
@@ -1543,22 +1545,23 @@
         const meta=fieldMetaMap.get(match.fieldId);
         element.meta=meta;
         const recordChanged=currentRecordStateReason(meta,fields,fieldMap);
-        if(recordChanged){element.fillNote=recordChanged;traceOutcomes.set(match.fieldId,{ok:false});unfilledLabels.push(reviewFieldName(meta));continue;}
-        if(/勾选|同意|承诺书|用户协议|隐私声明/.test(meta.label||'')){element.fillNote='协议和承诺请本人确认';traceOutcomes.set(match.fieldId,{ok:false});agreementSkipped+=1;continue;}
+        if(recordChanged){element.fillNote=recordChanged;markState(match.fieldId,'NOT_ATTEMPTED');traceOutcomes.set(match.fieldId,{ok:false});unfilledLabels.push(reviewFieldName(meta));continue;}
+        if(/勾选|同意|承诺书|用户协议|隐私声明/.test(meta.label||'')){element.fillNote='协议和承诺请本人确认';traceOutcomes.set(match.fieldId,{ok:false});markState(match.fieldId,'AGREEMENT_SKIPPED');continue;}
         element.recordContext=fields.filter(f=>f.group===meta.group&&f.recordIndex===meta.recordIndex).map(f=>({label:f.label,current:readBackValue(fieldMap.get(f.fieldId))})).slice(0,20);
         element.decide=observation=>decideInteraction(observation,aiConfig,button);
         if(meta.rangeId){
           const pair=fields.filter(f=>f.rangeId===meta.rangeId);
           const reason=rangeMatchReason(pair,allMatches);
-          if(reason){element.fillNote=reason;traceOutcomes.set(match.fieldId,{ok:false});unfilledLabels.push(reviewFieldName(meta));continue;}
+          if(reason){element.fillNote=reason;markState(match.fieldId,'NOT_ATTEMPTED');traceOutcomes.set(match.fieldId,{ok:false});unfilledLabels.push(reviewFieldName(meta));continue;}
         }else if(/起止|起讫/.test(meta.label)){
-          element.fillNote='未能明确日期区间的开始和结束，已停止';traceOutcomes.set(match.fieldId,{ok:false});unfilledLabels.push(reviewFieldName(meta));continue;
+          element.fillNote='未能明确日期区间的开始和结束，已停止';markState(match.fieldId,'NOT_ATTEMPTED');traceOutcomes.set(match.fieldId,{ok:false});unfilledLabels.push(reviewFieldName(meta));continue;
         }
         const readiness=await comboAgent.prepare(element);
         if(readiness.status==='SKIPPED'){
           const blockerName=readiness.blocker?.meta?reviewFieldName(readiness.blocker.meta):'前一控件';
           element.fillNote=`${blockerName}的弹层仍未收起，本字段局部跳过`;
           traceOutcomes.set(match.fieldId,{ok:false,notAttempted:true,isolated:true,blockedBy:blockerName,failureCode:readiness.code});
+          markState(match.fieldId,'LOCALLY_SKIPPED');
           locallySkippedLabels.push(reviewFieldName(meta));continue;
         }
         if(readiness.status==='BLOCKED'){
@@ -1567,6 +1570,7 @@
             const pendingEntry=fieldMap.get(pending.fieldId),pendingMeta=fieldMetaMap.get(pending.fieldId);
             if(pendingEntry&&hasExistingValue(pendingEntry)){keptCount++;traceOutcomes.set(pending.fieldId,{ok:false,kept:true});continue;}
             if(pendingEntry)pendingEntry.fillNote=`页面状态不安全（${readiness.code}），本字段尚未尝试`;
+            markState(pending.fieldId,'NOT_ATTEMPTED');
             traceOutcomes.set(pending.fieldId,{ok:false,notAttempted:true,blockedBy:blockerName,failureCode:readiness.code});notAttemptedLabels.push(reviewFieldName(pendingMeta));
           }
           break;
@@ -1612,11 +1616,14 @@
             label: fieldMeta?.label || fieldMeta?.placeholder || fieldMeta?.name || "未命名字段"
           });
           filledCount += 1;
+          markState(match.fieldId, 'FILLED');
           highlightFilledField(element, match.value);
         } else if (assisted) {
           unconfirmedCount += 1;
+          markState(match.fieldId, 'LOCALLY_SKIPPED');
           traceOutcomes.set(match.fieldId, { ok: false, skipped: true });
         } else {
+          markState(match.fieldId, 'FAILED');
           unfilledLabels.push(fieldMeta?.label || fieldMeta?.placeholder || fieldMeta?.name || "未命名字段");
           traceOutcomes.set(match.fieldId, { ok: false });
         }
@@ -1637,10 +1644,13 @@
         traceOutcomes.set(match.fieldId, { ok: false });
         unfilledLabels.push(failMeta?.label || failMeta?.placeholder || failMeta?.name || '未命名字段');
         diagnostics.loopErrorAt = `第 ${filledCount + unfilledLabels.length} 个字段（${failMeta?.label || '未知标签'}）：${loopError.message || '未知异常'}`;
+      } finally {
+        // 计时在每个字段离开循环体时立即结算：continue/break/异常都覆盖，早处理的字段不会吞掉后续时长。
+        fieldTiming.ms = performance.now() - fieldTiming.t0;
+        fieldTiming.steps = (state.interactionSteps || 0) - fieldTiming.s0;
       }
       }
 
-      fieldTimings.forEach(t=>{t.ms=performance.now()-t.t0;t.steps=(state.interactionSteps||0)-t.s0;});
       const verified = await verifyWrittenValues(writtenEntries, traceOutcomes,{focus:!notAttemptedLabels.length&&!locallySkippedLabels.length});
       writtenEntries.forEach((record, id) => fieldMap.set(id, record.entry));
       driftCount = verified.drift;
@@ -1680,15 +1690,25 @@
       const sourceNote = blockedFields.length
         ? `${blockedFields.length} 项被来源校验拦截，未写入；请查看字段对照表中的原因。`
         : "";
-      // 字段分解：互斥分类，合计等于扫描字段数。
-      const rejectedCount=blockedFields.length;
-      const accounted=filledCount+unfilledLabels.length+keptCount+agreementSkipped+notAttemptedLabels.length+locallySkippedLabels.length+rejectedCount;
-      const noValueCount=Math.max(0,fieldCount-accounted);
-      diagnostics.fieldBreakdown={filled:filledCount,unfilled:unfilledLabels.length,kept:keptCount,noValue:noValueCount,rejected:rejectedCount,agreement:agreementSkipped,notAttempted:notAttemptedLabels.length,locallySkipped:locallySkippedLabels.length,total:fieldCount};
-      outcome = response.warning || unconfirmedCount || unfilledLabels.length || notAttemptedLabels.length || locallySkippedLabels.length || driftCount || blockedFields.length ? "partial" : "success";
+      // 字段分解：每个扫描字段恰好一个终态，合计由构造保证等于扫描数。
+      const answeredIds=new Set(allMatches.map(m=>m.fieldId));
+      for(const field of fields){
+        if(finalStates.has(field.fieldId))continue;
+        if(field.sourceRejection)finalStates.set(field.fieldId,'SOURCE_REJECTED');
+        else if(answeredIds.has(field.fieldId))finalStates.set(field.fieldId,'NOT_ATTEMPTED');
+        else finalStates.set(field.fieldId,'NO_MATCH');
+      }
+      const stateCounts={FILLED:0,FAILED:0,KEPT:0,NO_MATCH:0,SOURCE_REJECTED:0,AGREEMENT_SKIPPED:0,NOT_ATTEMPTED:0,LOCALLY_SKIPPED:0};
+      for(const st of finalStates.values())stateCounts[st]=(stateCounts[st]||0)+1;
+      const noValueCount=stateCounts.NO_MATCH;
+      diagnostics.fieldBreakdown={filled:stateCounts.FILLED,unfilled:stateCounts.FAILED,kept:stateCounts.KEPT,noValue:stateCounts.NO_MATCH,rejected:stateCounts.SOURCE_REJECTED,agreement:stateCounts.AGREEMENT_SKIPPED,notAttempted:stateCounts.NOT_ATTEMPTED,locallySkipped:stateCounts.LOCALLY_SKIPPED,total:fieldCount};
+      state.lastFieldBreakdown=diagnostics.fieldBreakdown;
+      state.lastFieldTimings=fieldTimings;
+      outcome = response.warning || unconfirmedCount || unfilledLabels.length || notAttemptedLabels.length || locallySkippedLabels.length || driftCount || blockedFields.length || noValueCount ? "partial" : "success";
       const driftNote = driftCount
         ? `${driftCount} 项未通过页面读回校验${swappedCount ? `（其中 ${swappedCount} 项可能与其他字段串值）` : ""}，已标红可定位的控件，请核对后再提交。`
         : "";
+      const noValueNote = noValueCount ? `${noValueCount} 项在资料里找不到值（对照表中标「没给出值」），可补充资料或手动填写。` : "";
       const unfilledNote = (unfilledLabels.length
         ? `${unfilledLabels.length} 项没填上：${summarizeLabels(unfilledLabels)}，请手动补上。`
         : "")+(locallySkippedLabels.length?`${locallySkippedLabels.length} 项因局部弹层跳过，收起弹层后可补填。`:"")
@@ -1706,9 +1726,9 @@
         showStatus(`辅助填写：已验证 ${filledCount} 项。${unconfirmedCount ? `${unconfirmedCount} 项未确认，请核对网页。` : ""}${sourceNote}${response.warning || ""}`, outcome === "partial" ? "error" : "success");
       } else if (response.warning) {
         showStatus(`本地已填写 ${filledCount} 项；${unfilledNote}${driftNote}${sourceNote}${response.warning}`, "error", Boolean(unfilledNote || driftNote || sourceNote));
-      } else if (unfilledNote || driftNote || manualNote || sourceNote) {
+      } else if (unfilledNote || driftNote || manualNote || sourceNote || noValueNote) {
         // 没填上的字段要用户自己去补，提示不自动消失。
-        showStatus(`已填写 ${filledCount} 个字段。${unfilledNote}${driftNote}${manualNote}${sourceNote}${learnedNote}`, "error", true);
+        showStatus(`已填写 ${filledCount} 个字段。${unfilledNote}${noValueNote}${keptNote}${driftNote}${manualNote}${sourceNote}${learnedNote}`, "error", true);
       } else if (mappingNote || droppedNote || keptNote || learnedNote) {
         showStatus(`已填写 ${filledCount} 个字段。${mappingNote}${keptNote}${learnedNote}${droppedNote}`, "success", true);
       } else {
@@ -1742,6 +1762,7 @@
       if (timer !== null) window.clearInterval(timer);
       if (phase) timing[phase] = performance.now() - phaseStart;
       const totalMs = performance.now() - totalStart;
+      state.lastFillMs = totalMs;
       diagnostics.interactionSteps = state.interactionSteps || 0;
       diagnostics.interactionMs = state.interactionMs || 0;
       const summary = formatFillDiagnostics({ ...timing, totalMs,
@@ -5481,6 +5502,15 @@
       },
       setShadowRoot(root) {
         shadowRoot = root;
+      },
+      lastFieldTimings() {
+        return state.lastFieldTimings || [];
+      },
+      lastFieldBreakdown() {
+        return state.lastFieldBreakdown || null;
+      },
+      lastFillMs() {
+        return state.lastFillMs || 0;
       }
     };
   }
