@@ -32,7 +32,7 @@ const POLICY=`(observation)=>{
   return {id:(c.find(x=>x.kind==='stop')||c[0]||{}).id};
 }`;
 
-async function scenario(browser,{mode,script=[],policy=false,target='2024-09-15',contract=true,pipeline=false,checkbox=false,peer=false,handoff=false,useCdp=false,forceFirstOpen=false,traceCheck=false,noFacts=false,extraInit=''}){
+async function scenario(browser,{mode,script=[],policy=false,target='2024-09-15',contract=true,pipeline=false,checkbox=false,peer=false,handoff=false,useCdp=false,forceFirstOpen=false,traceCheck=false,noFacts=false,noFastType=false,invalidFirst=false,extraInit=''}){
   const {performInput}=await import('../browser-input.mjs');
   const page=await browser.newPage({viewport:{width:1100,height:900}});
   const errors=[];page.on('pageerror',e=>errors.push(e.message));
@@ -40,11 +40,12 @@ async function scenario(browser,{mode,script=[],policy=false,target='2024-09-15'
   await page.exposeFunction('realInput',a=>performInput((m,p)=>cdp.send(m,p),a));
   await page.route('https://fixture.invalid/**',r=>r.fulfill({contentType:'text/html',body:FIXTURE}));
   await page.goto('https://fixture.invalid/form?mode='+mode);
-  await page.evaluate(({script,checkbox,contract,POLICY,pipeline,noFacts})=>{
+  await page.evaluate(({script,checkbox,contract,POLICY,pipeline,noFacts,noFastType,invalidFirst})=>{
     self.__RESUME_PRO_TEST__=true;
     if(!pipeline){
       self.__APPLY_FILL_DATE_MODE__='agent-only';
       self.__APPLY_FILL_DATE_DISABLE_CONTRACT__=!contract;
+      self.__APPLY_FILL_DATE_DISABLE_TYPE__=noFastType;
     }
     self.scriptedDecisions=script;
     self.POLICY_SRC=POLICY;
@@ -60,7 +61,7 @@ async function scenario(browser,{mode,script=[],policy=false,target='2024-09-15'
         return {success:true,action:{id:(c.find(x=>x.kind==='stop')||c[0]).id}};}
       return {ready:true};
     }},storage:{local:{get:async()=>structuredClone(fixtureStore),set:async c=>Object.assign(fixtureStore,c)},onChanged:{addListener(){}}}};
-  },{script,checkbox,contract,POLICY,pipeline,noFacts});
+  },{script,checkbox,contract,POLICY,pipeline,noFacts,noFastType,invalidFirst});
   if(extraInit)await page.evaluate(extraInit);
   // 侧边栏宿主必须在内容脚本加载前就存在：content.js 启动时会自建侧边栏并占用内部 shadowRoot 引用。
   await page.evaluate(()=>{
@@ -74,7 +75,7 @@ async function scenario(browser,{mode,script=[],policy=false,target='2024-09-15'
       +'<p id="resume-pro-wait-hint" role="status"></p>';
   });
   for(const script of JSON.parse(fs.readFileSync(path.join(root,'manifest.json'))).content_scripts[0].js)await page.addScriptTag({path:path.join(root,script)});
-  const result=await page.evaluate(async ({target,pipeline,checkbox,policy,peer,handoff,forceFirstOpen,useCdp,traceCheck})=>{
+  const result=await page.evaluate(async ({target,pipeline,checkbox,policy,peer,handoff,forceFirstOpen,useCdp,traceCheck,noFastType,invalidFirst})=>{
     const api=ResumeProHighlightTest;
     const makeEntry=()=>{
       const scan=api.scanFillableFields();
@@ -88,6 +89,11 @@ async function scenario(browser,{mode,script=[],policy=false,target='2024-09-15'
         if(forceFirstOpen && !self.firstOpenDone){
           const open=observation.candidates.find(c=>c.kind==='open');
           if(open){self.firstOpenDone=true;return {id:open.id};}
+        }
+        // invalidFirst：第一次故意返回候选之外的 id，验证受限纠错能让字段活下来。
+        if(invalidFirst && !self.invalidDone){
+          const pickYear=observation.candidates.find(c=>c.kind==='choose-year');
+          if(!pickYear && observation.candidates.length>1){self.invalidDone=true;return {id:'pick-year'};}
         }
         return decide(observation);
       };
@@ -132,7 +138,7 @@ async function scenario(browser,{mode,script=[],policy=false,target='2024-09-15'
       value:document.getElementById('edu-start').value,modelCalls:self.modelCalls,
       timings:api.lastFieldTimings(),breakdown:api.lastFieldBreakdown(),fillMs:api.lastFillMs(),
       trace:h.querySelector('#resume-pro-trace-text').value};
-  },{target,pipeline,checkbox,policy,peer,handoff,forceFirstOpen,useCdp,traceCheck});
+  },{target,pipeline,checkbox,policy,peer,handoff,forceFirstOpen,useCdp,traceCheck,noFastType,invalidFirst});
   result.errors=errors;
   await page.close();
   return result;
@@ -271,13 +277,45 @@ async function scenario(browser,{mode,script=[],policy=false,target='2024-09-15'
     assert.doesNotMatch(JSON.stringify(r.trace),/点击日期控件/,'dirty handoff must not re-click the trigger');
     console.log('PASS generic date / dirty handoff continues from open panel');
 
-    // 18. type 动作：输入框可编辑且无日历时，AI 选择直接输入（此前该分支不可达）。
-    r=await scenario(browser,{mode:'typeable',policy:true});
+    // 18. 无 AI 快路径：输入框可编辑 + 精度已确认 → 程序直接输入提交，0 次模型调用（实站 28 次调用的主要节省点）。
+    r=await scenario(browser,{mode:'typeable'});
+    assert.equal(r.result.ok,true,JSON.stringify({r:r.result,note:r.note,trace:r.trace}));
+    assert.equal(r.value,'2024-09-15');
+    assert.equal(r.result.via,'direct-type');
+    assert.equal(r.modelCalls,0,'typeable fast path must not call the model: '+r.modelCalls);
+    console.log('PASS generic date / editable date commits via direct-type with zero model calls');
+    // 18b. 快路径关闭时 type 仍可由 AI 逐步选择（保留该动作）。
+    r=await scenario(browser,{mode:'typeable',policy:true,noFastType:true});
     assert.equal(r.result.ok,true,JSON.stringify({r:r.result,note:r.note,trace:r.trace}));
     assert.equal(r.value,'2024-09-15');
     assert.match(JSON.stringify(r.trace),/直接输入目标日期/,JSON.stringify(r.trace));
     assert.equal(r.modelCalls,1,'type should resolve in one decision: '+r.modelCalls);
-    console.log('PASS generic date / type action commits typed date');
+    console.log('PASS generic date / type action via AI still works with fast path disabled');
+
+    // 26. 获奖年份（实站失败场景复现）：readonly 年精度控件，打开即 2031-2042，目标 2022。
+    // 程序先本地翻页（0 次调用），模型只需选唯一可见的 pick-year。
+    r=await scenario(browser,{mode:'yearfar',target:'2022-05-01',contract:false,policy:true});
+    assert.equal(r.result.ok,true,JSON.stringify({r:r.result,note:r.note,trace:r.trace}));
+    assert.equal(r.value,'2022','year-precision control must commit year only');
+    assert.match(JSON.stringify(r.trace),/规则翻页/,JSON.stringify(r.trace));
+    assert.ok(r.modelCalls<=2,'preset paging is local; only the year pick needs the model: '+r.modelCalls);
+    console.log('PASS generic date / award-year far range: local preset paging + 1 model call');
+
+    // 27. 非法动作 id 受限纠错：模型第一次返回候选之外的 pick-year，字段必须存活。
+    r=await scenario(browser,{mode:'day',contract:false,policy:true,invalidFirst:true});
+    assert.equal(r.result.ok,true,JSON.stringify({r:r.result,note:r.note,trace:r.trace}));
+    assert.equal(r.value,'2024-09-15');
+    assert.match(JSON.stringify(r.trace),/动作重试/,JSON.stringify(r.trace));
+    console.log('PASS generic date / invalid action id retried with legal candidates, field survives');
+
+    // 28. 级联月→日（出生日期截断回归）：无占位符、打开只有月格（结构推月精度），
+    // 选月后出现日格——精度必须升级为 day，最终提交完整年月日而不是月份。
+    r=await scenario(browser,{mode:'cascadeday',target:'2024-09-15',policy:true});
+    assert.equal(r.result.ok,true,JSON.stringify({r:r.result,note:r.note,trace:r.trace}));
+    assert.equal(r.value,'2024-09-15','month-view calendar must not truncate a full resume date');
+    assert.notEqual(r.value,'2024-09');
+    assert.match(JSON.stringify(r.trace),/精度/,JSON.stringify(r.trace));
+    console.log('PASS generic date / cascading month view escalates to day precision');
 
     // 19. 无进展计数回归：先强制选一次 open（预期 NO_CHANGE），AI 换策略点图标必须不被误杀。
     // 旧实现按观察次数计数（每步两次观察），一次失败动作就会烧掉 2/3 的预算。

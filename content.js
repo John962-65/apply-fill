@@ -1535,7 +1535,9 @@
       delete button.dataset.interactionStopped;
       for (const match of sortedMatches) {
         if(button.dataset.interactionStopped==='true')break;
-      const fieldTiming = { label: fieldMetaMap.get(match.fieldId)?.label || fieldMetaMap.get(match.fieldId)?.placeholder || '未命名字段', t0: performance.now(), s0: state.interactionSteps || 0, steps: 0, ms: 0 };
+      const timingMeta = fieldMetaMap.get(match.fieldId);
+      const timingLabel = [timingMeta?.group, timingMeta?.recordIndex ? `第 ${timingMeta.recordIndex} 条` : '', timingMeta?.label || timingMeta?.placeholder || '未命名字段'].filter(Boolean).join(' · ');
+      const fieldTiming = { fieldId: match.fieldId, label: timingLabel, t0: performance.now(), ms0: state.interactionMs || 0, s0: state.interactionSteps || 0, steps: 0, ms: 0, aiMs: 0 };
       fieldTimings.push(fieldTiming);
       try {
         if (assisted && getActiveTemplate(state.currentStore) !== activeTemplate) throw new Error("模板已变化，已停止辅助填写，请核对网页。");
@@ -1659,6 +1661,7 @@
       } finally {
         // 计时在每个字段离开循环体时立即结算：continue/break/异常都覆盖，早处理的字段不会吞掉后续时长。
         fieldTiming.ms = performance.now() - fieldTiming.t0;
+        fieldTiming.aiMs = Math.max(0, (state.interactionMs || 0) - fieldTiming.ms0);
         fieldTiming.steps = (state.interactionSteps || 0) - fieldTiming.s0;
       }
       }
@@ -1689,7 +1692,7 @@
       state.lastCaptureTargets = buildCaptureTargets({ fields, fieldMap, outcomes: traceOutcomes });
       traceText = formatFieldTrace({ fields, fieldMap, matches: allMatches, outcomes: traceOutcomes, unlabeledCombos, notices: dateNotices, dropped: controlHints.list, droppedTotal: controlHints.total });
       const slowest=fieldTimings.filter(t=>t.ms>0).sort((a,b)=>b.ms-a.ms).slice(0,8);
-      if(slowest.length)traceText+=`\n\n单字段耗时最高（定位长耗时用）：\n`+slowest.map((t,i)=>`${i+1}. ${t.label}：${(t.ms/1000).toFixed(1)}s${t.steps?`（AI 交互 ${t.steps} 步）`:''}`).join('\n');
+      if(slowest.length)traceText+=`\n\n单字段耗时最高（定位长耗时用）：\n`+slowest.map((t,i)=>`${i+1}. ${t.label}（${t.fieldId}）：${(t.ms/1000).toFixed(1)}s — AI 等待 ${(t.aiMs/1000).toFixed(1)}s · 页面操作 ${((t.ms-t.aiMs)/1000).toFixed(1)}s · ${t.steps} 步${t.via?` · ${t.via}`:''}`).join('\n');
       // 快照要带上每个字段实际的写入结果，所以放在复读校验之后。
       structureText = await recordStructureSnapshot({ fields, fieldMap, outcomes: traceOutcomes, unlabeledCombos, dropped: controlHints.list, droppedTotal: controlHints.total });
       // 这次填对的位置当场记成映射：下次同一套表单照映射直接填，不用再问模型。

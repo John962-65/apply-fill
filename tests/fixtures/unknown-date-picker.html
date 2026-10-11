@@ -35,7 +35,8 @@
   const state = { open: false, view: 'day', year: mode === 'far' ? 2035 : 2026, month: 10, decadeBase: null, sel: null, pending: null, target: null };
   // 组件自己持有已提交值：任何绕过组件提交路径的直写都会在下一个渲染周期被还原。
   const committed = new Map([['edu-start', ''], ['edu-end', '']]);
-  const placeholder = mode === 'month' ? 'YYYY-MM' : 'YYYY-MM-DD';
+  const yearPrecision = mode === 'yearfar';
+  const placeholder = yearPrecision ? 'YYYY' : mode === 'month' ? 'YYYY-MM' : mode === 'cascadeday' ? '' : 'YYYY-MM-DD';
   for (const id of committed.keys()) document.getElementById(id).placeholder = placeholder;
   if (mode === 'single') document.getElementById('edu-end').closest('.acme-field').style.display = 'none';
   window.fixtureSet = (id, value) => { committed.set(id, value); document.getElementById(id).value = value; };
@@ -119,11 +120,17 @@
     if (titleYear) titleYear.onclick = () => { state.view = 'year'; state.decadeBase = null; render(); };
     const titleMonth = portal.querySelector('.acme-picker-title-month');
     if (titleMonth) titleMonth.onclick = () => { state.view = 'month'; state.decadeBase = null; render(); };
-    portal.querySelectorAll('[data-year]').forEach(n => n.onclick = () => { state.year = Number(n.dataset.year); state.view = 'month'; state.decadeBase = null; render(); });
+    portal.querySelectorAll('[data-year]').forEach(n => n.onclick = () => {
+      if (yearPrecision) { commit(String(n.dataset.year)); stats.submissions++; state.open = false; render(); return; }
+      state.year = Number(n.dataset.year); state.view = 'month'; state.decadeBase = null; render();
+    });
     portal.querySelectorAll('[data-month]').forEach(n => n.onclick = () => {
       const m = Number(n.dataset.month);
       if (mode === 'month') { commit(`${state.year}-${pad(m)}`); stats.submissions++; state.open = false; render(); return; }
-      state.month = m; state.view = 'day'; render();
+      state.month = m;
+      // cascadeday：月格点击后展开日格视图（页面其实要完整日期）——初始月视图只是中间态。
+      state.view = mode === 'cascadeday' ? 'day' : 'day';
+      render();
     });
     portal.querySelectorAll('[data-date]').forEach(n => n.onclick = () => {
       if (mode === 'confirm' || mode === 'time') { state.pending = n.dataset.date; state.sel = n.dataset.date; render(); return; }
@@ -166,8 +173,9 @@
       if (mode === 'icononly' || mode === 'typeable') return;
       if (mode === 'stuckclose' && state.open) return;
       state.target = input; state.open = true; state.sel = null; state.pending = null;
-      state.view = mode === 'month' ? 'month' : 'day';
-      state.decadeBase = mode === 'far' ? state.decadeBase : null;
+      state.view = mode === 'month' || mode === 'cascadeday' ? 'month' : yearPrecision ? 'year' : 'day';
+      if (yearPrecision) { state.year = 2031; state.decadeBase = 2030; }
+      else state.decadeBase = mode === 'far' ? state.decadeBase : null;
       stats.opens++;
       if (mode === 'async') setTimeout(() => { if (state.open) render(); }, 500);
       else render();

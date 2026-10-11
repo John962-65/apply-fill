@@ -347,6 +347,17 @@
         if (grid.mode === 'year' && parts?.y != null) {
           const match = uniqueMatch(grid, c => c.value === parts.y || c.attr?.y === parts.y);
           if (match) out.push({ id: 'pick-year', kind: 'choose-year', grid: grid.mode, match: { y: parts.y }, label: `选择年份 ${parts.y}` });
+          else {
+            // 目标年份不在当前年代范围：给出明确指向的翻页候选，避免模型请求不存在的 pick-year。
+            const years = grid.cells.map(c => c.value ?? c.attr?.y).filter(n => n >= 1000 && n <= 9999);
+            if (years.length) {
+              const direction = parts.y < Math.min(...years) ? 'prev-decade' : 'next-decade';
+              const idx = view2.paging.findIndex(p => p.direction === direction
+                || (direction === 'prev-decade' && p.direction === 'prev') || (direction === 'next-decade' && p.direction === 'next'));
+              if (idx >= 0) out.push({ id: 'nav-to-year', kind: 'nav', index: idx, direction,
+                label: `翻页使年份列表包含 ${parts.y}（当前显示 ${Math.min(...years)}-${Math.max(...years)}）` });
+            }
+          }
         }
         if (grid.mode === 'month' && parts?.m != null) {
           const match = uniqueMatch(grid, c => c.value === parts.m || (c.attr?.y === parts.y && c.attr?.m === parts.m));
@@ -387,6 +398,18 @@
 
     /* ---------- 精度惰性解析：弹层未归属时也能先进入 AI 打开阶段 ---------- */
 
+    const PRECISION_RANK = { year: 0, month: 1, day: 2 };
+    function buildPrecisionState(entry, value, precision) {
+      let targetValue, padded;
+      if (precision === 'year') {
+        targetValue = String((/^(\d{4})/.exec(String(value ?? '').trim()) || [])[1] || '');
+        padded = false;
+      } else {
+        const normalized = root.ResumeProAIHelpers.normalizeDateForPrecision(value, precision);
+        targetValue = normalized.value; padded = Boolean(normalized.padded);
+      }
+      return { precision, targetValue, padded };
+    }
     function ensurePrecision(entry, value) {
       if (entry.precisionState) return entry.precisionState;
       const panelNode = panelOf(entry);
@@ -394,17 +417,78 @@
       const resolved = root.ResumeProDatePrecision.resolve({ element: entry.element, calendar: { grids: view?.modes || [] } });
       entry.precisionEvidence = resolved.evidence;
       if (!resolved.precision) return null;
-      let targetValue, padded;
-      if (resolved.precision === 'year') {
-        targetValue = String((/^(\d{4})/.exec(String(value ?? '').trim()) || [])[1] || '');
-        padded = false;
-      } else {
-        const normalized = root.ResumeProAIHelpers.normalizeDateForPrecision(value, resolved.precision);
-        targetValue = normalized.value; padded = Boolean(normalized.padded);
-      }
-      entry.precisionState = { precision: resolved.precision, targetValue, padded };
-      entry.targetValue = targetValue; entry.padded = padded;
+      // structuralOnly：精度只来自日历当前视图（无占位符/控件类型证据）。
+      // 月/年视图可能只是级联选择的中间态，后续出现更深网格时允许升级（只升不降）。
+      const structuralOnly = !root.ResumeProDatePrecision.staticEvidence(entry.element);
+      entry.precisionState = { ...buildPrecisionState(entry, value, resolved.precision), structuralOnly };
+      entry.targetValue = entry.precisionState.targetValue; entry.padded = entry.precisionState.padded;
       return entry.precisionState;
+    }
+    // 级联日历先显示月/年视图不代表页面只要月/年：出现更深网格且精度原本只靠结构判断时升级。
+    function maybeDeepenPrecision(entry, view) {
+      const state = entry.precisionState;
+      if (!state || !state.structuralOnly || state.precision === 'day' || !view) return state;
+      const deepest = view.modes.includes('day') ? 'day' : view.modes.includes('month') ? 'month' : view.modes.includes('year') ? 'year' : null;
+      if (!deepest || PRECISION_RANK[deepest] <= PRECISION_RANK[state.precision]) return state;
+      const upgraded = { ...buildPrecisionState(entry, entry.rawValue, deepest), structuralOnly: true };
+      entry.precisionState = upgraded;
+      entry.targetValue = upgraded.targetValue; entry.padded = upgraded.padded;
+      return upgraded;
+    }
+
+    /* ---------- 可编辑日期的无 AI 快路径：输入 → 等提交 → 读回；失败清残留后交回常规路径 ---------- */
+
+    async function tryDirectType(entry, { precision }) {
+      const el = entry.element;
+      if (root.__APPLY_FILL_DATE_DISABLE_TYPE__) return { ok: false };
+      if (!(el instanceof HTMLInputElement) || el.readOnly || el.disabled || el.matches('[type="checkbox"],[type="radio"],[type="date"],[type="month"]')) return { ok: false };
+      if (!entry.targetValue || !input) return { ok: false };
+      const matches = () => valueMatches(String(read(entry) || ''), targetParts(entry.targetValue), precision)
+        && (entry.peerBefore === undefined || !peerValue || peerValue(entry) === entry.peerBefore);
+      if (matches()) return { ok: true };
+      try { await input(el, entry.targetValue); } catch { return { ok: false }; }
+      for (let i = 0; i < 8 && !matches(); i++) await wait(150);
+      if (!matches()) { el.blur?.(); for (let i = 0; i < 6 && !matches(); i++) await wait(150); }
+      if (matches()) return { ok: true };
+      // 半截值不留给后续路径：清掉再继续，避免「已有内容未覆盖」挡住真正的填写。
+      try {
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+        setter.call(el, ''); el.dispatchEvent(new Event('input', { bubbles: true }));
+      } catch {}
+      return { ok: false };
+    }
+
+    /* ---------- 年份网格本地预翻页：目标不在当前年代范围时由程序翻页，不烧模型调用 ---------- */
+
+    async function presetYearRange(entry) {
+      for (let i = 0; i < 12; i++) {
+        const panelNode = panelOf(entry);
+        if (!panelNode) return;
+        const view = classifyCalendar(panelNode);
+        const grid = view?.grids.find(g => g.mode === 'year');
+        if (!grid) return;
+        const parts = targetParts(entry.targetValue);
+        if (!parts?.y) return;
+        const years = grid.cells.map(c => c.value ?? c.attr?.y).filter(n => n >= 1000 && n <= 9999);
+        if (!years.length) return;
+        if (parts.y >= Math.min(...years) && parts.y <= Math.max(...years)) return;
+        const direction = parts.y < Math.min(...years) ? 'prev-decade' : 'next-decade';
+        const cand = view.paging.find(p => p.direction === direction
+          || (direction === 'prev-decade' && p.direction === 'prev') || (direction === 'next-decade' && p.direction === 'next'));
+        if (!cand) return;
+        const denied = denyReason(cand.node) || denyAtPoint(cand.node);
+        if (denied) return;
+        const beforeMin = Math.min(...years), beforeMax = Math.max(...years);
+        if (await click(cand.node) === false) return;
+        await wait(200);
+        const fresh = classifyCalendar(panelOf(entry));
+        const g2 = fresh?.grids.find(g => g.mode === 'year');
+        const ys2 = (g2?.cells || []).map(c => c.value ?? c.attr?.y).filter(n => n >= 1000 && n <= 9999);
+        if (!ys2.length) return;
+        const movedToward = parts.y < beforeMin ? Math.min(...ys2) < beforeMin : Math.max(...ys2) > beforeMax;
+        if (!movedToward) return;
+        trace(entry, '规则翻页', `年份列表 → ${Math.min(...ys2)}-${Math.max(...ys2)}`);
+      }
     }
     // 动作反馈：before/after 全部来自真实页面观察，模型据此区分「点击成功且页面变化」「点击无效」「方向不符」。
     function captureState(entry) {
@@ -439,6 +523,7 @@
         // 弹层已归属但精度无法从页面证据确定：保守停止，不按资料日期猜。
         const state = panelNode ? ensurePrecision(entry, entry.rawValue) : null;
         if (panelNode && !state) { states0.endReason = '无法从页面证据确定日期精度，未按资料日期猜测'; return { blocked: states0.endReason }; }
+        if (panelNode && state) maybeDeepenPrecision(entry, view);
         const current = String(read(entry) || '').trim();
         const candidates = buildCandidates(entry, view);
         const fingerprint = JSON.stringify([Boolean(panelNode), view?.summary(), current, candidates.map(c => c.id)]);
@@ -526,10 +611,25 @@
       const completed = await root.ResumeProInteractionAgent.run({
         observe,
         decide: async observation => {
-          const action = await entry.decide(observation);
-          // 兼容两种返回形态：worker 校验后返回完整候选（带 kind），测试桩可能只返回 {id}。
-          if (action?.kind === 'stop' || action?.id === 'stop') states0.endReason ||= 'AI 无法确认下一步，选择停止';
-          return action;
+          const legalIds = new Set((observation.candidates || []).map(c => c.id));
+          for (let attempt = 0; ; attempt++) {
+            let action;
+            try { action = await entry.decide(observation); }
+            catch (error) { throw error; }
+            if (action?.kind === 'stop' || action?.id === 'stop') states0.endReason ||= 'AI 无法确认下一步，选择停止';
+            // 预校验：模型返回候选之外的 id（编造或重复了上一步的候选）时，带着合法清单重问一次。
+            if (legalIds.has(action?.id)) return action;
+            if (attempt >= 1) {
+              entry.invalidActions ??= [];
+              entry.invalidActions.push({ requestedId: String(action?.id ?? '').slice(0, 40), allowedIds: [...legalIds].slice(0, 20) });
+              trace(entry, '动作无效', `AI 两次返回候选之外的动作（${String(action?.id ?? '').slice(0, 24)}），已停止本字段`);
+              throw Object.assign(new Error('AI 两次返回了候选之外的动作'), { code: 'INVALID_ACTION_ID' });
+            }
+            entry.invalidActions ??= [];
+            entry.invalidActions.push({ requestedId: String(action?.id ?? '').slice(0, 40), allowedIds: [...legalIds].slice(0, 20) });
+            observation.invalidAction = { requestedId: String(action?.id ?? '').slice(0, 40), allowedIds: [...legalIds].slice(0, 20) };
+            trace(entry, '动作重试', `AI 返回了候选之外的动作（${String(action?.id ?? '').slice(0, 24)}），已重新提供合法候选`);
+          }
         },
         execute, verify,
         maxSteps: MAX_ACTIONS,
@@ -613,8 +713,9 @@
             await closePanel(entry);
             return { ok: false, status: 'FAILED', code: '', value, reason: '目标日期格式不明确' };
           }
-          // 快路径：结构高置信 → 合成契约交给 CalendarAgent，0 次模型调用。基准 C 组用开关关掉它。
-          if (!root.__APPLY_FILL_DATE_DISABLE_CONTRACT__ && view?.confidence === 'high' && view.uniquePerMode) {
+          // 契约快路径：结构高置信 + 精度不是只靠日历视图推的（级联月/年视图可能只是中间态，交给会升级的 AI 循环）。
+          if (!root.__APPLY_FILL_DATE_DISABLE_CONTRACT__ && view?.confidence === 'high' && view.uniquePerMode
+            && (state.precision === 'day' || !state.structuralOnly)) {
             const contract = view.contract(() => panelOf(entry));
             if (contract) {
               const agent = root.ResumeProCalendarAgent.create({ visible, click });
@@ -640,20 +741,32 @@
           // 弹层未归属：先用静态证据（占位符/控件类型）尝试定精度，type 候选才有目标值；
           // 静态也定不了就留给循环——打开类候选不需要精度，归属后再按结构证据重解析。
           ensurePrecision(entry, value);
-          if (!entry.decide) {
-            // 归属失败且没有 AI 决策器：维持 0.8.21 的失败语义。
-            const blocked = Boolean(entry.popupBlocked || entry.panelAmbiguous);
-            return { ok: false, status: blocked ? 'BLOCKED' : 'FAILED', code: blocked ? 'POPUP_OWNERSHIP_UNCONFIRMED' : '', value, reason: entry.fillNote || '未出现可识别的关联日历' };
+        }
+        // 统一的无 AI 快路径：输入框可编辑 + 精度已确认 + 目标有来源 → 程序直接输入并读回，0 次模型调用。
+        // 真实站点数据（28 次调用 328 秒）里大量成功 trace 就是模型选 type——这一步本可程序化。
+        const precState = entry.precisionState;
+        if (precState && targetParts(entry.targetValue)) {
+          const direct = await tryDirectType(entry, { precision: precState.precision });
+          if (direct.ok) {
+            const closed = await closePanel(entry);
+            if (!closed) return { ok: false, status: 'BLOCKED', code: 'POPUP_CLOSE_UNCONFIRMED', value, reason: '日历未关闭，已暂停后续填写' };
+            const final = finalize(entry, { target: entry.targetValue, precision: precState.precision, peerBefore: entry.peerBefore });
+            if (final.ok) { trace(entry, '核对', '直接输入提交并读回通过（无模型调用）'); return { ...final, status: 'SUCCESS', code: 'VALUE_VERIFIED', via: 'direct-type' }; }
+          } else if (precState.targetValue !== undefined) {
+            trace(entry, '直接输入未提交', '转交结构分类或 AI 交互');
           }
         }
         // AI 逐步接管：模型每次从最新观察的候选里选一个 id。
         // 弹层尚未归属时 observe 只给「尝试打开」类候选（点击输入框/日历图标/等待），
         // 归属唯一确认之前不会出现任何面板内部动作。
         if (!entry.decide) {
+          const blocked = !panelNode && Boolean(entry.popupBlocked || entry.panelAmbiguous);
           const closed = await closePanel(entry);
           if (!closed) return { ok: false, status: 'BLOCKED', code: 'POPUP_CLOSE_UNCONFIRMED', value, reason: '日历未关闭，已暂停后续填写' };
-          return { ok: false, status: 'FAILED', code: '', value, reason: '通用结构未能规则驱动，且 AI 交互不可用' };
+          if (blocked) return { ok: false, status: 'BLOCKED', code: 'POPUP_OWNERSHIP_UNCONFIRMED', value, reason: entry.fillNote || '无法唯一确认关联日历' };
+          return { ok: false, status: 'FAILED', code: '', value, reason: !panelNode ? (entry.fillNote || '未出现可识别的关联日历') : (entry.fillNote || '通用结构未能规则驱动，且 AI 交互不可用') };
         }
+        await presetYearRange(entry);
         const { completed, endReason } = await runLoop(entry, { start });
         const closed = await closePanel(entry);
         if (!closed) return { ok: false, status: 'BLOCKED', code: 'POPUP_CLOSE_UNCONFIRMED', value, reason: '日历未关闭，已暂停后续填写' };
@@ -673,7 +786,7 @@
       } catch (error) {
         await closePanel(entry).catch(() => {});
         const blocked = Boolean(entry.popupBlocked);
-        return { ok: false, status: blocked ? 'BLOCKED' : 'FAILED', code: entry.failureCode || 'AGENT_EXECUTION_ERROR', value, reason: error.message, observation: popup.snapshot(entry) };
+        return { ok: false, status: blocked ? 'BLOCKED' : 'FAILED', code: entry.failureCode || error.code || 'AGENT_EXECUTION_ERROR', value, reason: error.message, observation: popup.snapshot(entry) };
       }
     }
 
