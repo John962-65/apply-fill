@@ -230,17 +230,17 @@
             <button class="resume-pro__manager-button" type="button" id="resume-pro-fill-record-skip">不留档</button>
           </div>
         </div>
-        <details class="resume-pro__diagnostics" id="resume-pro-diagnostics" hidden>
+        <details class="resume-pro__diagnostics" id="resume-pro-diagnostics">
           <summary>填写诊断（不含简历内容）</summary>
-          <textarea id="resume-pro-diagnostics-text" readonly aria-label="填写诊断摘要，可选择复制" rows="14"></textarea>
+          <textarea id="resume-pro-diagnostics-text" readonly aria-label="填写诊断摘要，可选择复制" rows="14" placeholder="点击「一键 AI 填写」并等它结束后，这里出现耗时拆分、字段分解和失败证据。"></textarea>
         </details>
-        <details class="resume-pro__diagnostics" id="resume-pro-trace" hidden>
+        <details class="resume-pro__diagnostics" id="resume-pro-trace">
           <summary>字段对照表（含网页字段名和简历内容，仅本机）</summary>
-          <textarea id="resume-pro-trace-text" readonly aria-label="逐个网页字段的来源与写入结果，可选择复制" rows="14"></textarea>
+          <textarea id="resume-pro-trace-text" readonly aria-label="逐个网页字段的来源与写入结果，可选择复制" rows="14" placeholder="填写结束后，这里逐行列出每个网页字段填了什么、来自简历哪里、没填上的原因与页面选项。"></textarea>
         </details>
-        <details class="resume-pro__diagnostics" id="resume-pro-structures" hidden>
+        <details class="resume-pro__diagnostics" id="resume-pro-structures">
           <summary>平台结构快照（只有表单结构，不含填写内容，可复制）</summary>
-          <textarea id="resume-pro-structures-text" readonly aria-label="已积累的平台表单结构，可选择复制" rows="14"></textarea>
+          <textarea id="resume-pro-structures-text" readonly aria-label="已积累的平台表单结构，可选择复制" rows="14" placeholder="填写结束后，这里积累可复用的平台表单结构，可整段复制。"></textarea>
         </details>
         <details class="resume-pro__diagnostics" id="resume-pro-control-capture">
           <summary>采集控件结构（排查日期、下拉问题）</summary>
@@ -349,6 +349,18 @@
       await StorageService.setActiveTemplate(event.target.value);
       showStatus("模板已切换。", "success");
     });
+
+    // 实验开关持久化：页面刷新后保持勾选，验收测试不会因为忘了重勾而走错路径。
+    for (const [id, key] of [["resume-pro-browser-input", "applyFillExperimentBrowserInput"], ["resume-pro-generic-date", "applyFillExperimentGenericDate"]]) {
+      const box = sidebar.querySelector("#" + id);
+      if (!box) continue;
+      chrome.storage.local.get([key]).then((result) => {
+        if (typeof result?.[key] === "boolean") box.checked = result[key];
+      }).catch(() => {});
+      box.addEventListener("change", () => {
+        chrome.storage.local.set({ [key]: box.checked }).catch(() => {});
+      });
+    }
 
     aiFillButton.addEventListener("click", handleAiFillClick);
     sidebar.querySelector("#resume-pro-repeat-fill").addEventListener("click", handleRepeatFillClick);
@@ -1778,14 +1790,14 @@
       const traceArea = shadowRoot?.querySelector("#resume-pro-trace-text");
       if (tracePanel && traceArea) {
         traceArea.value = traceText;
-        tracePanel.hidden = !traceText;
+        tracePanel.hidden = false;
         tracePanel.open = false;
       }
       const structurePanel = shadowRoot?.querySelector("#resume-pro-structures");
       const structureArea = shadowRoot?.querySelector("#resume-pro-structures-text");
       if (structurePanel && structureArea) {
         structureArea.value = structureText;
-        structurePanel.hidden = !structureText;
+        structurePanel.hidden = false;
         structurePanel.open = false;
       }
       button.disabled = false;
