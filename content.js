@@ -1347,6 +1347,9 @@
     let stage = "scan";
     let timer = null;
     let diagnostics = {};
+    let fields = [];
+    let fieldMap = new Map();
+    let allMatches = [];
     let fieldCount = 0;
     let filledCount = 0;
     let unconfirmedCount = 0;
@@ -1374,11 +1377,11 @@
 
     try {
       const scanned = scanFillableFields();
-      const fieldMap = scanned.fieldMap;
+      fieldMap = scanned.fieldMap;
       unlabeledCombos = scanned.unlabeledCombos || 0;
       droppedControls = scanned.dropped || [];
       droppedTotal = scanned.droppedTotal || 0;
-      const fields = assisted ? scanned.fields.filter(field => {
+      fields = assisted ? scanned.fields.filter(field => {
         const entry = fieldMap.get(field.fieldId);
         return entry?.kind === "element" && isAssistedTextField(entry) && assisted.scopes.some(scope => scope.contains(entry.element)) && !hasExistingValue(entry);
       }) : scanned.fields;
@@ -1498,7 +1501,7 @@
 
       const fieldMetaMap = new Map(fields.map((f) => [f.fieldId, f]));
       const domOrderMap = new Map(fields.map((field, index) => [field.fieldId, index]));
-      const allMatches = [...mapped.matches, ...(response.matches || [])];
+      allMatches = [...mapped.matches, ...(response.matches || [])];
       const sortedMatches = allMatches.sort((a, b) => {
         const ma = fieldMetaMap.get(a.fieldId);
         const mb = fieldMetaMap.get(b.fieldId);
@@ -1512,6 +1515,7 @@
       delete button.dataset.interactionStopped;
       for (const match of sortedMatches) {
         if(button.dataset.interactionStopped==='true')break;
+      try {
         if (assisted && getActiveTemplate(state.currentStore) !== activeTemplate) throw new Error("模板已变化，已停止辅助填写，请核对网页。");
         let element = refreshFieldEntry(fieldMetaMap.get(match.fieldId), fieldMap.get(match.fieldId));
 
@@ -1611,11 +1615,20 @@
         if (filled && fieldMeta?.cascadeGroup !== undefined) {
           const groupFields = fields.filter((f) => f.cascadeGroup === fieldMeta.cascadeGroup);
           const maxLevelInGroup = Math.max(...groupFields.map((f) => f.cascadeLevel));
-          
+
           if (fieldMeta.cascadeLevel < maxLevelInGroup) {
             await new Promise((resolve) => setTimeout(resolve, 250));
           }
         }
+      } catch (loopError) {
+        // 单字段处理异常只记失败并继续：剩余字段、对照表和结构快照不能陪葬。
+        const failMeta = fieldMetaMap.get(match.fieldId);
+        const failEntry = fieldMap.get(match.fieldId);
+        if (failEntry) failEntry.fillNote = loopError.message || '字段处理异常';
+        traceOutcomes.set(match.fieldId, { ok: false });
+        unfilledLabels.push(failMeta?.label || failMeta?.placeholder || failMeta?.name || '未命名字段');
+        diagnostics.loopErrorAt = `第 ${filledCount + unfilledLabels.length} 个字段（${failMeta?.label || '未知标签'}）：${loopError.message || '未知异常'}`;
+      }
       }
 
       const verified = await verifyWrittenValues(writtenEntries, traceOutcomes,{focus:!notAttemptedLabels.length&&!locallySkippedLabels.length});
@@ -1697,6 +1710,10 @@
       }
     } catch (error) {
       if (!diagnostics.errorCode || diagnostics.errorCode === 'none') diagnostics.errorCode = safeInputErrorCode(error.code) || 'unknown';
+      // 失败的运行也必须有对照表：字段、已记结果和已发匹配都在作用域外可见。
+      try {
+        if (fieldMap.size) traceText = formatFieldTrace({ fields, fieldMap, matches: allMatches, outcomes: traceOutcomes, unlabeledCombos, notices: dateNotices, dropped: droppedControls, droppedTotal });
+      } catch (_) {}
       showStatus(error.message || "AI 填写失败。", "error");
     } finally {
       comboAgent.suspend();
@@ -2212,6 +2229,7 @@
       `ApplyFill v${pluginVersion()}`,
       `结果：${({ success: "完成", partial: "部分完成", failed: "失败" })[result.outcome] || "未知"}；错误类别：${code}`,
       `中断阶段：${result.outcome === 'failed' ? stage : '无'}`,
+      ...(d.loopErrorAt?[`中断位置：${d.loopErrorAt}`]:[]),
       `网页字段：${count(result.fieldCount)}；成功填写：${count(result.filledCount)}；没填上：${count(result.unfilledCount)}`,
       ...(result.notAttemptedCount?[`尚未尝试：${count(result.notAttemptedCount)}（前一控件弹层未关闭）`]:[]),
       ...(result.locallySkippedCount?[`局部跳过：${count(result.locallySkippedCount)}（其他可安全操作的字段继续）`]:[]),
