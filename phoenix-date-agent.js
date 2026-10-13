@@ -1,7 +1,7 @@
 /* Phoenix RC Calendar DOM contract. Operate only the popup bound by the combo controller. */
 (function(root){
   const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
-  function create({visible,panel,read,click,close,trace,until,readPeer}){
+  function create({visible,panel,read,click,close,trace,until,isClosed,readPeer}){
     const recognizes=p=>Boolean(p&&(p.matches('.phoenix-calendar')||p.querySelector('.phoenix-calendar')));
     const one=(p,selector)=>{const nodes=Array.from(p?.querySelectorAll(selector)||[]).filter(visible);return nodes.length===1?nodes[0]:null;};
     const enabled=n=>!n.matches('[disabled],[aria-disabled="true"],[class*="disabled"]')&&!n.querySelector('[aria-disabled="true"]');
@@ -60,7 +60,11 @@
             if(peerChanged())return {kind:'peer-changed'};
             if(same())return {kind:'committed'};
             const current=panel(entry);
-            if(!recognizes(current))return {kind:'closed'};
+            // Popup ownership can disappear for a frame while Phoenix replaces
+            // its portal. Treat that as closed only after the controller's
+            // stable-absence check agrees; otherwise keep observing for the
+            // replacement panel instead of mistaking a rerender for a commit.
+            if(!recognizes(current))return isClosed?.(entry)?{kind:'closed'}:null;
             const confirm=confirmation(current);
             if(confirm)return {kind:'confirm',node:confirm};
             if(view(current)!==initialView)return {kind:'view-changed',view:view(current)};
@@ -77,7 +81,11 @@
             trace(entry,'观察状态',transition.kind==='closed'?'弹层已关闭，等待值提交':'日期面板切换，等待值提交');
             committed=Boolean(await until(same,2500));
           }
-          if(!committed)return fail('点击月份/日期后页面未确认保留目标值','OPTION_COMMIT_UNCONFIRMED');
+          if(!committed){
+            const current=panel(entry),observedPanel=recognizes(current)?view(current):'unobserved';
+            trace(entry,'提交诊断',`读回匹配=${same()?'是':'否'}；面板=${observedPanel}；稳定关闭=${isClosed?.(entry)?'是':'否'}`);
+            return fail('点击月份/日期后页面未确认保留目标值','OPTION_COMMIT_UNCONFIRMED');
+          }
           const wasClosed=await close(entry);
           if(!wasClosed){
             entry.fillNote='目标值已读回，但日历未能安全关闭';

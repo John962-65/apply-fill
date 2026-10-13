@@ -120,7 +120,7 @@
       return null;
     }
     async function close(entry){
-      const cleared=()=>{entry.opened=false;entry.beforePanels=null;entry.ownedPanel=null;entry.popupBlocked=false;entry.recoveryFailureCode='';popup.finish(entry);if(activeEntry===entry)activeEntry=null;return true;};
+      const cleared=()=>{entry.opened=false;entry.beforePanels=null;entry.ownedPanel=null;entry.phoenixDateInteraction=false;entry.popupBlocked=false;entry.recoveryFailureCode='';popup.finish(entry);if(activeEntry===entry)activeEntry=null;return true;};
       if(!live(entry)){
         if(entry.ownedPanel?.isConnected&&visible(entry.ownedPanel)){activeEntry=entry;entry.popupBlocked=true;popup.transition(entry,states.BLOCKED,'POPUP_OWNERSHIP_UNCONFIRMED');return false;}
         return cleared();
@@ -135,7 +135,10 @@
       if(!owned&&!entry.panelAmbiguous&&popup.closed(entry))return cleared();
       activeEntry=entry;
       popup.transition(entry,states.RECOVERING);
-      const phoenixPopup=phoenixCalendar(owned);
+      // Keep the Phoenix-specific recovery policy when its portal temporarily
+      // disappears during a rerender. In particular, never fall back to a
+      // trigger toggle that may now sit underneath a still-visible calendar.
+      const phoenixPopup=phoenixCalendar(owned)||phoenixCalendar(entry.ownedPanel)||Boolean(entry.phoenixDateInteraction);
       const blockClose=detail=>{
         entry.popupBlocked=true;entry.recoveryFailureCode='POPUP_CLOSE_UNCONFIRMED';
         trace(entry,'关闭未完成',detail||'关联面板仍可见');
@@ -392,6 +395,7 @@
         try{
           await open(entry);
           if(dateAgent?.recognizes(panel(entry))){
+            entry.phoenixDateInteraction=true;
             const ok=await dateAgent.fill(entry,value);
             const closed=entry.popupBlocked&&entry.recoveryFailureCode?false:await close(entry);
             if(!closed)entry.fillNote=[entry.fillNote,'日历仍未关闭，已暂停后续填写'].filter(Boolean).join('；');
@@ -457,7 +461,8 @@
       const ok=await fillControl(entry,value);
       return result(entry,ok,entry.interactionResult?.code||'');
     }
-    const dateAgent=root.ResumeProPhoenixDateAgent?.create({visible,panel,read,click,close,trace,until,readPeer:entry=>entry.rangePeer?config.readPeer?.(entry.rangePeer):undefined});
+    const dateAgent=root.ResumeProPhoenixDateAgent?.create({visible,panel,read,click,close,trace,until,
+      isClosed:entry=>popup.closed(entry),readPeer:entry=>entry.rangePeer?config.readPeer?.(entry.rangePeer):undefined});
     return {read,panel,options,observe,open,close,fill,ready,prepare,pending,observation:popup.snapshot,blocking:()=>activeEntry,suspend:()=>{if(activeEntry)popup.pause(activeEntry);}};
   }
   root.ResumeProComboAgent={create};
