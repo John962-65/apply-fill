@@ -8,6 +8,8 @@
 
 浏览器层操作失败时直接报告，不静默切回脚本点击。每次动作单独连接/释放调试通道，已有调试连接冲突会失败且不会主动断开别人的连接。当前只支持顶层网页，嵌套 frame 不执行，目标被遮挡、失去焦点或已替换时停止。
 
+页面身份按 `sender.documentId` 与 `webNavigation.getFrame()` 返回的顶层活动文档核对，并检查来源一致及是否有待提交导航。同一文档内由 SPA 改变路径、查询参数或 hash 不会单独阻止操作；文档被替换、离开活动态或导航尚未提交时拒绝输入。每个鼠标按下、键盘按下或文本输入前都会重查。填写过程中遇到文档身份变化会停止整轮，当前字段标为 `FAILED_PRECHECK` 或 `BLOCKED`，剩余匹配字段标为未尝试；之前写入但尚未统一复核的字段单独列出，不学习平台映射。
+
 ## Nanobrowser 调研与原型取舍
 
 参考仓库：https://github.com/nanobrowser/nanobrowser
@@ -24,6 +26,7 @@ Chrome 官方文档明确 debugger 不能声明为 optional_permissions，所以
 
 - 真实 Chromium + CDP 对照：只接受 isTrusted 事件的模拟控件拒绝脚本 click，接受 CDP click 和中文输入；连续填写能替换旧内容；遮挡目标与非法目标拒绝。
 - 单元测试覆盖调试连接成功/失败后的释放和子框架拒绝。
+- `tests/browser-input.test.js` 覆盖同文档 SPA 路由、hash、真实同源文档替换、待提交导航，以及操作中途换文档后的停止；`npm run test:run-context-stop` 覆盖整轮填写只请求一次浏览器输入并将后续字段标为未尝试。
 - 原有表单与 16 个下拉浏览器场景回归通过。
 - CDP 输入测试使用 Playwright 提供的调试连接；chrome.debugger 的消息与生命周期使用模拟 API 测试。尚未在桌面 Chrome 装载扩展后做端到端测试，也没有荣耀/京东/vivo 登录后实测。
 - 本次没有进行完整 Nanobrowser 对照，也没有证明它能修复所有控件。需要在同样的空字段、同样的简历上对比开关前后的最终值。

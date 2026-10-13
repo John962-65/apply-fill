@@ -7,7 +7,7 @@ const messages = Object.freeze({
  input_observation: '无法核对浏览器操作目标，未点击', input_focus: '输入焦点不匹配，未输入',
  input_context: '仅支持当前顶层网页', input_busy: '该页面已有操作进行中',
  input_foreground: '请保持目标招聘页面在前台', input_attach: '无法连接浏览器输入通道，请关闭该页面的开发者工具后重试',
- input_page_changed: '招聘页面地址已变化，请重新扫描后填写',
+ input_page_changed: '招聘页面文档已变化，请重新扫描后填写',
  input_transport: '浏览器输入通道已中断，请稍后重试'
 });
 function inputError(code) {
@@ -129,7 +129,23 @@ export async function performInput(send, action) {
 }
 export function installBrowserInput(chrome) {
  const busy = new Set();
- const failure = code => ({ok: false, errorCode: code, error: messages[code]});
+ const failure = (code, phase) => ({ok: false, errorCode: code, error: messages[code], phase});
+ const pageOrigin = value => {
+  try { return new URL(value).origin; } catch { return ''; }
+ };
+ async function validateDocument(sender, tabId) {
+  let tab, frame;
+  try {
+   [tab, frame] = await Promise.all([
+    chrome.tabs.get(tabId),
+    chrome.webNavigation.getFrame({tabId, frameId: 0})
+   ]);
+  } catch { throw inputError('input_page_changed'); }
+  const senderOrigin = pageOrigin(sender.url);
+  if (!sender.documentId || !frame || frame.documentId !== sender.documentId
+    || frame.documentLifecycle !== 'active' || !senderOrigin || pageOrigin(frame.url) !== senderOrigin
+    || tab?.pendingUrl) throw inputError('input_page_changed');
+ }
  chrome.runtime.onMessage.addListener((message, sender, reply) => {
   if (message?.type !== 'BROWSER_INPUT') return false;
   const tabId = sender.tab?.id;
@@ -137,26 +153,25 @@ export function installBrowserInput(chrome) {
   if (busy.has(tabId)) { reply(failure('input_busy')); return false; }
   busy.add(tabId);
   (async () => {
-   let attached = false; const target = {tabId};
+   let attached = false, actionAttempted = false; const target = {tabId};
    try {
-    const tab = await chrome.tabs.get(tabId);
-    const pageURL = sender.url.split('#')[0];
-    if (tab.url?.split('#')[0] !== pageURL || tab.pendingUrl && tab.pendingUrl.split('#')[0] !== pageURL) throw inputError('input_page_changed');
+    await validateDocument(sender, tabId);
     try { await chrome.debugger.attach(target, '1.3'); } catch { throw inputError('input_attach'); }
     attached = true;
-    // CDP addresses the sender's tab, including an inactive one. Never route
-    // input to the active tab, or confuse a hash change with a lost foreground.
+    // The URL may change during same-document SPA routing. Bind every input event
+    // to the sender's active document identity and origin instead of its old URL.
     const send = async (method, params) => {
      if (method.startsWith('Input.')) {
-      const current = await chrome.debugger.sendCommand(target, 'Runtime.evaluate', {
-       expression: `location.href.split('#')[0]===${JSON.stringify(pageURL)}`, returnByValue: true
-      });
-      if (current.exceptionDetails || current.result?.value !== true) throw inputError('input_page_changed');
+      await validateDocument(sender, tabId);
      }
-     return chrome.debugger.sendCommand(target, method, params);
+     if (method === 'Input.insertText'
+       || method === 'Input.dispatchKeyEvent' && params?.type === 'keyDown'
+       || method === 'Input.dispatchMouseEvent' && params?.type === 'mousePressed') actionAttempted = true;
+     const result = await chrome.debugger.sendCommand(target, method, params);
+     return result;
     };
     return await performInput(send, message.action || {});
-   } catch (error) { return failure(Object.hasOwn(messages, error.code) ? error.code : 'input_transport'); }
+   } catch (error) { return failure(Object.hasOwn(messages, error.code) ? error.code : 'input_transport', actionAttempted ? 'during-input' : 'before-input'); }
    finally { if (attached) await chrome.debugger.detach(target).catch(() => {}); busy.delete(tabId); }
   })().then(reply); return true;
  });

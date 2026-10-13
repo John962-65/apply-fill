@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<title>浏览器输入运行上下文中断回归</title>
+<style>
+  body{font:16px sans-serif;margin:32px}
+  .form-item{margin:18px 0}
+  label{display:block;margin-bottom:6px}
+  .autocomplete{position:relative;width:240px}
+  input{box-sizing:border-box;width:240px;height:36px}
+  [role="listbox"]{position:absolute;top:36px;left:0;background:white;border:1px solid #888;width:238px}
+  [role="option"]{padding:8px}
+</style>
+<main>
+  <h2>教育背景</h2>
+  <div class="form-item">
+    <label for="school">学校名称</label>
+    <div class="autocomplete">
+      <input id="school" type="text" role="combobox" aria-autocomplete="list" aria-expanded="false">
+      <div role="listbox" hidden><div role="option">示例大学</div></div>
+    </div>
+  </div>
+  <div class="form-item">
+    <label for="degree">学历</label>
+    <div class="autocomplete">
+      <input id="degree" type="text" role="combobox" aria-autocomplete="list" aria-expanded="false">
+      <div role="listbox" hidden><div role="option">硕士</div></div>
+    </div>
+  </div>
+</main>

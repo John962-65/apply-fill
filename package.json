@@ -9,6 +9,7 @@
     "test:combos": "node tests/combo-browser.cjs",
     "test:autocomplete": "node tests/autocomplete-browser.cjs",
     "test:input": "node tests/browser-input.cjs",
+    "test:run-context-stop": "node tests/run-context-stop.cjs",
     "test:capture": "node tests/control-capture.cjs",
     "test:autoclick": "node tests/auto-click-capture.cjs",
     "test:atsx-dates": "node tests/atsx-date-browser.cjs",

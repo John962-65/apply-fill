@@ -9,11 +9,11 @@
   const outer=nodes=>[...new Set(nodes)].filter(n=>!nodes.some(p=>p!==n&&p.contains(n)));
   const CODES=new Set(['VALUE_VERIFIED','VALUE_UNCONFIRMED','OPTION_COMMIT_UNCONFIRMED','POPUP_OWNERSHIP_UNCONFIRMED','POPUP_CLOSE_UNCONFIRMED','POPUP_RECOVERED',
     'PAGE_MODAL_BLOCKED','OTHER_POPUP_UNCONFIRMED','POPUP_TARGET_RELATED','POPUP_COMPLEX_DEFERRED','TARGET_DISABLED','TARGET_REPLACED','TARGET_MOVING','TARGET_COVERED','PAGE_FOCUS_LOCKED','LOCAL_POPUP_ISOLATED',
-    'PRECISION_UNRESOLVED','HANDOFF_UNSAFE','PEER_CHANGED','STALL_DETECTED','BUDGET_EXCEEDED','AI_STOPPED','AGENT_EXECUTION_ERROR','INVALID_ACTION_ID','GENERIC_AGENT_UNAVAILABLE']);
+    'PRECISION_UNRESOLVED','HANDOFF_UNSAFE','PEER_CHANGED','STALL_DETECTED','BUDGET_EXCEEDED','AI_STOPPED','AGENT_EXECUTION_ERROR','INVALID_ACTION_ID','GENERIC_AGENT_UNAVAILABLE','RUN_CONTEXT_CHANGED']);
   function safeCode(code){return typeof code==='string'&&(CODES.has(code)||/^input_(?:invalid|too_long|target_(?:missing|ambiguous|disabled|moving|hidden|covered)|observation|focus|context|busy|foreground|page_changed|attach|transport)$/.test(code))?code:'';}
   function sanitizeFailures(list){
     return (Array.isArray(list)?list:[]).slice(0,40).flatMap((item,index)=>{
-      if(!['SUCCESS','SKIPPED','RECOVERED','BLOCKED'].includes(item?.status)||!safeCode(item.code))return [];
+      if(!['SUCCESS','SKIPPED','RECOVERED','BLOCKED','FAILED_PRECHECK'].includes(item?.status)||!safeCode(item.code))return [];
       const out={fieldId:typeof item.fieldId==='string'&&/^field-\d+(?:-\d+)*$/.test(item.fieldId)?item.fieldId:'f'+(index+1),status:item.status,code:safeCode(item.code)};
       const obs=item.observation;
       if(obs&&Object.values(STATES).includes(obs.state)){

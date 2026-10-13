@@ -47,6 +47,7 @@
   const chipSelectionIdsByTarget = new WeakMap();
   const chipWriteTargets = new WeakSet();
   let shadowRoot = null;
+  let activeFillRun = null;
   const state = {
     dragOffsetX: 0,
     dragOffsetY: 0,
@@ -1350,6 +1351,8 @@
     }
 
     button.disabled = true;
+    const fillRun = { button, contextChanged: null };
+    activeFillRun = fillRun;
     state.lastInteractionFailures=[];
     state.interactionSteps=0;
     state.interactionMs=0;
@@ -1373,10 +1376,12 @@
     let allMatches = [];
     let fieldCount = 0;
     let filledCount = 0;
+    let unverifiedCount = 0;
     let unconfirmedCount = 0;
     const unfilledLabels = [];
     const notAttemptedLabels = [];
     const locallySkippedLabels = [];
+    const unverifiedLabels = [];
     const traceOutcomes = new Map();
     const writtenEntries = new Map();
     let traceText = "";
@@ -1536,9 +1541,44 @@
         return (domOrderMap.get(a.fieldId) ?? 0) - (domOrderMap.get(b.fieldId) ?? 0);
       });
 
+      const contextStopNote='招聘页面文档已变化，本轮已停止，请重新扫描后填写';
+      const interruptedFieldIds=new Set();
+      const markStoppedMatches=(startIndex,currentIndex=startIndex)=>{
+        const phase=fillRun.contextChanged?.phase||'before-input';
+        for(let index=startIndex;index<sortedMatches.length;index++){
+          const pending=sortedMatches[index],pendingMeta=fieldMetaMap.get(pending.fieldId);
+          if(finalStates.has(pending.fieldId))continue;
+          const pendingEntry=fieldMap.get(pending.fieldId),isCurrent=index===currentIndex;
+          const status=isCurrent&&phase==='during-input'?'BLOCKED':'FAILED_PRECHECK';
+          if(pendingEntry){
+            pendingEntry.fillNote=isCurrent&&phase==='during-input'
+              ?'页面文档在浏览器操作过程中变化，本字段结果未确认，本轮已停止'
+              :contextStopNote;
+            pendingEntry.interactionResult={status,code:'RUN_CONTEXT_CHANGED'};
+          }
+          if(isCurrent&&phase==='during-input'){
+            finalStates.set(pending.fieldId,'UNVERIFIED');
+            interruptedFieldIds.add(pending.fieldId);
+            traceOutcomes.set(pending.fieldId,{ok:false,unverified:true,failureCode:'RUN_CONTEXT_CHANGED',failureStatus:status});
+            unverifiedLabels.push(reviewFieldName(pendingMeta));
+          }else{
+            markState(pending.fieldId,'NOT_ATTEMPTED');
+            traceOutcomes.set(pending.fieldId,{ok:false,notAttempted:true,failureCode:'RUN_CONTEXT_CHANGED',failureStatus:status});
+            notAttemptedLabels.push(reviewFieldName(pendingMeta));
+          }
+        }
+        button.dataset.interactionStopped='true';
+        diagnostics.errorCode='RUN_CONTEXT_CHANGED';
+        diagnostics.runStopPhase=phase;
+      };
+
       delete button.dataset.interactionStopped;
-      for (const match of sortedMatches) {
-        if(button.dataset.interactionStopped==='true')break;
+      for (let matchIndex=0;matchIndex<sortedMatches.length;matchIndex++) {
+        const match=sortedMatches[matchIndex];
+        if(button.dataset.interactionStopped==='true'){
+          if(fillRun.contextChanged)markStoppedMatches(matchIndex);
+          break;
+        }
       const timingMeta = fieldMetaMap.get(match.fieldId);
       const timingLabel = [timingMeta?.group, timingMeta?.recordIndex ? `第 ${timingMeta.recordIndex} 条` : '', timingMeta?.label || timingMeta?.placeholder || '未命名字段'].filter(Boolean).join(' · ');
       const fieldTiming = { fieldId: match.fieldId, label: timingLabel, t0: performance.now(), ms0: state.interactionMs || 0, s0: state.interactionSteps || 0, steps: 0, ms: 0, aiMs: 0 };
@@ -1575,6 +1615,7 @@
           element.fillNote='未能明确日期区间的开始和结束，已停止';markState(match.fieldId,'NOT_ATTEMPTED');traceOutcomes.set(match.fieldId,{ok:false});unfilledLabels.push(reviewFieldName(meta));continue;
         }
         const readiness=await comboAgent.prepare(element);
+        if(fillRun.contextChanged){markStoppedMatches(matchIndex);break;}
         if(readiness.status==='SKIPPED'){
           const blockerName=readiness.blocker?.meta?reviewFieldName(readiness.blocker.meta):'前一控件';
           element.fillNote=`${blockerName}的弹层仍未收起，本字段局部跳过`;
@@ -1598,6 +1639,7 @@
         if (filled instanceof Promise) {
           filled = await filled;
         }
+        if(fillRun.contextChanged){markStoppedMatches(matchIndex);break;}
         // 日期写入会带出「简历只到月、按 1 号补的」这类说明，这里拆开。
         const writeResult = filled && typeof filled === "object" ? filled : { ok: Boolean(filled), padded: Boolean(element.datePadded) };
         filled = writeResult.ok;
@@ -1613,6 +1655,7 @@
         if (!filled && element.kind === "element" && element.element instanceof HTMLSelectElement
           && (fieldMeta?.cascadeGroup !== undefined || !hasRealSelectOptions(element.element))) {
           for (let retry = 0; retry < 12; retry++) {
+            if(fillRun.contextChanged)break;
             await new Promise((resolve) => setTimeout(resolve, 150));
             element = refreshFieldEntry(fieldMeta, element);
             if (!element || hasExistingValue(element)) break;
@@ -1620,6 +1663,7 @@
             if (filled || (fieldMeta?.cascadeGroup === undefined && hasRealSelectOptions(element.element))) break;
           }
         }
+        if(fillRun.contextChanged){markStoppedMatches(matchIndex);break;}
 
         if (filled) {
           if (writeResult.padded) {
@@ -1655,6 +1699,7 @@
           }
         }
       } catch (loopError) {
+        if(fillRun.contextChanged){markStoppedMatches(matchIndex);break;}
         // 单字段处理异常只记失败并继续：剩余字段、对照表和结构快照不能陪葬。
         const failMeta = fieldMetaMap.get(match.fieldId);
         const failEntry = fieldMap.get(match.fieldId);
@@ -1670,7 +1715,30 @@
       }
       }
 
-      const verified = await verifyWrittenValues(writtenEntries, traceOutcomes,{focus:!notAttemptedLabels.length&&!locallySkippedLabels.length});
+      if(fillRun.contextChanged){
+        const unverifiedFieldIds=new Set([...writtenEntries.keys(),...interruptedFieldIds]);
+        for(const [fieldId,record] of writtenEntries){
+          finalStates.set(fieldId,'UNVERIFIED');
+          traceOutcomes.set(fieldId,{ok:false,unverified:true,failureCode:'RUN_CONTEXT_CHANGED',failureStatus:'BLOCKED'});
+          unverifiedLabels.push(reviewFieldName(record.meta));
+          if(record.entry){
+            record.entry.fillNote='页面文档已变化，本轮未完成最终复核，请人工核对';
+            record.entry.interactionResult={status:'BLOCKED',code:'RUN_CONTEXT_CHANGED'};
+          }
+        }
+        for(const fieldId of interruptedFieldIds){
+          const entry=fieldMap.get(fieldId);
+          if(entry){
+            entry.fillNote='页面文档在浏览器操作过程中变化，本字段操作结果未确认，请人工核对';
+            entry.interactionResult={status:'BLOCKED',code:'RUN_CONTEXT_CHANGED'};
+          }
+        }
+        unverifiedCount=unverifiedFieldIds.size;
+        filledCount=0;
+        writtenEntries.clear();
+      }
+      const verified = fillRun.contextChanged ? {drift:0,swapped:0,manual:[]}
+        : await verifyWrittenValues(writtenEntries, traceOutcomes,{focus:!notAttemptedLabels.length&&!locallySkippedLabels.length});
       writtenEntries.forEach((record, id) => fieldMap.set(id, record.entry));
       driftCount = verified.drift;
       filledCount = Math.max(0, filledCount - driftCount);
@@ -1678,29 +1746,32 @@
       const manualNote = verified.manual.length
         ? `需核对：${summarizeLabels(verified.manual, 6)}。可展开“字段对照表”查看预期值与读回结果。`
         : "";
-      const mappingOutcome = await applyMappingOutcomes(writtenEntries, traceOutcomes, platformSnapshot);
+      const mappingOutcome = fillRun.contextChanged ? {filled:0,dropped:[]} : await applyMappingOutcomes(writtenEntries, traceOutcomes, platformSnapshot);
       mappingFilledCount = mappingOutcome.filled;
       // 写不进去的控件也要把类名线索带出来：用户不会去 F12 里抓 DOM，
       // 这些线索是下次能补上驱动的唯一依据。
-      const controlHints = collectControlHints({ fields, fieldMap, outcomes: traceOutcomes, dropped: droppedControls });
+      const controlHints = fillRun.contextChanged ? {list:[],total:0}
+        : collectControlHints({ fields, fieldMap, outcomes: traceOutcomes, dropped: droppedControls });
       // Only enum codes and structural booleans/counts: never copy values,
       // option text, page IDs, URLs or provider errors into failure evidence.
       diagnostics.interactionFailures=self.ResumeProPopupController.sanitizeFailures(fields.flatMap(field=>{
         const entry=fieldMap.get(field.fieldId),result=entry?.interactionResult,out=traceOutcomes.get(field.fieldId);
         if(out?.ok||out?.kept||!result&&!out?.failureCode)return [];
-        return [{fieldId:field.fieldId,status:out?.failureCode?(out.isolated?'SKIPPED':'BLOCKED'):result.status,
+        return [{fieldId:field.fieldId,status:out?.failureStatus||(out?.failureCode?(out.isolated?'SKIPPED':'BLOCKED'):result.status),
           code:out?.failureCode||result.code,observation:result?.observation,recovery:result?.recovery}];
       }));
       state.lastInteractionFailures=diagnostics.interactionFailures;
       // 这一轮没填上的控件，活引用只在本轮有效：自动点击采集要用，所以每次填写整体替换。
-      state.lastCaptureTargets = buildCaptureTargets({ fields, fieldMap, outcomes: traceOutcomes });
+      state.lastCaptureTargets = fillRun.contextChanged ? [] : buildCaptureTargets({ fields, fieldMap, outcomes: traceOutcomes });
       traceText = formatFieldTrace({ fields, fieldMap, matches: allMatches, outcomes: traceOutcomes, unlabeledCombos, notices: dateNotices, dropped: controlHints.list, droppedTotal: controlHints.total });
       const slowest=fieldTimings.filter(t=>t.ms>0).sort((a,b)=>b.ms-a.ms).slice(0,8);
       if(slowest.length)traceText+=`\n\n单字段耗时最高（定位长耗时用）：\n`+slowest.map((t,i)=>`${i+1}. ${t.label}（${t.fieldId}）：${(t.ms/1000).toFixed(1)}s — AI 等待 ${(t.aiMs/1000).toFixed(1)}s · 页面操作 ${((t.ms-t.aiMs)/1000).toFixed(1)}s · ${t.steps} 步${t.via?` · ${t.via}`:''}`).join('\n');
       // 快照要带上每个字段实际的写入结果，所以放在复读校验之后。
-      structureText = await recordStructureSnapshot({ fields, fieldMap, outcomes: traceOutcomes, unlabeledCombos, dropped: controlHints.list, droppedTotal: controlHints.total });
+      structureText = fillRun.contextChanged ? ''
+        : await recordStructureSnapshot({ fields, fieldMap, outcomes: traceOutcomes, unlabeledCombos, dropped: controlHints.list, droppedTotal: controlHints.total });
       // 这次填对的位置当场记成映射：下次同一套表单照映射直接填，不用再问模型。
-      const learnedMappings = await learnMappingsFromFill({ fields, written: writtenEntries, outcomes: traceOutcomes, matches: allMatches });
+      const learnedMappings = fillRun.contextChanged ? 0
+        : await learnMappingsFromFill({ fields, written: writtenEntries, outcomes: traceOutcomes, matches: allMatches });
       learnedNote = learnedMappings
         ? `记下 ${learnedMappings} 条平台映射，下次这套表单直接照映射填。`
         : "";
@@ -1717,13 +1788,13 @@
         else if(answeredIds.has(field.fieldId))finalStates.set(field.fieldId,'NOT_ATTEMPTED');
         else finalStates.set(field.fieldId,'NO_MATCH');
       }
-      const stateCounts={FILLED:0,FAILED:0,KEPT:0,NO_MATCH:0,SOURCE_REJECTED:0,AGREEMENT_SKIPPED:0,NOT_ATTEMPTED:0,LOCALLY_SKIPPED:0};
+      const stateCounts={FILLED:0,UNVERIFIED:0,FAILED:0,KEPT:0,NO_MATCH:0,SOURCE_REJECTED:0,AGREEMENT_SKIPPED:0,NOT_ATTEMPTED:0,LOCALLY_SKIPPED:0};
       for(const st of finalStates.values())stateCounts[st]=(stateCounts[st]||0)+1;
       const noValueCount=stateCounts.NO_MATCH;
-      diagnostics.fieldBreakdown={filled:stateCounts.FILLED,unfilled:stateCounts.FAILED,kept:stateCounts.KEPT,noValue:stateCounts.NO_MATCH,rejected:stateCounts.SOURCE_REJECTED,agreement:stateCounts.AGREEMENT_SKIPPED,notAttempted:stateCounts.NOT_ATTEMPTED,locallySkipped:stateCounts.LOCALLY_SKIPPED,total:fieldCount};
+      diagnostics.fieldBreakdown={filled:stateCounts.FILLED,unverified:stateCounts.UNVERIFIED,unfilled:stateCounts.FAILED,kept:stateCounts.KEPT,noValue:stateCounts.NO_MATCH,rejected:stateCounts.SOURCE_REJECTED,agreement:stateCounts.AGREEMENT_SKIPPED,notAttempted:stateCounts.NOT_ATTEMPTED,locallySkipped:stateCounts.LOCALLY_SKIPPED,total:fieldCount};
       state.lastFieldBreakdown=diagnostics.fieldBreakdown;
       state.lastFieldTimings=fieldTimings;
-      outcome = response.warning || unconfirmedCount || unfilledLabels.length || notAttemptedLabels.length || locallySkippedLabels.length || driftCount || blockedFields.length || noValueCount ? "partial" : "success";
+      outcome = response.warning || unconfirmedCount || unverifiedCount || fillRun.contextChanged || unfilledLabels.length || notAttemptedLabels.length || locallySkippedLabels.length || driftCount || blockedFields.length || noValueCount ? "partial" : "success";
       const driftNote = driftCount
         ? `${driftCount} 项未通过页面读回校验${swappedCount ? `（其中 ${swappedCount} 项可能与其他字段串值）` : ""}，已标红可定位的控件，请核对后再提交。`
         : "";
@@ -1731,7 +1802,11 @@
       const unfilledNote = (unfilledLabels.length
         ? `${unfilledLabels.length} 项没填上：${summarizeLabels(unfilledLabels)}，请手动补上。`
         : "")+(locallySkippedLabels.length?`${locallySkippedLabels.length} 项因局部弹层跳过，收起弹层后可补填。`:"")
-        +(notAttemptedLabels.length?`${notAttemptedLabels.length} 项尚未尝试：无法确认页面操作安全，请收起弹层后重新填写。`:"");
+        +(notAttemptedLabels.length?(fillRun.contextChanged
+          ?notAttemptedLabels.length+" 项尚未尝试：招聘页面文档已变化，本轮已停止，请重新扫描后填写。"
+          :notAttemptedLabels.length+" 项尚未尝试：无法确认页面操作安全，请收起弹层后重新填写。"
+        ):"")
+        +(unverifiedCount?unverifiedCount+" 项操作结果未确认（"+summarizeLabels([...new Set(unverifiedLabels)],6)+"），请人工核对后再提交。":"");
       const mappingNote = mappingFilledCount
         ? `其中 ${mappingFilledCount} 项按这套平台的快照映射直接填，未请求 AI${aiFields.length ? `（只把剩下 ${aiFields.length} 个字段送去匹配）` : "（本次没有字段发出去）"}。`
         : "";
@@ -1754,7 +1829,7 @@
         showStatus(`已填写 ${filledCount} 个字段。`, "success");
       }
 
-      if (!assisted) {
+      if (!assisted && !fillRun.contextChanged) {
         const matchedIds = new Set(allMatches.map((match) => match.fieldId));
         offerUnansweredFields(fields.map((field) => ({
           label: field.label || field.placeholder || field.name,
@@ -1785,7 +1860,7 @@
       diagnostics.interactionSteps = state.interactionSteps || 0;
       diagnostics.interactionMs = state.interactionMs || 0;
       const summary = formatFillDiagnostics({ ...timing, totalMs,
-        fieldCount, filledCount, unfilledCount: unfilledLabels.length, notAttemptedCount:notAttemptedLabels.length, locallySkippedCount:locallySkippedLabels.length, outcome, stage, diagnostics });
+        fieldCount, filledCount, unfilledCount: unfilledLabels.length, unverifiedCount, notAttemptedCount:notAttemptedLabels.length, locallySkippedCount:locallySkippedLabels.length, outcome, stage, diagnostics });
       const panel = shadowRoot?.querySelector("#resume-pro-diagnostics");
       const text = shadowRoot?.querySelector("#resume-pro-diagnostics-text");
       if (panel && text) {
@@ -1811,6 +1886,7 @@
       if (repeatButton) repeatButton.disabled = false;
       if (collectButton) collectButton.disabled = false;
       button.textContent = "一键 AI 填写";
+      if(activeFillRun===fillRun)activeFillRun=null;
       // A page with nothing to fill produced nothing worth archiving.
       if (fieldCount > 0) {
         offerFillRecord({
@@ -1869,6 +1945,7 @@
     const failed = [];
     const notAttempted = [];
     const locallySkipped = [];
+    const unverified = [];
     let localCount = 0;
     let mappingCount = 0;
     let aiCount = 0;
@@ -1896,7 +1973,10 @@
 
       if (!outcome) { result = "尚未尝试"; notAttempted.push(title); }
       else if (outcome.notAttempted&&outcome.isolated) {result=`局部跳过（${oneLine(outcome.blockedBy)||'前一控件'}的弹层未关闭）`;locallySkipped.push(title);}
-      else if (outcome.notAttempted) {result=`尚未尝试（页面操作安全检查未通过：${outcome.failureCode||'POPUP_CLOSE_UNCONFIRMED'}）`;notAttempted.push(title);}
+      else if (outcome.notAttempted) {result=outcome.failureCode==='RUN_CONTEXT_CHANGED'
+        ?'尚未尝试（页面文档变化，整轮已停止）'
+        :`尚未尝试（页面操作安全检查未通过：${outcome.failureCode||'POPUP_CLOSE_UNCONFIRMED'}）`;notAttempted.push(title);}
+      else if (outcome.unverified) {result='操作结果未确认（页面文档变化，已停止复核），请人工核对';unverified.push(title);}
       else if (outcome.kept) {
         result = "页面上已有内容，按规则未改动";
         kept.push(title);
@@ -1943,6 +2023,7 @@
       const blockers=[...new Set(fields.map(f=>outcomes.get(f.fieldId)?.blockedBy).filter(Boolean))];
       notes.push(`${notAttempted.length} 个字段尚未尝试${blockers.length?`（${blockers.slice(0,2).join('、')}的弹层未关闭，收起后重试）`:'，本轮未执行到写入'}`);
     }
+    if (unverified.length) notes.push(`${unverified.length} 个字段的操作结果未确认（${unverified.slice(0,6).join('、')}），请人工核对`);
     if (unlabeledCombos && !droppedTotal) notes.push(`另有 ${unlabeledCombos} 个自定义下拉取不到标签，没送去匹配，需要手动填`);
     if (droppedTotal) {
       const hints = (dropped || []).slice(0, 6).map((item) => {
@@ -2285,15 +2366,18 @@
     const d = result.diagnostics;
     const interactionFailures=self.ResumeProPopupController.sanitizeFailures(d.interactionFailures);
     // Explicit allowlist: never copy provider messages, URL, keys or field values.
-    const code = /^(none|cancelled|network|format|http_\d{3})$/.test(d.errorCode) ? d.errorCode : safeInputErrorCode(d.errorCode) || "unknown";
+    const code = d.errorCode==='RUN_CONTEXT_CHANGED' ? d.errorCode
+      : /^(none|cancelled|network|format|http_\d{3})$/.test(d.errorCode) ? d.errorCode : safeInputErrorCode(d.errorCode) || "unknown";
     const stage = ({scan:'扫描',options:'读取控件选项',match:'AI 匹配',fill:'填写与核对'})[result.stage] || '未取得';
     return [
       `ApplyFill v${pluginVersion()}`,
       `结果：${({ success: "完成", partial: "部分完成", failed: "失败" })[result.outcome] || "未知"}；错误类别：${code}`,
       `中断阶段：${result.outcome === 'failed' ? stage : '无'}`,
       ...(d.loopErrorAt?[`中断位置：${d.loopErrorAt}`]:[]),
+      ...(d.errorCode==='RUN_CONTEXT_CHANGED'?[`停止原因：网页文档身份变化；输入阶段：${d.runStopPhase==='during-input'?'操作进行中':'操作前检查'}`]:[]),
       `网页字段：${count(result.fieldCount)}；成功填写：${count(result.filledCount)}；没填上：${count(result.unfilledCount)}`,
-      ...(result.notAttemptedCount?[`尚未尝试：${count(result.notAttemptedCount)}（前一控件弹层未关闭）`]:[]),
+      ...(result.notAttemptedCount?[`尚未尝试：${count(result.notAttemptedCount)}${d.errorCode==='RUN_CONTEXT_CHANGED'?'（页面文档变化，整轮停止）':'（页面操作安全检查未通过）'}`]:[]),
+      ...(result.unverifiedCount?[`操作结果未确认：${count(result.unverifiedCount)}（页面文档变化时已停止统一复核）`]:[]),
       ...(result.locallySkippedCount?[`局部跳过：${count(result.locallySkippedCount)}（其他可安全操作的字段继续）`]:[]),
       `AI 匹配：${count(d.aiMatches)}；规则补空：${count(d.ruleMatches)}；来源校验拦截：${count(d.rejectedSources)}`,
       `送 AI 字段：${count(d.aiFields)}（全部网页字段）`,
@@ -2307,7 +2391,7 @@
       `API（含响应读取）：${seconds(d.apiMs)}`,
       ...(Number.isInteger(d.interactionSteps)?[`AI 交互步数：${d.interactionSteps}（每步一次模型调用，来自下拉/日期的逐步交互）`]:[]),
       ...(Number.isInteger(d.interactionSteps)?[`AI 交互等待：${seconds(d.interactionMs)}；填写其余 ${seconds(Math.max(0,(result.fillMs||0)-(d.interactionMs||0)))} 为本地点击、页面等待与核对`]:[]),
-      ...(d.fieldBreakdown?[`字段分解：填写 ${d.fieldBreakdown.filled} · 尝试失败 ${d.fieldBreakdown.unfilled} · 已有值未覆盖 ${d.fieldBreakdown.kept} · 无匹配值 ${d.fieldBreakdown.noValue} · 来源拒绝 ${d.fieldBreakdown.rejected} · 协议跳过 ${d.fieldBreakdown.agreement} · 未尝试 ${d.fieldBreakdown.notAttempted} · 局部跳过 ${d.fieldBreakdown.locallySkipped}（合计 ${d.fieldBreakdown.total}）`]:[]),
+      ...(d.fieldBreakdown?[`字段分解：填写 ${d.fieldBreakdown.filled} · 操作结果未确认 ${d.fieldBreakdown.unverified||0} · 尝试失败 ${d.fieldBreakdown.unfilled} · 已有值未覆盖 ${d.fieldBreakdown.kept} · 无匹配值 ${d.fieldBreakdown.noValue} · 来源拒绝 ${d.fieldBreakdown.rejected} · 协议跳过 ${d.fieldBreakdown.agreement} · 未尝试 ${d.fieldBreakdown.notAttempted} · 局部跳过 ${d.fieldBreakdown.locallySkipped}（合计 ${d.fieldBreakdown.total}）`]:[]),
       `填写：${seconds(result.fillMs)}；总计：${seconds(result.totalMs)}`,
       ...(interactionFailures.length?[`交互失败证据（无资料值）：${JSON.stringify(interactionFailures)}`]:[])
     ].join("\n");
@@ -3641,9 +3725,22 @@
   // 只在 AI 已经给出值的字段上执行，只点触发器和选项本身；对不上就收起并记下原因。
   function browserInputEnabled(){return Boolean(shadowRoot?.querySelector('#resume-pro-browser-input')?.checked);}
   async function browserAction(node,action){
+    if(activeFillRun?.contextChanged){const error=new Error('招聘页面文档已变化，本轮已停止');error.code='input_page_changed';throw error;}
     if(!node?.isConnected){const error=new Error('操作目标已被替换，未点击');error.code='input_target_missing';throw error;}
     const token=crypto.randomUUID();node.setAttribute('data-applyfill-input',token);
-    try{const result=await chrome.runtime.sendMessage({type:'BROWSER_INPUT',action:{...action,token}});if(!result?.ok){const error=new Error(result?.error||'浏览器操作失败');error.code=safeInputErrorCode(result?.errorCode)||'input_transport';throw error;}return true;}
+    try{
+      const result=await chrome.runtime.sendMessage({type:'BROWSER_INPUT',action:{...action,token}});
+      if(!result?.ok){
+        const error=new Error(result?.error||'浏览器操作失败');error.code=safeInputErrorCode(result?.errorCode)||'input_transport';
+        error.inputPhase=result?.phase||'before-input';
+        if(error.code==='input_page_changed'&&activeFillRun){
+          activeFillRun.contextChanged={phase:error.inputPhase};
+          activeFillRun.button.dataset.interactionStopped='true';
+        }
+        throw error;
+      }
+      return true;
+    }
     finally{if(node.getAttribute('data-applyfill-input')===token)node.removeAttribute('data-applyfill-input');}
   }
   function browserInput(node,text,enter=false){return browserAction(node,{kind:text===undefined?'click':'fill',text,enter});}

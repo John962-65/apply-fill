@@ -13,7 +13,8 @@
     "tabs",
     "nativeMessaging",
     "alarms",
-    "debugger"
+    "debugger",
+    "webNavigation"
   ],
   "host_permissions": [
     "<all_urls>"
