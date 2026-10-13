@@ -7,6 +7,7 @@
     const panelSelector=config.panelSelector||"[role='listbox'],[role='tree'],[class*='select-dropdown'],[class*='select__dropdown'],[class*='select__menu'],[class*='select__list'],.phoenix-single-select-list,.phoenix-selectList,.phoenix-calendar";
     const popupRoot=config.popupRoot||root.ResumeProControlCatalog?.popupRoot||(n=>n);
     const phoenix=entry=>entry.root.matches('.phoenix-select,.phoenix-select__cont');
+    const phoenixCalendar=p=>Boolean(p&&(p.matches('.phoenix-calendar')||p.querySelector('.phoenix-calendar')));
     let activeEntry=null;
     const selectionProofs=new WeakMap();
     const uncommittedRoots=new WeakSet();
@@ -119,7 +120,7 @@
       return null;
     }
     async function close(entry){
-      const cleared=()=>{entry.opened=false;entry.beforePanels=null;entry.ownedPanel=null;entry.popupBlocked=false;popup.finish(entry);if(activeEntry===entry)activeEntry=null;return true;};
+      const cleared=()=>{entry.opened=false;entry.beforePanels=null;entry.ownedPanel=null;entry.popupBlocked=false;entry.recoveryFailureCode='';popup.finish(entry);if(activeEntry===entry)activeEntry=null;return true;};
       if(!live(entry)){
         if(entry.ownedPanel?.isConnected&&visible(entry.ownedPanel)){activeEntry=entry;entry.popupBlocked=true;popup.transition(entry,states.BLOCKED,'POPUP_OWNERSHIP_UNCONFIRMED');return false;}
         return cleared();
@@ -134,7 +135,13 @@
       if(!owned&&!entry.panelAmbiguous&&popup.closed(entry))return cleared();
       activeEntry=entry;
       popup.transition(entry,states.RECOVERING);
-      entry.recoveryEvidence={escapeAttempted:true,blurAttempted:false,dismissAttempted:false,toggleAttempted:false};
+      const phoenixPopup=phoenixCalendar(owned);
+      const blockClose=detail=>{
+        entry.popupBlocked=true;entry.recoveryFailureCode='POPUP_CLOSE_UNCONFIRMED';
+        trace(entry,'关闭未完成',detail||'关联面板仍可见');
+        popup.transition(entry,states.BLOCKED,'POPUP_CLOSE_UNCONFIRMED');return false;
+      };
+      entry.recoveryEvidence={escapeAttempted:true,blurAttempted:false,closeControlAttempted:false,dismissAttempted:false,toggleAttempted:false};
       const closed=()=>popup.closed(entry);
       try{
         const delegated=config.escape?.(entry.trigger);
@@ -145,6 +152,18 @@
         }
         localInput(entry)?.blur();entry.trigger.blur?.();entry.recoveryEvidence.blurAttempted=true;
       }catch(error){trace(entry,'关闭未完成',error.message);}
+      if(!await until(closed,180)&&phoenixPopup){
+        const scope=panel(entry);
+        const closeControls=Array.from(scope?.querySelectorAll('.phoenix-calendar-close-btn,[aria-label],button,[role="button"],a')||[])
+          .filter(n=>visible(n)&&!n.matches('[disabled],[aria-disabled="true"],[class*="disabled"]')
+            &&(/^(关闭|close|dismiss|×|✕|✖)$/i.test((n.getAttribute('aria-label')||n.getAttribute('title')||n.textContent||'').trim())
+              ||n.matches('.phoenix-calendar-close-btn')));
+        if(closeControls.length===1){
+          entry.recoveryEvidence.closeControlAttempted=true;
+          try{await click(closeControls[0]);}catch(error){trace(entry,'关闭未完成',error.message);}
+          if(await until(closed,600))return cleared();
+        }
+      }
       if(!await until(closed,180)&&config.dismiss){
         entry.recoveryEvidence.dismissAttempted=true;
         try{await config.dismiss(entry.trigger);}catch(error){trace(entry,'关闭未完成',error.message);}
@@ -152,16 +171,24 @@
       // React portals can close on the next render/animation frame. A subsequent control
       // must not be clicked through the preceding list. Only toggle our own confirmed trigger.
       if(!await until(closed,700)){
+        if(phoenixPopup)return blockClose('凤凰日历未响应 Escape、内部关闭控件或安全区域操作；未点击可能被遮挡的触发器');
         entry.recoveryEvidence.toggleAttempted=true;
-        try{await click(entry.trigger);}catch(error){trace(entry,'关闭未完成',error.message);entry.popupBlocked=true;popup.transition(entry,states.BLOCKED,'POPUP_CLOSE_UNCONFIRMED');return false;}
-        if(!await until(closed,700)){trace(entry,'关闭未完成','关联面板仍可见');entry.popupBlocked=true;popup.transition(entry,states.BLOCKED,'POPUP_CLOSE_UNCONFIRMED');return false;}
+        try{await click(entry.trigger);}catch(error){trace(entry,'关闭未完成',error.message);return blockClose('关联面板仍可见，触发器未能安全点击');}
+        if(!await until(closed,700))return blockClose('关联面板仍可见');
       }
       return cleared();
     }
     async function ready(entry){
-      if(activeEntry&&activeEntry!==entry&&!await close(activeEntry)){
-        if(entry){entry.popupBlocked=true;entry.fillNote='前一控件的候选列表仍未关闭，已暂停后续填写';}
-        return false;
+      if(activeEntry&&activeEntry!==entry){
+        const blocker=activeEntry;
+        if(popup.state(blocker)===states.BLOCKED&&panel(blocker)){
+          if(entry){entry.popupBlocked=true;entry.recoveryFailureCode=blocker.recoveryFailureCode||'POPUP_CLOSE_UNCONFIRMED';entry.fillNote='前一控件的候选列表仍未关闭，已暂停后续填写';}
+          return false;
+        }
+        if(!await close(blocker)){
+          if(entry){entry.popupBlocked=true;entry.recoveryFailureCode=blocker.recoveryFailureCode||'POPUP_CLOSE_UNCONFIRMED';entry.fillNote='前一控件的候选列表仍未关闭，已暂停后续填写';}
+          return false;
+        }
       }
       return true;
     }
@@ -190,7 +217,8 @@
       return {...result,blocker};
     }
     function result(entry,ok,code=''){
-      entry.interactionResult={status:ok?'SUCCESS':entry.popupBlocked?'BLOCKED':'RECOVERED',code:entry.failureCode||code|| (ok?'VALUE_VERIFIED':entry.popupBlocked?'POPUP_CLOSE_UNCONFIRMED':'VALUE_UNCONFIRMED'),
+      entry.interactionResult={status:ok?'SUCCESS':entry.popupBlocked?'BLOCKED':'RECOVERED',code:entry.failureCode||entry.recoveryFailureCode||code|| (ok?'VALUE_VERIFIED':entry.popupBlocked?'POPUP_CLOSE_UNCONFIRMED':'VALUE_UNCONFIRMED'),
+        ...(entry.failureCode?{primaryFailure:entry.failureCode}:{}),...(entry.recoveryFailureCode?{recoveryFailure:entry.recoveryFailureCode}:{}),
         observation:popup.snapshot(entry),recovery:{...entry.recoveryEvidence}};
       return ok;
     }
@@ -364,8 +392,9 @@
         try{
           await open(entry);
           if(dateAgent?.recognizes(panel(entry))){
-            const ok=await dateAgent.fill(entry,value),closed=await close(entry);
-            if(!closed)entry.fillNote='日历仍未关闭，已暂停后续填写';
+            const ok=await dateAgent.fill(entry,value);
+            const closed=entry.popupBlocked&&entry.recoveryFailureCode?false:await close(entry);
+            if(!closed)entry.fillNote=[entry.fillNote,'日历仍未关闭，已暂停后续填写'].filter(Boolean).join('；');
             return ok&&closed;
           }
         }catch(error){rememberError(entry,error);entry.fillNote=error.message;await close(entry);return false;}
@@ -424,7 +453,7 @@
       finally{await close(entry);}
     }
     async function fill(entry,value){
-      entry.interactionResult=null;entry.recoveryEvidence={};entry.failureCode='';
+      entry.interactionResult=null;entry.recoveryEvidence={};entry.failureCode='';entry.recoveryFailureCode='';entry.popupBlocked=false;
       const ok=await fillControl(entry,value);
       return result(entry,ok,entry.interactionResult?.code||'');
     }

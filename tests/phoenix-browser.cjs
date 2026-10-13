@@ -4,7 +4,9 @@ const {chromium}=require('playwright'),fs=require('node:fs'),path=require('node:
  const browser=await chromium.launch({headless:true,executablePath:process.env.CHROMIUM_EXECUTABLE_PATH,args:['--no-sandbox']});
  try{
   const {performInput}=await import('../browser-input.mjs');
-  for(const mode of ['normal','wrapped','wrapped-search','search','rerender','duplicate','discard','late-discard','wrong-end','both-ends','stuck','day']){
+  const scenarios=['normal','wrapped','wrapped-search','search','rerender','duplicate','discard','late-discard','wrong-end','both-ends','stuck','day','month-inner','month-confirm','month-delayed','month-discard-covered'];
+  const modes=process.env.PHOENIX_TEST_MODES?process.env.PHOENIX_TEST_MODES.split(',').map(s=>s.trim()).filter(Boolean):scenarios;
+  for(const mode of modes){
    const page=await browser.newPage({viewport:{width:1100,height:850}}),errors=[];page.on('pageerror',e=>errors.push(e.message));
    const cdp=await page.context().newCDPSession(page);await page.exposeFunction('realInput',a=>performInput((m,p)=>cdp.send(m,p),a));
    await page.route('https://fixture.invalid/**',r=>r.fulfill({contentType:'text/html',body:fs.readFileSync(path.join(__dirname,'fixtures/phoenix-controls.html'),'utf8')}));
@@ -39,8 +41,20 @@ const {chromium}=require('playwright'),fs=require('node:fs'),path=require('node:
     language.entry.decide=async s=>({id:(s.candidates.find(c=>c.kind==='choose'&&c.label===s.levelTarget)||s.candidates.find(c=>c.kind==='open')||s.candidates.find(c=>c.kind==='search')||s.candidates.find(c=>c.kind==='stop')).id});
     const languageOK=await api.setElementValue(language.entry,'英语');
     const a=await choose('start-one'),b=await choose('end-one');
+    const dateActionStart=actions.length;
     const first=await api.setElementValue(a.entry,mode==='day'?'2025-04-03':'2022-02');
     const second=first?await api.setElementValue(b.entry,mode==='day'?'2025-04-09':'2024-06'):false;
+    const firstTransaction=structuredClone(a.entry.interactionResult),firstDateActions=actions.slice(dateActionStart);
+    let manualResume=null;
+    if(mode==='month-discard-covered'){
+     document.getElementById('choices')?.remove();self.mode='normal';
+     const resumed=api.scanFillableFields();
+     const startField=resumed.fields.find(f=>f.idAttr==='start-one'),endField=resumed.fields.find(f=>f.idAttr==='end-one');
+     const startEntry=resumed.fieldMap.get(startField.fieldId),endEntry=resumed.fieldMap.get(endField.fieldId);
+     const retried=await api.setElementValue(startEntry,'2022-02');
+     const continued=await api.setElementValue(endEntry,'2024-06');
+     manualResume={retried,continued,start:api.readBackValue(startEntry),end:api.readBackValue(endEntry)};
+    }
     const existing=await choose('existing'),before=actions.length,protectedResult=await api.setElementValue(existing.entry,'本科');
     const protectedClicks=actions.length-before;
     const award=await choose('award'),awardOK=['normal','wrapped','wrapped-search'].includes(mode)?await api.setElementValue(award.entry,'2021-12'):null;
@@ -54,7 +68,7 @@ const {chromium}=require('playwright'),fs=require('node:fs'),path=require('node:
      checkbox={label:f.label,type:f.inputType,dateLike:entry.dateLike,dateResult,dateAgentResult,unchanged:entry.element.value===before,checked,verified:api.verifyFilledValue(entry,'至今','checkbox'),peer:document.getElementById('ongoing-2').checked};
     }
     // An opened popup's search input must never become an extra form field.
-    await realInput({token:(()=>{const n=language.entry.trigger,t=crypto.randomUUID();n.setAttribute('data-applyfill-input',t);return t;})(),kind:'click'});
+    if(mode!=='month-discard-covered')await realInput({token:(()=>{const n=language.entry.trigger,t=crypto.randomUUID();n.setAttribute('data-applyfill-input',t);return t;})(),kind:'click'});
     const after=api.scanFillableFields().fields;
     let pickerCheckbox;
     if(mode==='wrapped'){
@@ -69,9 +83,10 @@ const {chromium}=require('playwright'),fs=require('node:fs'),path=require('node:
      untrusted:actions.filter(a=>!a.trusted).length,checkbox,pickerCheckbox,
      metas:metas.map(f=>({id:f.idAttr,label:f.label,kind:f.inputType,group:f.group,record:f.recordIndex,range:f.rangeId,role:f.rangeRole})),
      after:after.map(f=>f.idAttr),readLanguage:api.readBackValue(language.entry),
-     verified:first&&api.verifyFilledValue(a.entry,mode==='day'?'2025-04-03':'2022-02','combobox'),note:a.entry.fillNote};
+     verified:first&&api.verifyFilledValue(a.entry,mode==='day'?'2025-04-03':'2022-02','combobox'),note:a.entry.fillNote,
+     transaction:firstTransaction,dateActions:firstDateActions,manualResume};
    });
-   const good=['normal','wrapped','wrapped-search','search','rerender','day'].includes(mode);
+   const good=['normal','wrapped','wrapped-search','search','rerender','day','month-inner','month-confirm','month-delayed'].includes(mode);
    assert.equal(result.unrelatedClicks,0,mode);assert.equal(result.untrusted,0,mode);
    assert.equal(result.protectedResult,false);assert.equal(result.protectedClicks,0);
    assert.equal(result.languageOK,!['duplicate','discard','late-discard'].includes(mode),mode+JSON.stringify(result));
@@ -87,6 +102,18 @@ const {chromium}=require('playwright'),fs=require('node:fs'),path=require('node:
    assert.deepEqual(result.metas.filter(f=>['start-one','end-one','start-two','end-two'].includes(f.id)).map(f=>[f.label,f.group,f.record]),[['开始时间','项目经历',1],['结束时间','项目经历',1],['开始时间','项目经历',2],['结束时间','项目经历',2]]);
    const dates=result.metas.filter(f=>['start-one','end-one','start-two','end-two'].includes(f.id));assert.deepEqual(dates.map(f=>f.role),['start','end','start','end']);assert.equal(dates[0].range,dates[1].range);assert.notEqual(dates[0].range,dates[2].range);
    if(['wrong-end','both-ends'].includes(mode))assert.match(result.note,/另一端日期被改变/);
+   if(mode==='month-inner')assert.ok(result.dateActions.some(a=>a.kind==='choose')&&result.dateActions.some(a=>a.kind==='commit'));
+   if(mode==='month-confirm')assert.ok(result.dateActions.some(a=>a.kind==='pending-selection')&&result.dateActions.some(a=>a.kind==='commit'));
+   if(mode==='month-delayed')assert.ok(result.dateActions.some(a=>a.kind==='delayed-selection')&&result.dateActions.some(a=>a.kind==='commit'));
+   if(mode==='month-discard-covered'){
+    assert.equal(result.first,false);assert.equal(result.transaction.status,'BLOCKED');
+    assert.equal(result.transaction.code,'OPTION_COMMIT_UNCONFIRMED');
+    assert.equal(result.transaction.primaryFailure,'OPTION_COMMIT_UNCONFIRMED');
+    assert.equal(result.transaction.recoveryFailure,'POPUP_CLOSE_UNCONFIRMED');
+    assert.equal(result.transaction.recovery.toggleAttempted,false);
+    assert.equal(result.dateActions.filter(a=>a.kind==='open').length,1,'covered Phoenix trigger must not be clicked again');
+    assert.deepEqual(result.manualResume,{retried:true,continued:true,start:'2022-02',end:'2024-06'},'manual dismissal must allow the failed date and following field to continue');
+   }
    assert.equal(result.metas.find(f=>f.id==='existing').label,'学历');assert.equal(result.metas.find(f=>f.id==='unknown').label,'');
    assert.deepEqual(errors,[]);console.log('PASS Phoenix DOM + trusted actions:',mode);await page.close();
   }

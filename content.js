@@ -1758,7 +1758,8 @@
         const entry=fieldMap.get(field.fieldId),result=entry?.interactionResult,out=traceOutcomes.get(field.fieldId);
         if(out?.ok||out?.kept||!result&&!out?.failureCode)return [];
         return [{fieldId:field.fieldId,status:out?.failureStatus||(out?.failureCode?(out.isolated?'SKIPPED':'BLOCKED'):result.status),
-          code:out?.failureCode||result.code,observation:result?.observation,recovery:result?.recovery}];
+          code:out?.failureCode||result.code,primaryFailure:result?.primaryFailure,recoveryFailure:result?.recoveryFailure,
+          observation:result?.observation,recovery:result?.recovery}];
       }));
       state.lastInteractionFailures=diagnostics.interactionFailures;
       // 这一轮没填上的控件，活引用只在本轮有效：自动点击采集要用，所以每次填写整体替换。
@@ -1804,7 +1805,7 @@
         : "")+(locallySkippedLabels.length?`${locallySkippedLabels.length} 项因局部弹层跳过，收起弹层后可补填。`:"")
         +(notAttemptedLabels.length?(fillRun.contextChanged
           ?notAttemptedLabels.length+" 项尚未尝试：招聘页面文档已变化，本轮已停止，请重新扫描后填写。"
-          :notAttemptedLabels.length+" 项尚未尝试：无法确认页面操作安全，请收起弹层后重新填写。"
+          :notAttemptedLabels.length+" 项尚未尝试：无法确认页面操作安全。请先手动收起弹层，再次点击“一键 AI 填写”即可继续补未完成字段；已有内容不会覆盖。"
         ):"")
         +(unverifiedCount?unverifiedCount+" 项操作结果未确认（"+summarizeLabels([...new Set(unverifiedLabels)],6)+"），请人工核对后再提交。":"");
       const mappingNote = mappingFilledCount
@@ -2005,7 +2006,8 @@
       if(transaction&&!outcome?.ok&&!outcome?.kept){
         const obs=transaction.observation;
         const extra=obs?`；状态 ${obs.state??'unknown'}；面板候选 ${obs.popupCandidates??0}`:'；无弹层结构快照';
-        rows.push(`${title} · 交互结果：${transaction.status} / ${transaction.code}${extra}`);
+        const causes=[transaction.primaryFailure?`主故障 ${transaction.primaryFailure}`:'',transaction.recoveryFailure?`恢复故障 ${transaction.recoveryFailure}`:''].filter(Boolean);
+        rows.push(`${title} · 交互结果：${transaction.status} / ${transaction.code}${causes.length?`；${causes.join('；')}`:''}${extra}`);
       }
       const notice = notices?.get(field.fieldId);
       rows.push(`${title} → ${result} · ${match.source === "local" ? "规则补空" : (match.source === "mapping" ? "快照映射" : "AI")} · ${sourceOf(match)} = ${oneLine(match.value) || "空"}${notice ? `（${notice}）` : ""}`);

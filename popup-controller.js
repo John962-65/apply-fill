@@ -15,6 +15,8 @@
     return (Array.isArray(list)?list:[]).slice(0,40).flatMap((item,index)=>{
       if(!['SUCCESS','SKIPPED','RECOVERED','BLOCKED','FAILED_PRECHECK'].includes(item?.status)||!safeCode(item.code))return [];
       const out={fieldId:typeof item.fieldId==='string'&&/^field-\d+(?:-\d+)*$/.test(item.fieldId)?item.fieldId:'f'+(index+1),status:item.status,code:safeCode(item.code)};
+      if(safeCode(item.primaryFailure))out.primaryFailure=safeCode(item.primaryFailure);
+      if(safeCode(item.recoveryFailure))out.recoveryFailure=safeCode(item.recoveryFailure);
       const obs=item.observation;
       if(obs&&Object.values(STATES).includes(obs.state)){
         out.observation={state:obs.state,ownership:['none','semantic','local','mutation','appeared'].includes(obs.ownership)?obs.ownership:'none'};
@@ -23,7 +25,7 @@
         for(const key of ['popupOwned','ariaExpanded','ariaExpandedDeclared','observationLimited','observerActive'])if(typeof obs[key]==='boolean')out.observation[key]=obs[key];
         if(Array.isArray(obs.transitions))out.observation.transitions=obs.transitions.filter(t=>typeof t==='string'&&t.split('>').length===2&&t.split('>').every(s=>Object.values(STATES).includes(s))).slice(-16);
       }
-      if(item.recovery){out.recovery={};for(const key of ['escapeAttempted','blurAttempted','dismissAttempted','toggleAttempted'])if(typeof item.recovery[key]==='boolean')out.recovery[key]=item.recovery[key];}
+      if(item.recovery){out.recovery={};for(const key of ['escapeAttempted','blurAttempted','closeControlAttempted','dismissAttempted','toggleAttempted'])if(typeof item.recovery[key]==='boolean')out.recovery[key]=item.recovery[key];}
       return [out];
     });
   }

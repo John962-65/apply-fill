@@ -5,12 +5,26 @@
     const recognizes=p=>Boolean(p&&(p.matches('.phoenix-calendar')||p.querySelector('.phoenix-calendar')));
     const one=(p,selector)=>{const nodes=Array.from(p?.querySelectorAll(selector)||[]).filter(visible);return nodes.length===1?nodes[0]:null;};
     const enabled=n=>!n.matches('[disabled],[aria-disabled="true"],[class*="disabled"]')&&!n.querySelector('[aria-disabled="true"]');
+    const actionTarget=(cell,monthMode)=>{
+      const preferred=Array.from(cell.querySelectorAll(monthMode?'.phoenix-calendar-month-panel-month':'.phoenix-calendar-date')).filter(n=>visible(n)&&enabled(n));
+      if(preferred.length===1)return preferred[0];
+      if(preferred.length>1)return null;
+      const semantic=Array.from(cell.querySelectorAll('a,button,[role="button"],[role="option"]')).filter(n=>visible(n)&&enabled(n));
+      if(semantic.length===1)return semantic[0];
+      return cell.matches('a,button,[role="button"],[role="option"]')&&visible(cell)&&enabled(cell)?cell:null;
+    };
+    const confirmation=p=>{
+      const nodes=Array.from(p?.querySelectorAll('.phoenix-calendar-ok-btn,.phoenix-calendar-confirm-btn,[aria-label],button,[role="button"],a')||[])
+        .filter(n=>visible(n)&&enabled(n)&&/^(确定|确认|完成|ok|confirm|apply|done)$/i.test((n.getAttribute('aria-label')||n.getAttribute('title')||n.textContent||'').trim()));
+      return nodes.length===1?nodes[0]:null;
+    };
+    const view=p=>p?.querySelector('.phoenix-calendar-month-panel')?'month':p?.querySelector('.phoenix-calendar-date-panel')?'day':'other';
     const number=(n,pattern)=>Number(n?.textContent.match(pattern)?.[0]);
     async function fill(entry,value){
       entry.datePadded=false;
       const peerBefore=readPeer?.(entry);
       const peerChanged=()=>peerBefore!==undefined&&readPeer(entry)!==peerBefore;
-      const fail=reason=>{entry.fillNote=reason;trace(entry,'日历停止',reason);return false;};
+      const fail=(reason,code='')=>{entry.fillNote=reason;if(code)entry.failureCode||=code;trace(entry,'日历停止',reason);return false;};
       let p=panel(entry);
       if(!recognizes(p))return fail('未找到当前控件关联的凤凰日历');
       const monthMode=Boolean(one(p,'.phoenix-calendar-month-panel'));
@@ -37,12 +51,42 @@
               : !n.matches('.phoenix-calendar-last-month-cell,.phoenix-calendar-next-month-btn-day')&&text===String(dd);
           });
           if(candidates.length!==1)return fail(`日期格无法唯一确定（${candidates.length} 个候选）`);
-          await click(candidates[0]);trace(entry,'选择日期格',monthMode?'选择目标月份':'选择目标日期');
+          const target=actionTarget(candidates[0],monthMode);
+          if(!target)return fail(monthMode?'目标月份没有唯一可交互的内部选项':'目标日期没有唯一可交互的内部选项');
+          const initialView=view(p);
+          await click(target);trace(entry,'选择日期格',`${monthMode?'点击目标月份':'点击目标日期'}内部选项（${target.tagName.toLowerCase()}）`);
+          if(peerChanged())return fail('另一端日期被改变，请核对起止时间','PEER_CHANGED');
+          let transition=await until(()=>{
+            if(peerChanged())return {kind:'peer-changed'};
+            if(same())return {kind:'committed'};
+            const current=panel(entry);
+            if(!recognizes(current))return {kind:'closed'};
+            const confirm=confirmation(current);
+            if(confirm)return {kind:'confirm',node:confirm};
+            if(view(current)!==initialView)return {kind:'view-changed',view:view(current)};
+            return null;
+          },5000);
+          if(transition?.kind==='peer-changed')return fail('另一端日期被改变，请核对起止时间','PEER_CHANGED');
+          let committed=transition?.kind==='committed';
+          if(transition?.kind==='confirm'){
+            trace(entry,'观察状态','出现唯一确认按钮');
+            await click(transition.node);trace(entry,'确认日期','点击日历内确认按钮');
+            if(peerChanged())return fail('另一端日期被改变，请核对起止时间','PEER_CHANGED');
+            committed=Boolean(await until(same,5000));
+          }else if(!committed&&(transition?.kind==='closed'||transition?.kind==='view-changed')){
+            trace(entry,'观察状态',transition.kind==='closed'?'弹层已关闭，等待值提交':'日期面板切换，等待值提交');
+            committed=Boolean(await until(same,2500));
+          }
+          if(!committed)return fail('点击月份/日期后页面未确认保留目标值','OPTION_COMMIT_UNCONFIRMED');
+          const wasClosed=await close(entry);
+          if(!wasClosed){
+            entry.fillNote='目标值已读回，但日历未能安全关闭';
+            trace(entry,'日历停止',entry.fillNote);
+            return false;
+          }
+          await pause(250);
           if(peerChanged())return fail('另一端日期被改变，请核对起止时间');
-          if(!await until(same,1800))return fail('选择后页面未保留目标日期');
-          await close(entry);await pause(250);
-          if(peerChanged())return fail('另一端日期被改变，请核对起止时间');
-          if(!same())return fail('关闭日历后目标日期被清空或改写');
+          if(!same())return fail('关闭日历后目标日期被清空或改写','OPTION_COMMIT_UNCONFIRMED');
           entry.verifiedChoice=read(entry);entry.fillNote='';entry.datePadded=target.padded;
           trace(entry,'核对','页面保留目标日期');return true;
         }
