@@ -329,7 +329,7 @@
       entry.interactions=[];entry.verifiedChoice='';entry.fillIssue='';
       const strict=entry.meta?.datePart||root.ResumeProAIHelpers.selectEnumTopic(entry.meta);
       const start=Date.now();const parts=String(value).split(/[\/／]/).map(s=>s.trim()).filter(Boolean);
-      const fail=async note=>{entry.fillNote=note;trace(entry,'停止',note);await close(entry);return result(entry,false);};
+      const fail=async(note,code='')=>{if(code)entry.failureCode||=code;entry.fillNote=note;trace(entry,'停止',note);await close(entry);return result(entry,false,code);};
       if(!live(entry))return fail('控件已替换，无法唯一定位');
       if(read(entry))return fail('控件已有内容，未覆盖');
       const query=entry.structuralChoice?localInput(entry)?.value?.trim():'';
@@ -370,7 +370,7 @@
             if(success){
               entry.verifiedChoice=read(entry);entry.fillNote='';trace(entry,'核对','页面保留选中内容');return result(entry,true);
             }
-            await fail('点击后未确认选中；搜索文字不算选择成功');return result(entry,false,'OPTION_COMMIT_UNCONFIRMED');
+            return fail('点击后未确认选中；搜索文字不算选择成功','OPTION_COMMIT_UNCONFIRMED');
           }
           // Searching an unavailable level must not erase a populated finite
           // vocabulary and disguise its mismatch as a driver failure.
