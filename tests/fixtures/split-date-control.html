@@ -1,0 +1,73 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>通用拆分年月下拉回归</title>
+<style>
+  body{font:16px sans-serif;padding:24px}
+  .record{border:1px solid #ccc;padding:16px;width:760px}
+  .period{display:flex;align-items:center;gap:12px;margin:16px 0}
+  .form-item-generic{display:inline-block;width:130px}
+  .field-label{margin-bottom:6px}
+  .control-shell{position:relative;width:110px}
+  .control-shell input{box-sizing:border-box;width:110px;height:34px}
+  .choice-list{position:absolute;left:0;top:34px;z-index:20;display:none;width:110px;max-height:180px;overflow:auto;background:white;border:1px solid #888}
+  .choice-list [role="option"]{padding:6px;cursor:pointer}
+</style>
+<main>
+  <section>
+    <h2>项目经历</h2>
+    <article class="record" id="record-one">
+      <div class="period" id="project-period"></div>
+    </article>
+    <h2>获奖经历</h2>
+    <article class="record" id="award-record">
+      <div class="period" id="award-period"></div>
+    </article>
+  </section>
+</main>
+<script>
+  window.selectionEvents=[];
+  function addField(period,{id,label,part,choices}){
+    // Include the broad picker keyword to exercise the scanner's false-positive
+    // generic date-picker route before split-date annotation corrects it.
+    const item=document.createElement('div');item.className='form-item-generic-date-picker';
+    const title=document.createElement('div');title.className='field-label';title.textContent=label;item.append(title);
+    const shell=document.createElement('div');shell.className='control-shell';
+    const input=document.createElement('input');input.type='text';input.id=id;input.placeholder=part==='year'?'年':'月';
+    const list=document.createElement('div');list.className='choice-list';list.setAttribute('role','listbox');
+    const render=query=>{
+      list.replaceChildren();
+      for(const choice of choices.filter(value=>!query||value.startsWith(query))){
+        const option=document.createElement('div');option.setAttribute('role','option');option.textContent=choice;
+        option.addEventListener('click',event=>{
+          window.selectionEvents.push({kind:'option',id,text:choice,trusted:event.isTrusted});
+          if(!event.isTrusted)return;
+          shell.dataset.selected=choice;input.value=choice;list.style.display='none';
+        });
+        list.append(option);
+      }
+    };
+    input.addEventListener('click',event=>{
+      window.selectionEvents.push({kind:'trigger',id,trusted:event.isTrusted});
+      if(event.isTrusted){render('');list.style.display='block';}
+    });
+    input.addEventListener('input',()=>{
+      window.selectionEvents.push({kind:'typed',id,value:input.value});
+      render(input.value);list.style.display='block';
+    });
+    shell.append(input);
+    if(choices.length)shell.append(list);
+    item.append(shell);period.append(item);
+  }
+  const project=document.getElementById('project-period');
+  addField(project,{id:'e1-start-year',label:'开始时间',part:'year',choices:['2024','2026','2028']});
+  addField(project,{id:'e1-start-month',label:'开始时间',part:'month',choices:['1','10','11','12','9']});
+  const separator=document.createElement('span');separator.textContent='至';project.append(separator);
+  addField(project,{id:'e1-end-year',label:'结束时间',part:'year',choices:['2024','2026','2028']});
+  addField(project,{id:'e1-end-month',label:'结束时间',part:'month',choices:['1','10','11','12','9']});
+  const award=document.getElementById('award-period');
+  addField(award,{id:'award-year',label:'获奖时间',part:'year',choices:[]});
+  addField(award,{id:'award-month',label:'获奖时间',part:'month',choices:[]});
+  // Existing query text must not be treated as a committed selection.
+  document.getElementById('award-year').value='2026';
+  document.getElementById('award-month').value='1';
+</script>

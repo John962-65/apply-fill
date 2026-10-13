@@ -931,7 +931,7 @@
     // A dynamically discovered autocomplete may remove its only list on selection.
     // Retain that proven driver when the same unique field is rebuilt as a text input.
     if(entry?.kind==='combobox'&&entry.structuralChoice&&next?.kind==='element'){
-      const root=structuralChoiceRoot(next.element,true);
+      const root=structuralChoiceRoot(next.element,true,Boolean(entry.datePart||meta?.datePart));
       return root?promoteStructuralChoice(next,root):null;
     }
     return next;
@@ -957,6 +957,9 @@
 
     const el = entry.element;
     if (!el?.isConnected) return "";
+    // A split datePart left as a plain text input has no selection proof. Its
+    // visible text may be an autocomplete query, so it cannot count as a value.
+    if(isUncommittedSplitDateText(entry,el))return '';
     if (udDateAgent.recognizes(entry)) return udDateAgent.read(entry);
     if (el instanceof HTMLSelectElement) {
       const option = el.options[el.selectedIndex];
@@ -1003,6 +1006,7 @@
       const shown = readBackValue(entry);
       return Boolean(shown) && (self.ResumeProFormStructure.normalizeLabel(shown) === self.ResumeProFormStructure.normalizeLabel(expected) || Boolean(entry.verifiedChoice && shown === entry.verifiedChoice));
     }
+    if(isUncommittedSplitDateText(entry))return false;
     if (entry.element?.type === 'checkbox') {
       const wanted = self.ResumeProAIHelpers.checkboxState(value, entry.meta?.label || getCheckboxLabel(entry.element));
       return wanted !== null && entry.element.checked === wanted;
@@ -2368,11 +2372,13 @@
 
   const STRUCTURAL_CHOICE_PANELS = '[role="listbox"],ul,[class*="dropdown" i],[class*="suggest" i],[class*="options" i],[class*="menu" i],[class*="list" i]';
   const provenChoiceRoots=new WeakSet();
-  function structuralChoiceRoot(input,previouslyProven=false) {
+  function structuralChoiceRoot(input,previouslyProven=false,allowDatePart=false) {
     if (!(input instanceof HTMLInputElement) || !['text','search'].includes(input.type)
       || input.list || input.closest(`#${SIDEBAR_ID}`) || controlPopupFor(input)) return null;
     const label=getFieldLabel(input),placeholder=input.getAttribute('placeholder')||'';
-    if(looksLikeDateInput(input,label,placeholder)||input.closest('[class*="picker" i],[class*="calendar" i]'))return null;
+    // Complete date controls stay on the calendar path. Only fields already
+    // proven to be a split year/month part may bypass the date-like guard.
+    if(!allowDatePart&&(looksLikeDateInput(input,label,placeholder)||input.closest('[class*="picker" i],[class*="calendar" i]')))return null;
     let owner=null;
     for(let scope=input.parentElement,depth=0;scope&&depth<4;scope=scope.parentElement,depth++){
       if(scope.matches('body,form,main,section,fieldset,nav'))break;
@@ -2394,8 +2400,17 @@
     entry.kind='combobox';entry.root=root;
     entry.trigger=root.matches('.ud__select')?comboTriggerFor(root):root.querySelector('input:not([type="hidden"])')||root;
     entry.structuralChoice=true;
+    // A proven year/month option list owns this interaction. Stale broad picker
+    // metadata would route it back through direct date assignment.
+    entry.pickerType=null;entry.pickerInputType=null;entry.pickerRoot=null;
+    if(entry.meta){entry.meta.pickerType=null;entry.meta.pickerInputType=null;entry.meta.inputType='combobox';}
     provenChoiceRoots.add(root);
     return entry;
+  }
+
+  function isUncommittedSplitDateText(entry,element=entry?.element) {
+    return Boolean(entry?.datePart&&entry.kind==='element'
+      &&element instanceof HTMLInputElement&&['text','search'].includes(element.type));
   }
 
   function collectComboboxRoots() {
@@ -3241,6 +3256,22 @@
         else {field.datePointId=id;field.label=label;}
         const entry=fieldMap.get(field.fieldId);entry.dateLike=false;entry.datePart=field.datePart;
         if(roles)entry.rangeRoot=scope;
+        // A split date part is not a free-text date. If bounded DOM evidence
+        // proves this input owns a choice list, promote it to the same verified
+        // combobox driver used by other custom selects.
+        if(entry.kind==='element'&&entry.element instanceof HTMLInputElement&&['text','search'].includes(entry.element.type)){
+          const choiceRoot=structuralChoiceRoot(entry.element,false,true);
+          if(choiceRoot){
+            promoteStructuralChoice(entry,choiceRoot);
+            field.inputType='combobox';field.pickerType=null;field.pickerInputType=null;
+          }else if(entry.pickerType||field.inputType==='date-picker'){
+            // A picker class is not proof that this split part has a committed
+            // selection. Without a bounded option list, clear inferred picker
+            // routing so the guarded text path reports OPTION_COMMIT_UNCONFIRMED.
+            entry.pickerType=null;entry.pickerInputType=null;entry.pickerRoot=null;
+            field.inputType=entry.element.type||'text';field.pickerType=null;field.pickerInputType=null;
+          }
+        }
         handled.add(field.fieldId);
       });
     }
@@ -3647,7 +3678,10 @@
   });
 
   async function fillCombobox(entry, value) {
-    return comboAgent.fill(entry,value);
+    const ok=await comboAgent.fill(entry,value);
+    if(!ok&&entry?.datePart&&entry.interactionResult?.code==='VALUE_UNCONFIRMED')
+      entry.interactionResult.code='OPTION_COMMIT_UNCONFIRMED';
+    return ok;
   }
 
   // React 可能在拿到引用之后重渲染下拉，点脱离文档的节点等于没点，所以点之前按文本重查。
@@ -3961,6 +3995,18 @@
     const pickerType = (element && typeof element === "object" && element.kind === "element") ? element.pickerType : null;
     const pickerInputType = (element && typeof element === "object" && element.kind === "element") ? (element.pickerInputType || "date") : "date";
     const dateLike = (element && typeof element === "object" && element.kind === "element") ? Boolean(element.dateLike) : false;
+
+    // A recognized year/month part must never fall through to the ordinary
+    // input setter. That setter can leave search text in a custom select while
+    // reporting success. Promote only when bounded choice-list evidence exists;
+    // otherwise fail closed and ask for manual review.
+    if(isUncommittedSplitDateText(calendarEntry)){
+      const choiceRoot=structuralChoiceRoot(calendarEntry.element,false,true);
+      if(choiceRoot)return fillCombobox(promoteStructuralChoice(calendarEntry,choiceRoot),value);
+      calendarEntry.fillNote='拆分年月字段未识别到可验证的下拉选项，已阻止直接写入';
+      calendarEntry.interactionResult={status:'RECOVERED',code:'OPTION_COMMIT_UNCONFIRMED'};
+      return false;
+    }
 
     if(calendarEntry&&!dateLike&&!pickerType&&calendarEntry.element instanceof HTMLInputElement){
       const root=structuralChoiceRoot(calendarEntry.element);
@@ -4317,6 +4363,7 @@
     if (!element?.isConnected) {
       return "";
     }
+    if(field?.datePart&&isUncommittedSplitDateText(entry,element))return '';
     if(udDateAgent.recognizes(entry))return udDateAgent.read(entry);
 
     if (element.type === "checkbox") {

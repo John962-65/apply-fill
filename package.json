@@ -18,6 +18,7 @@
     "test:grounded-fill": "node tests/grounded-fill.cjs",
     "test:split-resume": "node tests/split-resume.cjs",
     "test:split-combos": "node tests/split-combos.cjs",
+    "test:split-date-routing": "node tests/split-date-routing.cjs",
     "test:sd-choices": "node tests/sd-choices.cjs",
     "test:sd-query": "node tests/sd-query-confirm.cjs",
     "test:feishu-ud": "node tests/feishu-ud.cjs",
