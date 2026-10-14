@@ -11,6 +11,7 @@ const assert=require('node:assert/strict');const path=require('node:path');const
    document.getElementById('start').onclick=()=>setTimeout(()=>{const p=document.createElement('div');p.className='unknown-widget-popup';p.innerHTML='<button aria-label="上一年">2025年</button><button data-date="2025-03">三月</button>';document.body.append(p);},100);
   });
   await page.addScriptTag({path:path.resolve(__dirname,'../control-catalog.js')});
+  await page.addScriptTag({path:path.resolve(__dirname,'../popup-controller.js')});
   await page.addScriptTag({path:path.resolve(__dirname,'../control-capture.js')});
   await page.evaluate(()=>{
    const shadow=document.getElementById('resume-pro-sidebar').shadowRoot;

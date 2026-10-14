@@ -329,6 +329,10 @@
     if (education) return education;
     if (/^(获奖级别|奖项级别|奖励级别|荣誉级别)$/.test(label)) return 'award-level';
     if (/语言|外语/.test(field?.group || '') && /^(掌握程度|精通程度|熟练程度|听说|听说能力|读写|读写能力|阅读能力|写作能力)$/.test(label)) return 'language-level';
+    if (/^(政治面貌|政治身份)$/.test(label)) return 'political-status';
+    if (/^(英语等级|英语考试等级|外语考试等级)$/.test(label)) return 'english-exam';
+    if (/^(院校性质|学校性质)$/.test(label)) return 'institution-nature';
+    if (/^(院校层次|学校层次|院校类型)$/.test(label)) return 'institution-tier';
     return '';
   }
 
@@ -338,6 +342,16 @@
       const aliases = [['校级', '院校级', '学校级'], ['省级', '省区级'], ['国家级', '全国级']];
       const normalized = normalizeText(value);
       return aliases.find(group => group.some(alias => normalizeText(alias) === normalized))?.[0] || normalized;
+    }
+    const vocabularies={
+      'political-status':[['中共党员','中国共产党党员'],['中共预备党员','中国共产党预备党员'],['共青团员','中国共产主义青年团团员'],['群众','普通群众']],
+      'english-exam':[['大学英语四级','英语四级','CET4','CET-4','CET 4'],['大学英语六级','英语六级','CET6','CET-6','CET 6'],['英语专业四级','TEM4','TEM-4'],['英语专业八级','TEM8','TEM-8']],
+      'institution-nature':[['公办','公办院校','公办学校'],['民办','民办院校','民办学校']],
+      'institution-tier':[['985','985工程','985工程高校'],['211','211工程','211工程高校'],['双一流','双一流建设高校']]
+    };
+    if(vocabularies[topic]){
+      const normalized=normalizeText(value);
+      return vocabularies[topic].find(group=>group.some(alias=>normalizeText(alias)===normalized))?.[0]||normalized;
     }
     return normalizeText(value);
   }
@@ -703,7 +717,7 @@
     }
 
     const enumTopic = formField && selectEnumTopic(formField);
-    if (enumTopic === 'award-level') {
+    if (['award-level','political-status','english-exam','institution-nature','institution-tier'].includes(enumTopic)) {
       const candidates = distinctSources(fields.filter(field => selectEnumTopic({label:sourceFieldLabel(field)}) === enumTopic
         && selectEnumValue(field.value,enumTopic) === selectEnumValue(target,enumTopic)),enumTopic);
       if (!candidates.length) return {relation:'none',field:null,keys:[]};

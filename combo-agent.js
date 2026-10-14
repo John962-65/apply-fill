@@ -6,13 +6,15 @@
     const {visible,optionSelector,displaySelector,placeholder,refresh}=config;
     const panelSelector=config.panelSelector||"[role='listbox'],[role='tree'],[class*='select-dropdown'],[class*='select__dropdown'],[class*='select__menu'],[class*='select__list'],.phoenix-single-select-list,.phoenix-selectList,.phoenix-calendar";
     const popupRoot=config.popupRoot||root.ResumeProControlCatalog?.popupRoot||(n=>n);
+    const dom=root.ResumeProPopupController;
     const phoenix=entry=>entry.root.matches('.phoenix-select,.phoenix-select__cont');
     const phoenixCalendar=p=>Boolean(p&&(p.matches('.phoenix-calendar')||p.querySelector('.phoenix-calendar')));
     let activeEntry=null;
+    const observedOpen=new Map();
     const selectionProofs=new WeakMap();
     const uncommittedRoots=new WeakSet();
     const trace=(entry,action,detail='')=>{entry.interactions??=[];entry.interactions.push({action,detail});entry.interactions=entry.interactions.slice(-20);};
-    const popup=root.ResumeProPopupController.create({visible,panelSelector,optionSelector,popupRoot,live,localInput});
+    const popup=root.ResumeProPopupController.create({visible,panelSelector,optionSelector,displaySelector,placeholder,popupRoot,live,localInput});
     const states=root.ResumeProPopupController.STATES;
     const rememberError=(entry,error)=>{if(/^input_(?:invalid|too_long|target_(?:missing|ambiguous|disabled|moving|hidden|covered)|observation|focus|context|busy|foreground|page_changed|attach|transport)$/.test(error?.code||''))entry.failureCode=error.code;};
     function live(entry){
@@ -46,7 +48,7 @@
           ||!text||placeholder(text)||norm(text)===norm(entry.meta?.label)||/^[▾▿▼▽⌄×✕]+$/.test(text))continue;
         captions.push(text);
       }
-      const unique=[...new Set(captions)],value=unique.length===1?unique[0]:'';
+      const unique=[...new Set(captions)],value=entry.multipleChoice?unique.join(' / '):unique.length===1?unique[0]:'';
       // A mirrored editable search query is still a query. It needs the same
       // stored ID / completed-click proof as input.value itself.
       if(value&&input&&!input.readOnly&&norm(input.value)===norm(value)&&!tokenValue(stored)
@@ -69,7 +71,7 @@
       }
       const shown=Array.from(entry.root.querySelectorAll(displaySelector)).filter(n=>(visible(n)||(phoenix(entry)&&n.matches('.phoenix-select__tipEle')))&&!n.closest(panelSelector)&&!owned?.contains(n));
       let value=shown.map(n=>n.textContent.trim()).filter(t=>t&&!placeholder(t)).join(' / ');
-      if(!value&&!phoenix(entry)&&!entry.structuralChoice){
+      if(!value&&!phoenix(entry)&&!entry.structuralChoice&&!owned&&!pending(entry)){
         const clone=entry.root.cloneNode(true);
         clone.querySelectorAll(`input,textarea,select,label,svg,button,${panelSelector}`).forEach(n=>n.remove());
         value=clone.textContent.trim();
@@ -89,38 +91,36 @@
     }
     function panels(){return popup.candidates();}
     function panel(entry){return popup.inspect(entry).panel;}
-    function options(entry){
-      const scope=panel(entry);if(!scope)return [];
+    function options(entry,scope=panel(entry)){
+      if(!scope)return [];
       // Semantic options lead; platform selectors supplement missing ARIA.
-      let nodes=Array.from(scope.querySelectorAll(root.ResumeProControlCatalog?.semantic?.option||'[role="option"],[role="treeitem"]'));
-      if(!nodes.length)nodes=Array.from(scope.querySelectorAll(optionSelector));
+      let nodes=dom.queryAll(scope,root.ResumeProControlCatalog?.semantic?.option||'[role="option"],[role="treeitem"]');
+      if(!nodes.length)nodes=dom.queryAll(scope,optionSelector);
       if(entry.structuralChoice){
         nodes=Array.from(new Set([...nodes,...scope.querySelectorAll('li,[class*="option" i],[class*="item" i],[class*="suggestion" i]')]))
           .filter(n=>n.matches('li,[role="option"]')||!/(?:options|option[-_]?list|option[-_]?wrapper|suggestions|suggestion[-_]?list)/i.test(n.className||''));
-        if(!nodes.length)nodes=Array.from(scope.children);
+        if(!nodes.length)nodes=dom.structuralOptions(scope,visible);
       }
-      return nodes.filter(n=>visible(n)&&!n.closest('[aria-hidden="true"]')&&!n.closest('[disabled],[aria-disabled="true"],[class*="--disabled"],[class*="-disabled"]')
+      if(!nodes.length)nodes=dom.structuralOptions(scope,visible);
+      return nodes.filter(n=>visible(n)&&popup.displayed(n)&&dom.choiceEnabled(n)
         &&!nodes.some(other=>other!==n&&other.contains(n))
         // The "add a school/major" footer is a form action, never a suggestion.
-        &&(!entry.structuralChoice||!n.matches('a,button,input,form')&&!n.querySelector('a,button,input,textarea,select,form')
+        &&(!entry.structuralChoice||!n.matches('a,button,input,form')&&!n.querySelector('a,button,input:not([type="checkbox"]),textarea,select,form')
           &&!/(?:没有找到|未找到|添加|新增|创建|删除|提交|保存|下一步)/.test(optionText(n))));
     }
     function optionText(n){return (n.getAttribute('aria-label')||n.textContent||'').trim();}
     async function click(node){
       if(!node?.isConnected||!visible(node)||node.matches('[disabled],[aria-disabled="true"]'))return false;
       const delegated=config.click?.(node);if(delegated)return await delegated;
-      node.scrollIntoView({block:'nearest'});
-      node.dispatchEvent(new MouseEvent('mousedown',{bubbles:true,cancelable:true}));
-      node.dispatchEvent(new MouseEvent('mouseup',{bubbles:true,cancelable:true}));
-      node.click();return true;
+      return dom.syntheticClick(node);
     }
     async function until(predicate,ms=1400){
       const end=Date.now()+ms;
       do {const value=predicate();if(value)return value;await wait(80);}while(Date.now()<end);
       return null;
     }
-    async function close(entry){
-      const cleared=()=>{entry.opened=false;entry.beforePanels=null;entry.ownedPanel=null;entry.phoenixDateInteraction=false;entry.popupBlocked=false;entry.recoveryFailureCode='';popup.finish(entry);if(activeEntry===entry)activeEntry=null;return true;};
+    async function close(entry,{committed=false}={}){
+      const cleared=()=>{for(const [ownerRoot,owner] of observedOpen)if(owner===entry||owner.root===entry.root)observedOpen.delete(ownerRoot);entry.opened=false;entry.beforePanels=null;entry.ownedPanel=null;entry.phoenixDateInteraction=false;entry.popupBlocked=false;entry.recoveryFailureCode='';popup.finish(entry);if(activeEntry===entry)activeEntry=null;return true;};
       if(!live(entry)){
         if(entry.ownedPanel?.isConnected&&visible(entry.ownedPanel)){activeEntry=entry;entry.popupBlocked=true;popup.transition(entry,states.BLOCKED,'POPUP_OWNERSHIP_UNCONFIRMED');return false;}
         return cleared();
@@ -133,6 +133,9 @@
       // waiting to render options. Dismiss every opening attempt before advancing.
       if(!owned&&!pending(entry)&&!entry.opened)return cleared();
       if(!owned&&!entry.panelAmbiguous&&popup.closed(entry))return cleared();
+      // Give the component's own commit/exit transition time to settle before
+      // focusing anything. Refocusing a search trigger can reopen or reset it.
+      if(await until(()=>popup.closed(entry),committed?650:260))return cleared();
       activeEntry=entry;
       popup.transition(entry,states.RECOVERING);
       // Keep the Phoenix-specific recovery policy when its portal temporarily
@@ -147,13 +150,11 @@
       entry.recoveryEvidence={escapeAttempted:true,blurAttempted:false,closeControlAttempted:false,dismissAttempted:false,toggleAttempted:false};
       const closed=()=>popup.closed(entry);
       try{
-        const delegated=config.escape?.(entry.trigger);
+        const focused=document.activeElement;
+        const escapeTarget=focused&&focused!==document.body&&(entry.root.contains(focused)||panel(entry)?.contains(focused))?focused:entry.trigger;
+        const delegated=config.escape?.(escapeTarget);
         if(delegated)await delegated;
-        else{
-          entry.trigger.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',code:'Escape',bubbles:true}));
-          document.body.dispatchEvent(new MouseEvent('mousedown',{bubbles:true}));
-        }
-        localInput(entry)?.blur();entry.trigger.blur?.();entry.recoveryEvidence.blurAttempted=true;
+        else escapeTarget.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',code:'Escape',bubbles:true,composed:true}));
       }catch(error){trace(entry,'关闭未完成',error.message);}
       if(!await until(closed,180)&&phoenixPopup){
         const scope=panel(entry);
@@ -167,7 +168,11 @@
           if(await until(closed,600))return cleared();
         }
       }
-      if(!await until(closed,180)&&config.dismiss){
+      if(!await until(closed,300)&&!phoenixPopup&&panel(entry)&&!entry.panelAmbiguous){
+        entry.recoveryEvidence.toggleAttempted=true;
+        try{await click(entry.trigger);}catch(error){trace(entry,'关闭未完成',error.message);}
+      }
+      if(!await until(closed,300)&&config.dismiss&&!committed){
         entry.recoveryEvidence.dismissAttempted=true;
         try{await config.dismiss(entry.trigger);}catch(error){trace(entry,'关闭未完成',error.message);}
       }
@@ -175,15 +180,20 @@
       // must not be clicked through the preceding list. Only toggle our own confirmed trigger.
       if(!await until(closed,700)){
         if(phoenixPopup)return blockClose('凤凰日历未响应 Escape、内部关闭控件或安全区域操作；未点击可能被遮挡的触发器');
-        entry.recoveryEvidence.toggleAttempted=true;
-        try{await click(entry.trigger);}catch(error){trace(entry,'关闭未完成',error.message);return blockClose('关联面板仍可见，触发器未能安全点击');}
-        if(!await until(closed,700))return blockClose('关联面板仍可见');
+        return blockClose(entry.panelAmbiguous?'无法唯一确认残留弹层归属':'关联面板仍可见');
       }
       return cleared();
     }
     async function ready(entry){
-      if(activeEntry&&activeEntry!==entry){
-        const blocker=activeEntry;
+      const owners=[...new Set([...observedOpen.values(),activeEntry].filter(Boolean))];
+      for(const blocker of owners){
+        if(blocker===entry||blocker.root===entry?.root){
+          if(popup.state(blocker)===states.BLOCKED){
+            if(panel(blocker)||blocker.panelAmbiguous){entry.popupBlocked=true;entry.recoveryFailureCode=blocker.recoveryFailureCode||'POPUP_CLOSE_UNCONFIRMED';return false;}
+            if(!await close(blocker))return false;
+          }
+          continue;
+        }
         if(popup.state(blocker)===states.BLOCKED&&panel(blocker)){
           if(entry){entry.popupBlocked=true;entry.recoveryFailureCode=blocker.recoveryFailureCode||'POPUP_CLOSE_UNCONFIRMED';entry.fillNote='前一控件的候选列表仍未关闭，已暂停后续填写';}
           return false;
@@ -196,11 +206,20 @@
       return true;
     }
     async function prepare(entry){
+      if(activeEntry&&activeEntry!==entry&&popup.state(activeEntry)!==states.BLOCKED)await ready(entry);
       if(!activeEntry){
         // A pre-existing, unowned popup or modal is never silently ignored by
         // the production scheduler. Passive scanning adopts known owners.
-        if(popup.hazards().length||Array.from(document.querySelectorAll('[aria-modal="true"],[role="dialog"],dialog[open]')).some(popup.painted))return {status:'BLOCKED',code:'OTHER_POPUP_UNCONFIRMED'};
+        const node=entry.element||entry.trigger;
+        if(popup.hazards().length||dom.queryAll(document,'[aria-modal="true"],[role="dialog"],dialog[open]').some(n=>popup.painted(n)&&!n.contains(node)))return {status:'BLOCKED',code:'OTHER_POPUP_UNCONFIRMED'};
         return {status:'SUCCESS'};
+      }
+      if(activeEntry===entry||entry.kind==='combobox'&&activeEntry.root===entry.root){
+        if(popup.state(activeEntry)===states.BLOCKED){
+          if(panel(activeEntry)||activeEntry.panelAmbiguous)return {status:'SKIPPED',code:'POPUP_TARGET_RELATED',blocker:activeEntry};
+          if(await close(activeEntry))return {status:'RECOVERED',code:'POPUP_RECOVERED'};
+          return {status:'BLOCKED',code:'POPUP_CLOSE_UNCONFIRMED',blocker:activeEntry};
+        }
       }
       if(activeEntry===entry)return {status:'SUCCESS'};
       if(entry.kind==='combobox'&&activeEntry.root===entry.root){
@@ -228,11 +247,20 @@
     function adoptPanel(entry,related){
       if(!entry.opened||!entry.beforePanels)entry.beforePanels=new Set(panels().filter(p=>p!==related));
       entry.ownedPanel=related;entry.opened=true;activeEntry=entry;
-      popup.transition(entry,states.OPEN);
+      observedOpen.set(entry.root,entry);
+      if(popup.state(entry)!==states.BLOCKED)popup.transition(entry,states.OPEN);
     }
     function observe(entry){
       const related=panel(entry);
-      if(related&&!activeEntry)adoptPanel(entry,related);
+      if(related){
+        const previous=activeEntry;adoptPanel(entry,related);if(previous)activeEntry=previous;
+      }else if(pending(entry)){
+        // A preopened async menu can still be empty. Its explicit owner must
+        // be recovered before a new control is opened, rather than letting its
+        // later-loaded list be attributed to the next click.
+        entry.beforePanels??=new Set(panels());entry.opened=true;observedOpen.set(entry.root,entry);
+        if(!activeEntry)activeEntry=entry;
+      }
       return related?options(entry):[];
     }
     async function open(entry){
@@ -241,36 +269,52 @@
       // Existing related popup is valid; don't toggle it closed.
       const related=panel(entry);
       if(related){
-        adoptPanel(entry,related);return options(entry);
+        if(!popup.snapshot(entry).observerActive)popup.begin(entry);
+        adoptPanel(entry,related);
+        await popup.settle(entry,p=>options(entry,p).length?options(entry,p):searchInput(entry)?[searchInput(entry)]:[],{timeout:3500});return options(entry);
       }
       if(entry.panelAmbiguous)throw new Error('无法唯一确认当前控件的候选列表');
       const wasPending=pending(entry);
       entry.beforePanels=new Set(panels());entry.ownedPanel=null;entry.opened=true;popup.begin(entry);
       activeEntry=entry;
       trace(entry,'打开');
-      if(!wasPending){entry.trigger.focus?.();await click(entry.trigger);}
-      await until(()=>options(entry).length||dateAgent?.recognizes(panel(entry)));
+      if(!wasPending)await click(entry.trigger);
+      await popup.settle(entry,p=>dateAgent?.recognizes(p)?[p]:options(entry,p).length?options(entry,p):searchInput(entry)?[searchInput(entry)]:[],{timeout:3500});
       const found=options(entry);trace(entry,'观察',`读取 ${found.length} 个选项`);return found;
     }
     function unique(pool,wanted,entry){
       if(entry?.meta?.datePart||root.ResumeProAIHelpers.selectEnumTopic(entry?.meta))return pool.filter(n=>root.ResumeProAIHelpers.findSelectOptionIndex([optionText(n)],wanted,entry.meta)>=0);
       const exact=pool.filter(n=>norm(optionText(n))===norm(wanted));
       if(exact.length)return exact;
-      if(entry?.structuralChoice)return [];
-      return pool.filter(n=>root.ResumeProAIHelpers.findSelectOptionIndex([optionText(n)],wanted)>=0);
+      if(/籍贯|生源地|户口|城市|地区|省市|工作地|居住|地址|所在地/.test(entry?.meta?.label||'')){
+        const region=text=>norm(text).replace(/(?:壮族自治区|回族自治区|维吾尔自治区|自治区|特别行政区|省|市)$/,'');
+        const target=region(wanted);
+        if(target.length>=2)return pool.filter(n=>region(optionText(n))===target);
+      }
+      // Substrings are not identity: 选项4 must not match 选项49, and a broader
+      // major/category must not replace a sourced specific major.
+      return [];
     }
-    function scroll(entry){
+    async function scroll(entry,pool=options(entry)){
       const p=panel(entry);if(!p)return false;
-      const scroller=[p,...p.querySelectorAll('*')].find(n=>visible(n)&&n.clientHeight>20&&n.scrollHeight>n.clientHeight+4&&n.scrollTop+n.clientHeight<n.scrollHeight-2);
+      const scroller=[p,...dom.queryAll(p,'*',500)].filter(n=>visible(n)&&n.clientHeight>20&&n.scrollHeight>n.clientHeight+4
+        &&/(auto|scroll)/.test(getComputedStyle(n).overflowY)&&pool.some(option=>n.contains(option)))
+        .sort((a,b)=>a.contains(b)?1:b.contains(a)?-1:0)
+        .find(n=>n.scrollTop+n.clientHeight<n.scrollHeight-2);
       if(!scroller)return false;
-      scroller.scrollTop+=Math.max(30,scroller.clientHeight-10);scroller.dispatchEvent(new Event('scroll',{bubbles:true}));trace(entry,'滚动');return true;
+      const before=scroller.scrollTop;
+      scroller.scrollTop=Math.min(scroller.scrollHeight-scroller.clientHeight,before+Math.max(20,scroller.clientHeight*.8));
+      if(scroller.scrollTop<=before)return false;
+      scroller.dispatchEvent(new Event('scroll',{bubbles:true}));
+      await new Promise(resolve=>requestAnimationFrame(()=>resolve()));
+      await popup.settle(entry,p=>options(entry,p),{timeout:1600});trace(entry,'滚动','重新采集当前可见选项');return true;
     }
     function searchInput(entry){
-      const selector='input:not([readonly]):not([disabled]):not(.phoenix-select__input--unText)';
-      const local=entry.root.matches(selector)?entry.root:entry.root.querySelector(selector);
-      if(local&&visible(local))return local;
+      const selector='input:is([type="text"],[type="search"],:not([type])):not([readonly]):not([disabled]):not(.phoenix-select__input--unText)';
+      const local=entry.root.matches(selector)?[entry.root]:dom.queryAll(entry.root,selector).filter(visible);
+      if(local.length===1&&visible(local[0]))return local[0];
       // Phoenix places the editable search in the owning portal, not in its non-search trigger.
-      const remote=Array.from(panel(entry)?.querySelectorAll(`${selector}[type="search"], .phoenix-search input, .phoenix-input__input:not([readonly]):not([disabled])`)||[]).filter(visible);
+      const remote=dom.queryAll(panel(entry),selector).filter(visible);
       return remote.length===1?remote[0]:null;
     }
     async function search(entry,wanted){
@@ -282,9 +326,10 @@
       const part=root.ResumeProAIHelpers.normalizeDatePart(wanted,entry.meta?.datePart);
       const query=part?String(Number(part)):String(wanted);
       const delegated=config.input?.(input,query);
-      if(delegated)await delegated;else {input.focus();setter.call(input,query);input.dispatchEvent(new Event('input',{bubbles:true}));}
+      if(delegated)await delegated;else {input.focus();setter.call(input,query);input.dispatchEvent(new InputEvent('input',{bubbles:true,composed:true,data:query,inputType:'insertText'}));}
       trace(entry,'搜索',query!==String(wanted)?`${wanted} → ${query}`:'');entry.remoteOptions=true;
-      await until(()=>unique(options(entry),wanted,entry).length>0,2200);return true;
+      await until(()=>unique(options(entry),wanted,entry).length>0,3500);
+      await popup.settle(entry,p=>options(entry,p),{timeout:1600,allowEmpty:true});return true;
     }
     async function choose(entry,node,value){
       const selectedText=optionText(node),before=tokens(entry),hadToken=before.length>0;
@@ -317,75 +362,134 @@
         const shown=read(entry);
         if(norm(shown)===norm(selectedText)||norm(shown)===norm(value))return true;
         return false;
-      },1800);
+      },4000);
       if(!success)return false;
-      if(!await close(entry))return false;
-      localInput(entry)?.blur();
+      entry.choiceCommitted=true;
+      if(!await close(entry,{committed:true}))return false;
       await wait(180);
       const shown=read(entry);
-      return norm(shown)===norm(selectedText)||norm(shown)===norm(value);
+      const retained=norm(shown)===norm(selectedText)||norm(shown)===norm(value);
+      if(!retained)entry.choiceCommitted=false;
+      return retained;
+    }
+    function multiple(entry,p=panel(entry)){
+      return Boolean(entry.root.matches('[aria-multiselectable="true"]')||p&&(p.matches('[aria-multiselectable="true"]')
+        ||p.querySelector('[aria-multiselectable="true"],[role="option"] input[type="checkbox"],[role="option"] [role="checkbox"]')));
+    }
+    function levelOptions(entry,level,parts){
+      const all=options(entry),columns=dom.optionColumns(all);
+      return !multiple(entry)&&parts.length>1&&columns.length>1?(columns[level]||[]):all;
+    }
+    const signature=nodes=>JSON.stringify(nodes.map(n=>optionText(n)));
+    async function decideOption(entry,pool,wanted){
+      if(!entry.decide||!pool.length||pool.length>60||new Set(pool.map(n=>norm(optionText(n)))).size!==pool.length)return null;
+      const before=signature(pool),candidates=[{id:'stop',kind:'stop',label:'没有等价选项，停止'},
+        ...pool.map((n,index)=>({id:'option-'+index,kind:'choose',label:optionText(n),index}))];
+      const action=root.ResumeProInteractionAgent.validate(await entry.decide({mode:'choose-option',fieldLabel:entry.meta?.label||'',
+        resumeValue:wanted,target:wanted,levelTarget:wanted,options:pool.map((n,index)=>({id:'option-'+index,text:optionText(n)})),candidates}),candidates);
+      if(action.kind==='stop')return null;
+      // Only an index in this observed list is accepted. No DOM references are
+      // retained across the request; the caller checks the list again.
+      trace(entry,'AI 单步选项','仅从已观察的等价候选中选择');return {text:optionText(pool[action.index]),before};
     }
     async function fillRules(entry,value){
-      entry.interactions=[];entry.verifiedChoice='';entry.fillIssue='';
       const strict=entry.meta?.datePart||root.ResumeProAIHelpers.selectEnumTopic(entry.meta);
-      const start=Date.now();const parts=String(value).split(/[\/／]/).map(s=>s.trim()).filter(Boolean);
-      const fail=async(note,code='')=>{if(code)entry.failureCode||=code;entry.fillNote=note;trace(entry,'停止',note);await close(entry);return result(entry,false,code);};
+      const start=Date.now();
+      const fail=async(note,code='')=>{if(code)entry.failureCode||=code;entry.fillNote=note;trace(entry,'停止',note);
+        if(!entry.popupBlocked)await close(entry);return result(entry,false,code);};
       if(!live(entry))return fail('控件已替换，无法唯一定位');
       if(read(entry))return fail('控件已有内容，未覆盖');
       const query=entry.structuralChoice?localInput(entry)?.value?.trim():'';
       const dateQuery=entry.meta?.datePart&&root.ResumeProAIHelpers.normalizeDatePart(query,entry.meta.datePart);
       if(query&&norm(query)!==norm(value)&&!dateQuery)return fail('输入框已有未确认的搜索文字，请先核对，未覆盖');
       await open(entry);
-      // Incomplete numeric date queries left by an earlier attempt are not
-      // existing selected values. Replace only the query with the grounded target.
+      const isMulti=multiple(entry);entry.multipleChoice=isMulti;
+      const parts=options(entry).some(n=>norm(optionText(n))===norm(value))?[String(value).trim()]
+        :String(value).split(isMulti?/[\/／、,，]/:/[\/／>＞→]/).map(s=>s.trim()).filter(Boolean);
+      if(!parts.length||parts.length>8)return fail('选项层级或数量不明确');
       if(dateQuery&&dateQuery!==root.ResumeProAIHelpers.normalizeDatePart(value,entry.meta.datePart))await search(entry,value);
       for(let level=0;level<parts.length;level++){
-        const wanted=parts[level];let searched=false,clicked=false;
-        for(let step=0;step<14&&Date.now()-start<15000;step++){
+        const wanted=parts[level];let searched=false,asked=false,clicked=false;
+        for(let step=0;step<70&&Date.now()-start<25000;step++){
           if(!live(entry))return fail('控件已替换，无法唯一定位');
-          const pool=options(entry);if(pool.length)entry.observedOptions=pool.map(optionText).slice(0,60);
-          const matches=unique(pool,wanted,entry);
+          if(entry.panelAmbiguous)return fail('存在多个候选弹层，无法确认当前选项归属','POPUP_OWNERSHIP_UNCONFIRMED');
+          const settled=await popup.settle(entry,p=>options(entry,p),{timeout:1800,allowEmpty:true});
+          if(!settled.ready){
+            if(entry.panelAmbiguous)return fail('存在多个候选弹层，无法确认当前选项归属','POPUP_OWNERSHIP_UNCONFIRMED');
+            // Some autocompletes mount their first portal only after typing.
+            // The already-open owner may supply that search capability itself.
+            if(!panel(entry)&&!searched&&searchInput(entry)){searched=true;await search(entry,wanted);}
+            continue;
+          }
+          let pool=levelOptions(entry,level,parts),matches=unique(pool,wanted,entry);
+          if(pool.length)entry.observedOptions=[...new Set([...(entry.observedOptions||[]),...pool.map(optionText)])].slice(-100);
           if(matches.length>1)return fail('存在多个同名选项，未猜测');
-          if(matches.length===1){
-            // Re-observe immediately before clicking: a remote search can replace every option node.
-            const fresh=unique(options(entry),wanted,entry);if(fresh.length!==1)continue;
-            const selectedText=optionText(fresh[0]);
-            trace(entry,'选择',`第 ${level+1} 级：${selectedText}`);clicked=true;
-            if(level<parts.length-1){
-              popup.transition(entry,states.SELECTING);
-              await click(fresh[0]);
-              await until(()=>unique(options(entry),parts[level+1],entry).length>0);
-              popup.transition(entry,states.OPEN);
-              break;
+          if(!matches.length){
+            if(!searched){searched=true;if(await search(entry,wanted))continue;}
+            if(await scroll(entry,pool))continue;
+            if(!pool.length){
+              if(await until(()=>levelOptions(entry,level,parts).length||entry.panelAmbiguous,2000))continue;
+              return fail('候选列表未完成加载或未识别到可验证选项');
             }
-            let success;
-            try{success=await choose(entry,fresh[0],value);}
-            catch(error){
-              // The CDP channel rechecks hover changes before any mouse press. A replaced
-              // node may be retried only after another unique, local observation.
-              if(error.code==='input_target_missing'&&live(entry)&&unique(options(entry),wanted,entry).length===1){trace(entry,'重新观察','候选在点击前被替换');continue;}
-              rememberError(entry,error);
-              return fail(error.message);
+            if(!strict&&!asked&&entry.decide){
+              asked=true;const choice=await decideOption(entry,pool,wanted);
+              const fresh=levelOptions(entry,level,parts);
+              if(choice&&signature(fresh)===choice.before){matches=fresh.filter(n=>optionText(n)===choice.text);pool=fresh;}
+              else if(choice){trace(entry,'重新观察','模型等待期间选项变化，未使用旧索引');continue;}
             }
-            if(success){
-              entry.verifiedChoice=read(entry);entry.fillNote='';trace(entry,'核对','页面保留选中内容');return result(entry,true);
+            if(matches.length!==1){
+              entry.fillIssue='choice-mismatch';
+              return fail(`资料值“${wanted}”没有唯一等价选项，请人工确认；页面选项：${(entry.observedOptions||[]).join('、')}`);
             }
-            return fail('点击后未确认选中；搜索文字不算选择成功','OPTION_COMMIT_UNCONFIRMED');
           }
-          // Searching an unavailable level must not erase a populated finite
-          // vocabulary and disguise its mismatch as a driver failure.
-          if(strict&&pool.length){
-            if(scroll(entry)){await wait(120);continue;}
-            await wait(600);
-            if(unique(options(entry),wanted,entry).length)continue;
-            entry.fillIssue='choice-mismatch';
-            return fail(`资料值“${wanted}”没有唯一等价选项，请人工确认；页面选项：${entry.observedOptions.join('、')}`);
+          const selectedText=optionText(matches[0]);
+          const fresh=levelOptions(entry,level,parts).filter(n=>optionText(n)===selectedText);
+          if(fresh.length!==1)continue;
+          trace(entry,'选择',`第 ${level+1} 级：${selectedText}`);clicked=true;
+          if(isMulti){
+            const selected=n=>n.getAttribute('aria-selected')==='true'||n.getAttribute('aria-checked')==='true'
+              ||Boolean(n.querySelector('input[type="checkbox"]:checked,[role="checkbox"][aria-checked="true"]'));
+            popup.transition(entry,states.SELECTING);
+            if(!selected(fresh[0])&&!await click(fresh[0]))return fail('多选项未能安全点击','OPTION_COMMIT_UNCONFIRMED');
+            if(!await until(()=>options(entry).some(n=>optionText(n)===selectedText&&selected(n)),3500))return fail('未确认多选项进入选中状态','OPTION_COMMIT_UNCONFIRMED');
+            popup.transition(entry,states.OPEN);break;
           }
-          if(!searched){searched=true;if(await search(entry,wanted))continue;}
-          if(scroll(entry)){await wait(120);continue;}
-          await until(()=>unique(options(entry),wanted,entry).length>0,600);
+          if(level<parts.length-1){
+            const previousNodes=levelOptions(entry,level+1,parts),previous=signature(previousNodes),oldPanel=panel(entry),oldColumns=dom.optionColumns(options(entry)).length;
+            const parentWasSelected=fresh[0].getAttribute('aria-selected')==='true';
+            popup.transition(entry,states.SELECTING);
+            if(!await click(fresh[0]))return fail('级联选项未能安全点击','OPTION_COMMIT_UNCONFIRMED');
+            const advanced=await until(()=>{
+              const next=levelOptions(entry,level+1,parts);
+              return next.length&&(panel(entry)!==oldPanel||!fresh[0].isConnected||next.some(n=>!previousNodes.includes(n))
+                ||signature(next)!==previous||dom.optionColumns(options(entry)).length>oldColumns
+                ||parentWasSelected&&fresh[0].getAttribute('aria-selected')==='true'&&unique(next,parts[level+1],entry).length===1);
+            },4000);
+            if(!advanced)return fail('点击父级后未确认对应子列更新','OPTION_COMMIT_UNCONFIRMED');
+            await popup.settle(entry,p=>options(entry,p),{timeout:1800});popup.transition(entry,states.OPEN);break;
+          }
+          let success;
+          try{success=await choose(entry,fresh[0],value);}
+          catch(error){
+            if(error.code==='input_target_missing'&&live(entry)&&levelOptions(entry,level,parts).filter(n=>optionText(n)===selectedText).length===1){trace(entry,'重新观察','候选在点击前被替换');clicked=false;continue;}
+            rememberError(entry,error);return fail(error.message);
+          }
+          if(success){entry.verifiedChoice=read(entry);entry.fillNote='';trace(entry,'核对','页面保留选中内容');return result(entry,true);}
+          if(entry.choiceCommitted)return fail('目标选项已读回，但弹层未能安全关闭');
+          return fail('点击后未确认选中；搜索文字不算选择成功','OPTION_COMMIT_UNCONFIRMED');
         }
-        if(!clicked)return fail(panel(entry)?'未找到唯一匹配选项':'无法确认当前控件对应的下拉面板');
+        if(!clicked)return fail('选项查找达到时间或滚动步数上限');
+      }
+      if(isMulti){
+        // Checked state is evidence of selection; search input alone never is.
+        entry.selectionProof={text:parts.join(' / '),tokens:JSON.stringify(tokens(entry))};selectionProofs.set(entry.root,entry.selectionProof);uncommittedRoots.delete(entry.root);
+        if(!await close(entry,{committed:true}))return false;
+        await wait(180);
+        const actual=read(entry),chosen=actual.split(/\s*[\/／]\s*/).map(norm);
+        if(chosen.length===parts.length&&parts.every(part=>chosen.includes(norm(part)))){
+          entry.verifiedChoice=actual;entry.fillNote='';trace(entry,'核对','页面保留全部目标选项');return true;
+        }
+        return fail('多选关闭后读回与目标不一致','OPTION_COMMIT_UNCONFIRMED');
       }
       return fail('交互次数或等待时间达到上限');
     }
@@ -403,61 +507,12 @@
           }
         }catch(error){rememberError(entry,error);entry.fillNote=error.message;await close(entry);return false;}
       }
-      if(!entry.decide||entry.structuralChoice||entry.meta?.datePart||root.ResumeProAIHelpers.selectEnumTopic(entry.meta)){
-        try{return await fillRules(entry,value);}
-        catch(error){rememberError(entry,error);entry.fillNote=error.message;trace(entry,'停止',error.message);await close(entry);return false;}
-      }
-      entry.interactions=[];entry.verifiedChoice='';entry.fillIssue='';
-      if(read(entry)){entry.fillNote='控件已有内容，未覆盖';return false;}
-      const parts=String(value).split(/[\/／]/).map(x=>x.trim()).filter(Boolean);
-      let level=0,searched=false,selected='',lastAction='尚未操作',revision=0;
-      const observe=()=>{
-        if(!live(entry))return {blocked:'控件无法唯一定位'};
-        const p=panel(entry);if(p)adoptPanel(entry,p);
-        const pool=p?options(entry):[],wanted=parts[level];
-        const matches=unique(pool,wanted,entry);
-        if(matches.length>1)return {blocked:'存在多个匹配选项，未猜测'};
-        const candidates=[{id:'stop',kind:'stop',label:'停止并交给用户'}];
-        if(!p)candidates.push({id:'open',kind:'open',label:'打开当前控件'});
-        else {
-          if(matches.length===1){const index=pool.indexOf(matches[0]);candidates.push({id:'option-'+index,kind:'choose',index,label:optionText(matches[0])});}
-          else pool.slice(0,60).forEach((node,index)=>{const label=optionText(node);if(label&&!placeholder(label)&&pool.filter(n=>norm(optionText(n))===norm(label)).length===1)candidates.push({id:'option-'+index,kind:'choose',index,label});});
-          const input=searchInput(entry);
-          if(input&&!searched)candidates.push({id:'search',kind:'search',label:'搜索当前层级目标'});
-          candidates.push({id:'wait',kind:'wait',label:'等待异步选项'},{id:'scroll',kind:'scroll',label:'滚动当前面板'});
-        }
-        const snapshot={field:entry.meta,record:entry.recordContext,target:value,level,levelTarget:wanted,current:read(entry),options:pool.map(optionText).slice(0,60),lastAction,candidates};
-        return {...snapshot,fingerprint:JSON.stringify([revision,level,Boolean(p),snapshot.current,snapshot.options,candidates])};
-      };
-      try{
-        const ok=await root.ResumeProInteractionAgent.run({observe,decide:entry.decide,trace:(a,d)=>trace(entry,a,d),
-          execute:async action=>{
-            revision++;lastAction=action.kind;
-            if(action.kind==='open')await open(entry);
-            if(action.kind==='search'){searched=true;await search(entry,parts[level]);}
-            if(action.kind==='wait')await wait(600);
-            if(action.kind==='scroll'){scroll(entry);await wait(200);}
-            if(action.kind==='choose'){
-              popup.transition(entry,states.SELECTING);
-              const node=options(entry)[action.index];selected=optionText(node);await click(node);
-              if(level<parts.length-1){level++;searched=false;selected='';await wait(250);popup.transition(entry,states.OPEN);}
-              else popup.transition(entry,states.VERIFYING);
-            }
-          },
-          verify:async()=>{
-            if(!selected)return false;
-            const success=await until(()=>norm(read(entry))===norm(value)||norm(read(entry))===norm(selected),1800);
-            if(!success){lastAction='点击未保留选中结果';selected='';return false;}
-            if(!await close(entry))return false;await wait(180);
-            if(norm(read(entry))!==norm(value)&&norm(read(entry))!==norm(selected)){selected='';return false;}
-            entry.verifiedChoice=read(entry);trace(entry,'核对','页面保留选中内容');return true;
-          }});
-        entry.fillNote=ok?'':`AI 未确认结果；当前选项：${options(entry).map(optionText).slice(0,12).join('、')||'未读到'}`;return ok;
-      }catch(error){rememberError(entry,error);entry.fillNote=error.message;trace(entry,'停止',error.message);return false;}
-      finally{await close(entry);}
+      try{return await fillRules(entry,value);}
+      catch(error){rememberError(entry,error);entry.fillNote=error.message;trace(entry,'停止',error.message);if(!entry.popupBlocked)await close(entry);return false;}
     }
     async function fill(entry,value){
       entry.interactionResult=null;entry.recoveryEvidence={};entry.failureCode='';entry.recoveryFailureCode='';entry.popupBlocked=false;
+      entry.interactions=[];entry.verifiedChoice='';entry.fillIssue='';entry.observedOptions=[];entry.choiceCommitted=false;
       const ok=await fillControl(entry,value);
       return result(entry,ok,entry.interactionResult?.code||'');
     }

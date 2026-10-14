@@ -3,17 +3,29 @@
   'use strict';
   const SIDEBAR = 'resume-pro-sidebar';
   const catalog=self.ResumeProControlCatalog;
+  const dom=self.ResumeProPopupController;
   const ROOT = [catalog?.selector('selectRoot'),catalog?.selector('dateRoot'),catalog?.selector('captureRoot'),'[class*="sd-Dropdown-container"],[class*="date-picker"],[class*="calendar-picker"],.ant-picker,[class*="date-editor"],.phoenix-select,[role="combobox"],[class*="select__cont"],[class*="select-selector"],[class*="select-selection"]'].filter(Boolean).join(',');
   const PANEL = [catalog?.selector('selectPanel'),catalog?.selector('datePanel'),'[role="listbox"],[role="dialog"],[class*="calendar"],[class*="picker-panel"],[class*="picker-dropdown"],[class*="dropdown"],[class*="popover"]'].filter(Boolean).join(',');
   const OMIT = 'script,style,link,iframe,object,embed,svg,canvas';
   const ATTRS = ['class','role','type','placeholder','aria-expanded','aria-hidden','aria-disabled','aria-haspopup','aria-selected','tabindex','readonly','disabled','contenteditable'];
-  const visible = n => {const r=n.getBoundingClientRect(),s=getComputedStyle(n);return r.width>0&&r.height>0&&s.display!=='none'&&s.visibility!=='hidden'&&s.opacity!=='0';};
+  const visible = n => {
+    const r=n.getBoundingClientRect();if(!r.width||!r.height)return false;
+    for(let parent=n;parent;parent=parent.parentElement||parent.getRootNode().host){const s=getComputedStyle(parent);
+      if(parent.matches('[hidden],[aria-hidden="true"],[inert]')||s.display==='none'||s.visibility==='hidden'||s.opacity==='0')return false;}
+    return true;
+  };
   function create({onUpdate=()=>{},getInteractionFailures=()=>[]}={}) {
     let data, active=false, auto=false, root=null, target=null, baseline=new Set(), discovered=new Set(), observer=null, deadline=null, debounce=null;
     let timers=new Set(), ids=new WeakMap(), nextId=0, count=0;
     const id=n=>{if(!n)return null;if(!ids.has(n))ids.set(n,'n'+(++nextId));return ids.get(n);};
     const ignored=n=>!n||n.nodeType!==1||n.closest('#'+SIDEBAR);
-    const panels=()=>[...new Set(Array.from(document.querySelectorAll(PANEL)).filter(n=>catalog?.isPopup(n)!==false).map(n=>catalog?.popupRoot(n)||n))].filter(n=>!ignored(n)&&visible(n)&&!n.matches('body,html')).filter((n,i,a)=>!a.some(p=>p!==n&&p.contains(n)));
+    const panels=()=>{
+      const nodes=dom.queryAll(document,PANEL);
+      for(const n of dom.queryAll(document,'*',4000))if(['absolute','fixed'].includes(getComputedStyle(n).position)&&dom.structuralOptions(n,visible).length)nodes.push(n);
+      return [...new Set(nodes.filter(n=>catalog?.isPopup(n)!==false).map(n=>catalog?.popupRoot(n)||n))]
+        .filter(n=>!ignored(n)&&visible(n)&&!n.matches('body,html,form,main')&&!n.contains(root))
+        .filter((n,i,a)=>!a.some(p=>p!==n&&p.contains(n)));
+    };
     const notify=message=>onUpdate({active,selected:Boolean(root),count:data?.snapshots.length||0,message});
     function describe(n) {
       const r=n.getBoundingClientRect(),s=getComputedStyle(n);
@@ -43,6 +55,7 @@
       if(depth>=12){if(n.children.length)out.truncated='depth limit';return out;}
       out.children=[];
       for(const c of n.children){if(count>=600){out.truncated='node limit';break;}if(!ignored(c)&&!c.matches(OMIT))out.children.push(tree(c,depth+1));}
+      if(n.shadowRoot)out.shadowChildren=Array.from(n.shadowRoot.children).filter(c=>!ignored(c)&&!c.matches(OMIT)).map(c=>tree(c,depth+1));
       return out;
     }
     function capture(reason='手动采集',meta) {
@@ -59,6 +72,7 @@
       const field=catalog?.fieldRoot(target||root);
       if(field&&!field.contains(document.getElementById(SIDEBAR)))snapshot.fieldContext=tree(field);
       snapshot.panels=popups.map(n=>tree(n));
+      if(data.mode==='current-page-read-only')snapshot.panelOwnership='unconfirmed';
       const family=catalog?.identify(target||root);
       if(family)snapshot.controlContract={...family,catalogVersion:catalog.version};
       if(meta)snapshot.auto={...meta};
@@ -91,7 +105,9 @@
       if(auto)return;
       const n=event.composedPath().find(n=>n?.nodeType===1);
       if(ignored(n)||event.composedPath().some(n=>n?.id===SIDEBAR))return;
-      if(!root){const chosen=selectRoot(n);if(!chosen||chosen.matches('body,html,form'))return notify('请直接点击日期框、下拉框或输入框，当前仍在等待选择。');target=n;root=chosen;baseline=new Set(panels());capture('点击前');}
+      if(!root){const chosen=selectRoot(n);if(!chosen||chosen.matches('body,html,form'))return notify('请直接点击日期框、下拉框或输入框，当前仍在等待选择。');target=n;root=chosen;
+        if(root.getRootNode()!==document)observer?.observe(root.getRootNode(),{subtree:true,childList:true,attributes:true,characterData:true});
+        baseline=new Set(panels());capture('点击前');}
       else capture('后续点击前');
       for(const delay of [350,1300,2600]){const t=setTimeout(()=>{timers.delete(t);if(active)capture('点击后 '+delay+'ms');},delay);timers.add(t);}
     }
@@ -113,6 +129,7 @@
         if(!auto&&records.some(r=>!ignored(r.target.nodeType===1?r.target:r.target.parentElement)))schedule('页面结构变化');
       });
       observer.observe(document.body,{subtree:true,childList:true,attributes:true,characterData:true});
+      for(const n of dom.queryAll(document,'*',4000))if(n.shadowRoot)observer.observe(n.shadowRoot,{subtree:true,childList:true,attributes:true,characterData:true});
       deadline=setTimeout(()=>stop(`已满 ${Math.round(deadlineMs/1000)} 秒，采集停止，可以导出。`),deadlineMs);
       notify('请点击网页中有问题的日期框或下拉框，再展开面板。'+Math.round(deadlineMs/1000)+' 秒后自动停止。');
     }
@@ -126,7 +143,10 @@
         if(!chosen||ignored(chosen)||seen.has(chosen))continue;
         if(data.snapshots.length>=24){data.truncated=true;break;}
         seen.add(chosen);
-        target=node;root=chosen;baseline=new Set(panels());discovered=new Set();
+        // This export records candidates, not claimed ownership. Include the
+        // already-open popup that caused the failed run rather than excluding
+        // every visible layer as the "before" baseline.
+        target=node;root=chosen;baseline=new Set();discovered=new Set();
         capture('当前结构（无点击、无输入）',{reason:item.reason||'page-scan',control:item.control||'',hint:item.hint||'',
           ...(item.labelSafe&&item.label?{label:item.label}: {})});
       }

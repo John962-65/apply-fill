@@ -65,7 +65,8 @@ function modelMatches(message){
     assert.equal(result.submitted['major-2-selected'],'major-2-choice-0');
     assert.equal(result.queries['level-1'],'硕士研究生');assert.equal(result.queries['level-2'],'本科');
     for(let n=1;n<=2;n++)for(const edge of ['start','end']){const [y,m]=period[n-1][edge==='start'?0:1].split('-');assert.equal(result.queries[`education-${n}-${edge}-year`],y+'年');assert.equal(result.queries[`education-${n}-${edge}-month`],Number(m)+'月');}
-    assert.ok(result.stats.maxOpen<=1,JSON.stringify({mode,stats:result.stats,trace:result.trace}));assert.ok(inputKinds.includes('key'));
+    assert.ok(result.stats.maxOpen<=1,JSON.stringify({mode,stats:result.stats,trace:result.trace}));
+    if(mode==='normal')assert.ok(!inputKinds.includes('key'),'naturally committed selections must not receive a forced Escape');
     if(mode.includes('rerender'))assert.equal(result.stats.replacements,20);
     if(mode==='hover-replace'){assert.equal(result.stats.hoverReplaced,1);assert.match(result.trace,/重新观察/);}
     console.log('PASS autocomplete full form, real selected IDs + closed popups:',mode);
@@ -77,8 +78,9 @@ function modelMatches(message){
     for(const edge of ['start','end'])for(const part of ['year','month'])assert.equal(result.queries[`education-1-${edge}-${part}`],'');
     console.log('PASS confirmed manual choice preserved:',mode);
    }else if(mode==='blocked'){
-    assert.equal(result.queries['person-name'],'');assert.equal(result.queries.summary,'');assert.equal(result.stats.selected.length,0);assert.match(result.trace,/暂停后续填写/);assert.match(result.status,/已填写 0 个字段/);
-    console.log('PASS unclosed popup stops all later fields:',mode);
+    assert.equal(result.queries['person-name'],'匿名候选人');assert.equal(result.queries.summary,'乐于学习与团队合作。');assert.equal(result.stats.selected.length,0);
+    assert.match(result.trace,/局部继续/);assert.match(result.trace,/局部跳过/);assert.match(result.status,/已填写 4 个字段/);
+    console.log('PASS unclosed local popup defers complex controls and permits only proven independent text:',mode);
    }else{
     assert.equal(result.submitted['school-1-selected'],'');assert.equal(result.schoolRead,'');assert.equal(result.schoolVerified,false);assert.ok(!result.collected.some(f=>f.value==='示例大学'&&f.recordIndex===1));
     if(mode==='manual-query')assert.equal(result.queries['school-1'],'待核对学校');

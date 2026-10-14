@@ -5,6 +5,22 @@ const ai = require("../ai-helpers.js");
 
 const field = (key, value) => ({ key, value });
 
+test('枚举只做用途内的等价转换，保留预备党员、考试类别与院校限定',()=>{
+  const match=(label,value,options)=>ai.findSelectOptionIndex(options,value,{label});
+  assert.equal(match('政治面貌','中共党员',['中国共产党预备党员','中国共产党党员']),1);
+  assert.equal(match('政治面貌','中共预备党员',['中国共产党党员']),-1);
+  assert.equal(match('英语等级','CET-4',['英语专业四级','大学英语四级']),1);
+  assert.equal(match('英语等级','TEM4',['大学英语四级']),-1);
+  assert.equal(match('院校层次','985',['211工程高校','985工程高校']),1);
+  assert.equal(match('院校层次','985',['双一流建设高校']),-1);
+  assert.equal(match('院校性质','公办',['民办院校','公办学校']),1);
+  assert.equal(match('学历','本科',['全日制本科']),-1);
+  assert.equal(match('学位','学士',['本科']),-1);
+  assert.equal(ai.findResumeSource('大学英语四级',[{key:'英语等级',value:'CET4'}],{label:'英语等级'}).relation,'equivalent');
+  assert.equal(ai.findResumeSource('中国共产党党员',[{key:'政治面貌',value:'中共党员'}],{label:'政治面貌'}).relation,'equivalent');
+  assert.equal(ai.findResumeSource('中国共产党党员',[{key:'家庭成员政治面貌备注',value:'中共党员'}],{label:'政治面貌'}).relation,'none');
+});
+
 test("电话只认来源字段自己写着手机/电话的那条，账号类号码不再顶替", () => {
   assert.equal(ai.isResumeFieldMatch("phone", field("QQ", "987654321"), {}), false);
   assert.equal(ai.isResumeFieldMatch("phone", field("微信号", "wxid_123456"), {}), false);

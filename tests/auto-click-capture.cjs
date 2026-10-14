@@ -57,6 +57,7 @@ const statusOf=()=>document.getElementById('resume-pro-sidebar').shadowRoot.getE
   const unit=await browser.newPage();
   await unit.setContent('<div id="resume-pro-sidebar"></div><div class="atsx-select"><div class="atsx-select-selector" role="combobox" id="t">请选择</div></div>');
   await unit.evaluate(()=>{self.chrome={runtime:{getManifest:()=>({version:'test'})}};});
+  await unit.addScriptTag({path:path.resolve(__dirname,'../popup-controller.js')});
   await unit.addScriptTag({path:path.resolve(__dirname,'../control-capture.js')});
   const autoEscape=await unit.evaluate(()=>{
    const recorder=ResumeProControlCapture.create({});

@@ -86,7 +86,7 @@
             trace(entry,'提交诊断',`读回匹配=${same()?'是':'否'}；面板=${observedPanel}；稳定关闭=${isClosed?.(entry)?'是':'否'}`);
             return fail('点击月份/日期后页面未确认保留目标值','OPTION_COMMIT_UNCONFIRMED');
           }
-          const wasClosed=await close(entry);
+          const wasClosed=await close(entry,{committed:true});
           if(!wasClosed){
             entry.fillNote='目标值已读回，但日历未能安全关闭';
             trace(entry,'日历停止',entry.fillNote);

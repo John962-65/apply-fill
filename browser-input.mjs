@@ -22,6 +22,24 @@ function readPoint(result) {
  if (!Number.isFinite(value.point?.x) || !Number.isFinite(value.point?.y)) throw inputError('input_observation');
  return value.point;
 }
+function taggedNodes(token){
+ const found=[],queue=[document],seen=new Set();
+ while(queue.length&&seen.size<24){
+  const scope=queue.shift();if(seen.has(scope))continue;seen.add(scope);
+  found.push(...scope.querySelectorAll('[data-applyfill-input="'+token+'"]'));
+  for(const n of Array.from(scope.querySelectorAll('*')).slice(0,4000))if(n.shadowRoot)queue.push(n.shadowRoot);
+ }
+ return found;
+}
+function deepHit(x,y){
+ let n=document.elementFromPoint(x,y);
+ for(let i=0;n?.shadowRoot?.elementFromPoint&&i<16;i++){const next=n.shadowRoot.elementFromPoint(x,y);if(!next||next===n)break;n=next;}
+ return n;
+}
+function deepActive(){
+ let n=document.activeElement;for(let i=0;n?.shadowRoot?.activeElement&&i<16;i++)n=n.shadowRoot.activeElement;return n;
+}
+const observationExpression=(fn,token)=>`(${fn.toString().replaceAll('FIND_TAGGED',taggedNodes.toString()).replaceAll('DEEP_HIT',deepHit.toString()).replaceAll('DEEP_ACTIVE',deepActive.toString()).replaceAll('TOKEN',token)})()`;
 export async function performInput(send, action) {
  if (!action || typeof action !== 'object') throw inputError('input_invalid');
  if (!/^[a-f0-9-]{36}$/.test(action.token || '') || !['click', 'fill', 'key', 'dismiss'].includes(action.kind)) throw inputError('input_invalid');
@@ -31,18 +49,19 @@ export async function performInput(send, action) {
   if (action.key !== 'Escape') throw inputError('input_invalid');
   const focusOwned = () => {
    const fail = errorCode => ({ok:false,errorCode});
-   const nodes=document.querySelectorAll('[data-applyfill-input="TOKEN"]');
+   const nodes=(FIND_TAGGED)('TOKEN');
    if(nodes.length!==1)return fail(nodes.length?'input_target_ambiguous':'input_target_missing');
    const el=nodes[0];
    if(el.matches('[disabled],[aria-disabled="true"]')||el.closest('[inert]'))return fail('input_target_disabled');
    if(!el.getClientRects().length||getComputedStyle(el).visibility==='hidden')return fail('input_target_hidden');
    const focus=el.matches('input:not([type="hidden"]),textarea,select,[tabindex]')?el:el.querySelector('input:not([type="hidden"]):not([disabled]),[tabindex]');
    focus?.focus({preventScroll:true});
-   return document.activeElement===el||el.contains(document.activeElement)?{ok:true}:fail('input_focus');
+   const active=(DEEP_ACTIVE)();
+   return active===el||el.contains(active)?{ok:true}:fail('input_focus');
   };
-  const focused=await send('Runtime.evaluate',{expression:`(${focusOwned.toString().replace('TOKEN',action.token)})()`,returnByValue:true});
+  const focused=await send('Runtime.evaluate',{expression:observationExpression(focusOwned,action.token),returnByValue:true});
   if(focused.exceptionDetails||!focused.result?.value?.ok)throw inputError(focused.result?.value?.errorCode||'input_observation');
-  const confirmed=await send('Runtime.evaluate',{expression:`(()=>{const nodes=document.querySelectorAll('[data-applyfill-input="${action.token}"]');return nodes.length===1&&nodes[0].isConnected&&(nodes[0]===document.activeElement||nodes[0].contains(document.activeElement));})()`,returnByValue:true});
+  const confirmed=await send('Runtime.evaluate',{expression:`(()=>{const nodes=(${taggedNodes.toString()})(${JSON.stringify(action.token)}),active=(${deepActive.toString()})();return nodes.length===1&&nodes[0].isConnected&&(nodes[0]===active||nodes[0].contains(active));})()`,returnByValue:true});
   if(confirmed.exceptionDetails||confirmed.result?.value!==true)throw inputError('input_focus');
   for(const type of ['keyDown','keyUp'])await send('Input.dispatchKeyEvent',{type,key:'Escape',code:'Escape',windowsVirtualKeyCode:27});
   return {ok:true};
@@ -50,7 +69,7 @@ export async function performInput(send, action) {
  if (action.kind === 'fill' && (typeof action.text !== 'string' || action.text.length > 500)) throw inputError('input_too_long');
  const locate = async () => {
   const fail = errorCode => ({ok: false, errorCode});
-  const nodes = document.querySelectorAll('[data-applyfill-input="TOKEN"]');
+  const nodes = (FIND_TAGGED)('TOKEN');
   if (!nodes.length) return fail('input_target_missing');
   if (nodes.length !== 1) return fail('input_target_ambiguous');
   const el = nodes[0];
@@ -68,13 +87,19 @@ export async function performInput(send, action) {
    // Click only bare page background. A descendant of body may be a submit button;
    // containment is deliberately insufficient for this outside-click operation.
    for(const fy of [.02,.98,.1,.9,.5])for(const fx of [.02,.98,.1,.9,.5]){
-    const point={x:innerWidth*fx,y:innerHeight*fy},hit=document.elementFromPoint(point.x,point.y);
+    const point={x:innerWidth*fx,y:innerHeight*fy},hit=(DEEP_HIT)(point.x,point.y);
     if(hit===document.body||hit===document.documentElement)return {ok:true,point};
    }
    return fail('input_target_covered');
    }
   }
-  el.scrollIntoView({block: 'center', inline: 'nearest', behavior: 'instant'});
+  // Preserve a row inside a scrollable list; centering it can replace the row
+  // before pressing. Ordinary triggers still need space for their popup.
+  let scrollBlock='center';
+  for(let parent=el.parentElement;parent&&parent!==document.body;parent=parent.parentElement){
+   if(parent.scrollHeight>parent.clientHeight+4&&/(auto|scroll)/.test(getComputedStyle(parent).overflowY)){scrollBlock='nearest';break;}
+  }
+  el.scrollIntoView({block:scrollBlock,inline:'nearest',behavior:'instant'});
   let previous = '', stable = 0;
   for (let i = 0; i < 12; i++) {
    await new Promise(resolve => setTimeout(resolve, 40));
@@ -91,20 +116,20 @@ export async function performInput(send, action) {
   // Every candidate still has to hit this exact target, never a nearby control.
   for (const [fx, fy] of [[.5,.5],[.2,.2],[.8,.2],[.2,.8],[.8,.8],[.5,.2],[.5,.8],[.2,.5],[.8,.5]]) {
    const x = left + (right - left) * fx, y = top + (bottom - top) * fy;
-   const hit = document.elementFromPoint(x, y);
+   const hit = (DEEP_HIT)(x, y);
    if (hit && (el === hit || el.contains(hit))) return {ok: true, point: {x, y}};
   }
   return fail('input_target_covered');
  };
- const expression = `(${locate.toString().replace('TOKEN', action.token).replace('KIND', action.kind)})()`;
+ const expression = observationExpression(locate,action.token).replaceAll('KIND',action.kind);
  const point = readPoint(await send('Runtime.evaluate', {expression, returnByValue: true, awaitPromise: true}));
  await send('Input.dispatchMouseEvent', {...point, type: 'mouseMoved', button: 'none', clickCount: 0});
  // Hover handlers can replace a control. Check again before pressing.
  const confirm = () => {
-  const nodes = document.querySelectorAll('[data-applyfill-input="TOKEN"]');
+  const nodes = (FIND_TAGGED)('TOKEN');
   if (!nodes.length) return {ok: false, errorCode: 'input_target_missing'};
   if (nodes.length !== 1) return {ok: false, errorCode: 'input_target_ambiguous'};
-  const el = nodes[0], point = POINT, r = el.getBoundingClientRect(), hit = document.elementFromPoint(point.x, point.y);
+  const el = nodes[0], point = POINT, r = el.getBoundingClientRect(), hit = (DEEP_HIT)(point.x, point.y);
   if (el.matches('[disabled],[aria-disabled="true"]') || el.closest('[inert]')) return {ok: false, errorCode: 'input_target_disabled'};
   if('KIND'==='dismiss'){
    const label=el.matches('.ud-formily-item-label')&&el.closest('.ud-formily-item')
@@ -115,10 +140,10 @@ export async function performInput(send, action) {
   if (point.x < r.left || point.x >= r.right || point.y < r.top || point.y >= r.bottom) return {ok: false, errorCode: 'input_target_moving'};
   return hit && (el === hit || el.contains(hit)) ? {ok: true, point} : {ok: false, errorCode: 'input_target_covered'};
  };
- readPoint(await send('Runtime.evaluate', {expression: `(${confirm.toString().replace('TOKEN', action.token).replace('POINT', JSON.stringify(point)).replace('KIND',action.kind)})()`, returnByValue: true}));
+ readPoint(await send('Runtime.evaluate', {expression: observationExpression(confirm,action.token).replaceAll('POINT',JSON.stringify(point)).replaceAll('KIND',action.kind), returnByValue: true}));
  for (const type of ['mousePressed', 'mouseReleased']) await send('Input.dispatchMouseEvent', {...point, type, button: 'left', clickCount: 1});
  if (action.kind === 'fill') {
-  const focus = await send('Runtime.evaluate', {expression: `document.activeElement?.getAttribute('data-applyfill-input')===${JSON.stringify(action.token)} && !document.activeElement.readOnly && /^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName)`, returnByValue: true});
+  const focus = await send('Runtime.evaluate', {expression: `(()=>{const active=(${deepActive.toString()})();return active?.getAttribute('data-applyfill-input')===${JSON.stringify(action.token)} && !active.readOnly && /^(INPUT|TEXTAREA)$/.test(active.tagName);})()`, returnByValue: true});
   if (focus.result?.value !== true) throw inputError('input_focus');
   await send('Input.dispatchKeyEvent', {type: 'keyDown', key: 'a', code: 'KeyA', modifiers: 2, commands: ['selectAll']});
   await send('Input.dispatchKeyEvent', {type: 'keyUp', key: 'a', code: 'KeyA', modifiers: 2});

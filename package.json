@@ -7,6 +7,7 @@
     "test:ui": "node tests/browser-smoke.cjs",
     "test:forms": "node tests/form-browser.cjs",
     "test:combos": "node tests/combo-browser.cjs",
+    "test:choice-resilience": "node tests/choice-resilience.cjs",
     "test:autocomplete": "node tests/autocomplete-browser.cjs",
     "test:input": "node tests/browser-input.cjs",
     "test:run-context-stop": "node tests/run-context-stop.cjs",

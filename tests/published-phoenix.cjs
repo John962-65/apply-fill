@@ -50,12 +50,14 @@ const esbuild=require(path.join(modules,'esbuild'));
   const fill=async(id,value)=>page.evaluate(async({id,value})=>{
    const api=ResumeProHighlightTest,f=scan.fields.find(f=>f.idAttr===id),entry=scan.fieldMap.get(f.fieldId);
    entry.decide=async s=>({id:(s.candidates.find(c=>c.kind==='choose'&&c.label===s.levelTarget)||s.candidates.find(c=>c.kind==='open')||s.candidates.find(c=>c.kind==='stop')).id});
-   const ok=await api.setElementValue(entry,value);return {ok,value:api.readBackValue(entry),note:entry.fillNote,trace:entry.interactions};
+   const ok=await api.setElementValue(entry,value);return {ok,value:api.readBackValue(entry),note:entry.fillNote,trace:entry.interactions,transaction:entry.interactionResult};
   },{id,value});
   for(const id of ['degree-0','degree-1','language','proficiency']){
    const field=formFields.find(f=>f.idAttr===id),match=matched.matches.find(m=>m.fieldId===field.fieldId);assert.ok(match,id+JSON.stringify(matched));
    const value=match.value;
    const result=await fill(id,value);assert.equal(result.ok,true,id+JSON.stringify(result));assert.equal(result.value,value);
+   assert.equal(result.transaction.observation.popupOwned,false,'selected-value display layers are not popup candidates');
+   assert.equal(result.transaction.observation.popupCandidates,0);assert.equal(result.transaction.observation.state,'CLOSED');
    assert.equal(await page.locator('.phoenix-selectList:visible').count(),0,'own menu must be dismissed before the next field');
    console.log('PASS actual Phoenix components:',id,value);
   }
