@@ -1,6 +1,6 @@
 import { chromium } from '@playwright/test';
 import type { BrowserContext, Page } from '@playwright/test';
-import { mkdtempSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -82,8 +82,35 @@ export interface ExtensionSession {
   close: () => Promise<void>;
 }
 
-export async function launchExtensionContext(): Promise<ExtensionSession> {
+export async function launchExtensionContext(options?: { extraArgs?: string[] }): Promise<ExtensionSession> {
   const userDataDir = mkdtempSync(path.join(tmpdir(), 'applyfill-e2e-'));
+  const defaultDir = path.join(userDataDir, 'Default');
+  mkdirSync(defaultDir, { recursive: true });
+  const extId = 'jlejhggcppolboemhhkdjhfchihaipne';
+  const preferences = {
+    extensions: {
+      settings: {
+        [extId]: {
+          active_permissions: {
+            api: ['storage', 'sidePanel', 'webNavigation', 'scripting', 'tabs', 'activeTab'],
+            explicit_host: ['http://127.0.0.1/*', 'http://localhost/*', 'http://*/*', 'https://*/*'],
+            manifest_permissions: [],
+            scriptable_host: ['http://127.0.0.1/*', 'http://localhost/*', 'http://*/*', 'https://*/*'],
+          },
+          granted_permissions: {
+            api: ['storage', 'sidePanel', 'webNavigation', 'scripting', 'tabs', 'activeTab'],
+            explicit_host: ['http://127.0.0.1/*', 'http://localhost/*', 'http://*/*', 'https://*/*'],
+            manifest_permissions: [],
+            scriptable_host: ['http://127.0.0.1/*', 'http://localhost/*', 'http://*/*', 'https://*/*'],
+          },
+          location: 8,
+          path: EXTENSION_PATH,
+        },
+      },
+    },
+  };
+  writeFileSync(path.join(defaultDir, 'Preferences'), JSON.stringify(preferences));
+
   const headless = process.env.APPLYFILL_E2E_HEADFUL !== '1';
   const context = await chromium.launchPersistentContext(userDataDir, {
     channel: 'chromium',
@@ -94,6 +121,7 @@ export async function launchExtensionContext(): Promise<ExtensionSession> {
       `--load-extension=${EXTENSION_PATH}`,
       '--no-first-run',
       '--no-default-browser-check',
+      ...(options?.extraArgs ?? []),
     ],
   });
   let [serviceWorker] = context.serviceWorkers();

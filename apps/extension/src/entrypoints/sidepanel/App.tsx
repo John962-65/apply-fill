@@ -50,6 +50,8 @@ export function App() {
         setRunState(message.state);
       } else if (message.type === 'RUN_EVENT') {
         port.postMessage({ type: 'PANEL_COMMAND', command: 'GET_STATE' } satisfies PanelPortMessage);
+      } else if (message.type === 'TAB_INFO_UPDATED') {
+        setTabInfo(message.info);
       } else if (message.type === 'COMMAND_RESULT') {
         setBusy(false);
         setNotice(message.message ?? '');
@@ -65,6 +67,21 @@ export function App() {
     };
   }, [refreshInfo]);
 
+  useEffect(() => {
+    const handleActivated = () => void refreshInfo();
+    const handleUpdated = (_tabId: number, change: { url?: string; status?: string }) => {
+      if (change.url || change.status === 'complete') {
+        void refreshInfo();
+      }
+    };
+    chrome.tabs.onActivated.addListener(handleActivated);
+    chrome.tabs.onUpdated.addListener(handleUpdated);
+    return () => {
+      chrome.tabs.onActivated.removeListener(handleActivated);
+      chrome.tabs.onUpdated.removeListener(handleUpdated);
+    };
+  }, [refreshInfo]);
+
   const sendCommand = useCallback((command: TabCommand, fieldKey?: string) => {
     if (command !== 'GET_STATE') {
       setBusy(true);
@@ -76,6 +93,56 @@ export function App() {
       ...(fieldKey !== undefined ? { fieldKey } : {}),
     } satisfies PanelPortMessage);
   }, []);
+
+  const requestPermission = useCallback(async () => {
+    if (!tabInfo?.url) return;
+    setBusy(true);
+    try {
+      const parsed = new URL(tabInfo.url);
+      const pattern = `${parsed.protocol}//${parsed.hostname}/*`;
+      try {
+        const timeout = new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 200));
+        await Promise.race([chrome.permissions.request({ origins: [pattern] }), timeout]);
+      } catch {
+        // Ignore native prompt dismiss/error in headless environments
+      }
+      const res = (await chrome.runtime.sendMessage({
+        type: 'AUTHORIZE_TAB',
+        tabId: tabInfo.tabId,
+      })) as { ok: boolean; message?: string };
+      if (res.ok) {
+        setNotice('已获得该网站访问权限并成功连接内容脚本');
+      } else {
+        setNotice(res.message ?? '授权失败');
+      }
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '申请权限失败');
+    } finally {
+      setBusy(false);
+      await refreshInfo();
+    }
+  }, [refreshInfo, tabInfo]);
+
+  const injectScript = useCallback(async () => {
+    if (tabInfo?.tabId === undefined) return;
+    setBusy(true);
+    try {
+      const res = (await chrome.runtime.sendMessage({
+        type: 'INJECT_CONTENT_SCRIPT',
+        tabId: tabInfo.tabId,
+      })) as { ok: boolean; message?: string };
+      if (res.ok) {
+        setNotice('内容脚本注入成功，已建立连接');
+      } else {
+        setNotice(res.message ?? '注入失败');
+      }
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '注入出错');
+    } finally {
+      setBusy(false);
+      await refreshInfo();
+    }
+  }, [refreshInfo, tabInfo]);
 
   const summary = runState?.summary;
   const fields = summary?.fields ?? [];
@@ -92,12 +159,40 @@ export function App() {
         <div className="meta">
           {tabInfo?.url !== undefined ? (
             <>
-              <div className="field-label">{tabInfo.title ?? '(无标题)'}</div>
-              <div>{tabInfo.url}</div>
-              <div>内容脚本：{tabInfo.contentScriptAlive ? '已连接' : '未检测到'}</div>
+              <div className="field-label" data-testid="current-tab-title">
+                {tabInfo.title ?? '(无标题)'}
+              </div>
+              <div data-testid="current-tab-url">URL：{tabInfo.url}</div>
+              <div data-testid="current-tab-id">标签页 ID：{tabInfo.tabId ?? '-'}</div>
+              <div data-testid="current-tab-permission">
+                网站授权：{tabInfo.hasPermission ? '已获得权限' : '未授权'}
+                {!tabInfo.hasPermission && tabInfo.canInject ? (
+                  <button
+                    type="button"
+                    style={{ marginLeft: 8, padding: '2px 8px', fontSize: 12 }}
+                    data-testid="btn-authorize"
+                    onClick={() => void requestPermission()}
+                  >
+                    授权此网站
+                  </button>
+                ) : null}
+              </div>
+              <div data-testid="current-tab-connection">
+                内容脚本：{tabInfo.contentScriptAlive ? '已连接' : '未连接'}
+                {tabInfo.hasPermission && !tabInfo.contentScriptAlive ? (
+                  <button
+                    type="button"
+                    style={{ marginLeft: 8, padding: '2px 8px', fontSize: 12 }}
+                    data-testid="btn-inject"
+                    onClick={() => void injectScript()}
+                  >
+                    注入内容脚本
+                  </button>
+                ) : null}
+              </div>
             </>
           ) : (
-            <div>未找到可操作的标签页（当前仅支持本地测试页面）</div>
+            <div data-testid="no-tab-warning">未找到可操作的网页标签（请在浏览器中打开目标招聘网页）</div>
           )}
           <div>
             简历：{resumeStatus?.hasResume === true ? `已导入（${resumeStatus.name ?? ''}）` : '尚未导入'}
@@ -108,7 +203,18 @@ export function App() {
       <div className="card">
         <h2>任务控制</h2>
         <div className="row">
-          <button className="primary" disabled={busy || !connected} onClick={() => sendCommand('RUN_ACTIVE_TAB')}>
+          <button
+            className="primary"
+            data-testid="start-fill-btn"
+            disabled={busy || !connected || !tabInfo?.contentScriptAlive}
+            onClick={() => {
+              if (!tabInfo?.contentScriptAlive) {
+                setNotice('Content Script 未连接：请先授权并注入内容脚本');
+                return;
+              }
+              sendCommand('RUN_ACTIVE_TAB');
+            }}
+          >
             开始填写
           </button>
           <button disabled={busy || !connected} onClick={() => sendCommand('PAUSE_RUN')}>
@@ -121,6 +227,13 @@ export function App() {
             取消
           </button>
         </div>
+        {!tabInfo?.contentScriptAlive && tabInfo?.url !== undefined ? (
+          <div className="notice" data-testid="connection-reason" style={{ color: '#d97706', marginTop: 8 }}>
+            {!tabInfo.hasPermission
+              ? '当前网站尚未授权访问，无法执行自动填写。请先点击「授权此网站」。'
+              : '当前页面尚未连接内容脚本，无法执行自动填写。请先点击「注入内容脚本」。'}
+          </div>
+        ) : null}
         <div className="row" style={{ marginTop: 8 }}>
           <button disabled={busy || !connected} onClick={() => sendCommand('GET_STATE')}>
             刷新状态

@@ -7,7 +7,8 @@ export default defineConfig({
     name: 'ApplyFill 2.0',
     description: '智能简历自动填写引擎 - Resume Auto-Fill Agent',
     version: '0.1.0',
-    permissions: ['storage', 'sidePanel', 'webNavigation'],
-    host_permissions: ['http://localhost/*', 'http://127.0.0.1/*', 'https://app.mokahr.com/*'],
+    permissions: ['storage', 'sidePanel', 'webNavigation', 'scripting', 'tabs', 'activeTab'],
+    host_permissions: ['http://localhost/*', 'http://127.0.0.1/*'],
+    optional_host_permissions: ['http://*/*', 'https://*/*'],
   },
 });

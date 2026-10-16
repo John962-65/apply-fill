@@ -23,7 +23,11 @@ export type BackgroundMessage =
   | { type: 'RUN_COORDINATED'; tabId?: number }
   | { type: 'RUN_CANCEL'; tabId?: number }
   | { type: 'GET_ATTACHMENT' }
-  | { type: 'UPLOAD_ATTACHMENT'; tabId?: number };
+  | { type: 'UPLOAD_ATTACHMENT'; tabId?: number }
+  | { type: 'INJECT_CONTENT_SCRIPT'; tabId?: number }
+  | { type: 'BIND_TARGET_TAB'; tabId: number }
+  | { type: 'CHECK_TAB_PERMISSION'; tabId?: number }
+  | { type: 'AUTHORIZE_TAB'; tabId?: number };
 
 export interface AttachmentInfo {
   name: string;
@@ -73,6 +77,9 @@ export interface ActiveTabInfo {
   url?: string;
   title?: string;
   contentScriptAlive: boolean;
+  hasPermission?: boolean;
+  canInject?: boolean;
+  isBound?: boolean;
 }
 
 export type TabCommand =
@@ -82,13 +89,15 @@ export type TabCommand =
   | 'RESUME_RUN'
   | 'OPEN_WORKBENCH'
   | 'GET_STATE'
-  | 'RETRY_FIELD';
+  | 'RETRY_FIELD'
+  | 'INJECT_CONTENT_SCRIPT';
 
 export type PanelPortMessage =
   | { type: 'PANEL_READY' }
-  | { type: 'PANEL_COMMAND'; command: TabCommand; fieldKey?: string }
+  | { type: 'PANEL_COMMAND'; command: TabCommand; fieldKey?: string; tabId?: number }
   | { type: 'RUN_STATE'; state: SessionRunState | null }
   | { type: 'RUN_EVENT'; event: RunEvent }
+  | { type: 'TAB_INFO_UPDATED'; info: ActiveTabInfo }
   | { type: 'COMMAND_RESULT'; command: TabCommand; ok: boolean; message?: string; summary?: RunSummary };
 
 export interface PanelCommandResponse {
@@ -121,6 +130,10 @@ const BACKGROUND_MESSAGE_TYPES = new Set<string>([
   'RUN_CANCEL',
   'GET_ATTACHMENT',
   'UPLOAD_ATTACHMENT',
+  'INJECT_CONTENT_SCRIPT',
+  'BIND_TARGET_TAB',
+  'CHECK_TAB_PERMISSION',
+  'AUTHORIZE_TAB',
 ]);
 
 function hasKnownType(value: unknown, known: Set<string>): boolean {
