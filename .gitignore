@@ -1,15 +1,13 @@
-# 扩展 ID 的私钥：只在本机保留，上传商店时才需要，绝不能提交
-*.pem
-*.der
-
-# 打包产物与本地快照
-*.zip
-*.tar.gz
-
 node_modules/
+.wxt/
+.output/
+dist/
+coverage/
+test-results/
+playwright-report/
+playwright/.cache/
+*.zip
+*.log
+.env
+.env.*
 .DS_Store
-Thumbs.db
-
-# 插件导出的设置备份：明文含简历、证件号、可能的 API Key，绝不能提交
-apply-fill-backup-*.json
-resume-pro-backup-*.json

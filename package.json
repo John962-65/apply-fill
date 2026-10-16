@@ -1,32 +1,26 @@
 {
-  "name": "apply-fill",
-  "version": "0.8.20",
+  "name": "applyfill",
   "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "description": "ApplyFill 2.0 — 智能简历自动填写引擎 (Resume Auto-Fill Agent)",
+  "packageManager": "pnpm@10.10.0",
   "scripts": {
-    "test": "node --test tests/*.test.js",
-    "test:ui": "node tests/browser-smoke.cjs",
-    "test:forms": "node tests/form-browser.cjs",
-    "test:combos": "node tests/combo-browser.cjs",
-    "test:autocomplete": "node tests/autocomplete-browser.cjs",
-    "test:input": "node tests/browser-input.cjs",
-    "test:capture": "node tests/control-capture.cjs",
-    "test:autoclick": "node tests/auto-click-capture.cjs",
-    "test:atsx-dates": "node tests/atsx-date-browser.cjs",
-    "test:phoenix": "node tests/phoenix-browser.cjs",
-    "test:phoenix-fill": "node tests/phoenix-fill.cjs",
-    "test:phoenix-enums": "node tests/phoenix-enums.cjs",
-    "test:grounded-fill": "node tests/grounded-fill.cjs",
-    "test:split-resume": "node tests/split-resume.cjs",
-    "test:split-combos": "node tests/split-combos.cjs",
-    "test:sd-choices": "node tests/sd-choices.cjs",
-    "test:sd-query": "node tests/sd-query-confirm.cjs",
-    "test:feishu-ud": "node tests/feishu-ud.cjs",
-    "test:feishu-ud-captured": "node tests/feishu-ud-captured.cjs",
-    "test:phoenix-published": "node tests/published-phoenix.cjs",
-    "test:controls": "node tests/published-controls.cjs",
-    "test:startup": "node tests/fill-startup-browser.cjs"
+    "dev": "pnpm --filter @applyfill/extension dev",
+    "dev:testbed": "pnpm --filter @applyfill/testbed dev",
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r typecheck",
+    "lint": "eslint .",
+    "test": "pnpm -r test",
+    "test:e2e": "pnpm --filter @applyfill/testbed test:e2e"
   },
   "devDependencies": {
-    "playwright": "1.62.1"
+    "@eslint/js": "^9.39.5",
+    "eslint": "^9.39.5",
+    "eslint-import-resolver-typescript": "^4.4.5",
+    "eslint-plugin-import-x": "^4.17.1",
+    "globals": "^17.13.0",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.71.2"
   }
 }

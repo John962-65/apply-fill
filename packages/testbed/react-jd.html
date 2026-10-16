@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ApplyFill Testbed · JD 嗅探</title>
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "JobPosting",
+        "title": "高级前端工程师",
+        "hiringOrganization": { "@type": "Organization", "name": "示例科技" },
+        "jobLocation": { "address": { "addressLocality": "杭州", "addressRegion": "浙江", "addressCountry": "CN" } },
+        "description": "<p>我们正在构建下一代招聘体验。</p><p>岗位职责：负责前端架构设计与组件库建设，优化页面性能与工程效率；</p><p>任职要求：5 年经验，精通 TypeScript 与浏览器原理。</p>"
+      }
+    </script>
+    <style>
+      body { font-family: system-ui, sans-serif; margin: 40px; }
+      .form-field { margin-bottom: 12px; }
+      label { display: block; margin-bottom: 4px; }
+      input { padding: 6px 8px; width: 280px; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>高级前端工程师 · 示例科技</h1>
+      <form id="jd-form" autocomplete="off">
+        <div class="form-field">
+          <label for="j-name">姓名</label>
+          <input id="j-name" name="name" type="text" data-testid="j-name" />
+        </div>
+        <div class="form-field">
+          <label for="j-email">邮箱</label>
+          <input id="j-email" name="email" type="email" data-testid="j-email" />
+        </div>
+        <div class="form-field">
+          <label for="j-essay">自荐信</label>
+          <textarea id="j-essay" name="essay" rows="6" data-testid="j-essay"></textarea>
+        </div>
+      </form>
+    </main>
+  </body>
+</html>

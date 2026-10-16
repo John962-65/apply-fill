@@ -1,0 +1,10 @@
+export { ExecutionMutex, MUTEX_ABORTED_ERROR, MUTEX_TIMEOUT_ERROR } from './ExecutionMutex';
+export type { AcquireOptions, MutexRelease } from './ExecutionMutex';
+export { RuntimeDependencyRegistry } from './RuntimeDependencyRegistry';
+export type { RecordOptions, RecordResult } from './RuntimeDependencyRegistry';
+export { DEFAULT_WAVE_BARRIER_CONFIG, WaveBarrier } from './WaveBarrier';
+export type { QuietReport, WaveBarrierConfig } from './WaveBarrier';
+export { matchesStructuralLabel, WaveClassifier, waveOf } from './WaveClassifier';
+export type { WaveClassifierOptions } from './WaveClassifier';
+export { DEFAULT_WAVE_ORDER, WaveScheduler } from './WaveScheduler';
+export type { RunWaveOptions, WaveExecutor, WaveRunOutcome, WaveSchedulerDeps } from './WaveScheduler';

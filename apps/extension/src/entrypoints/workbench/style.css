@@ -1,0 +1,72 @@
+:root {
+  color-scheme: light;
+  font-family: -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+}
+
+body {
+  margin: 0;
+  background: #f6f7f9;
+  color: #1f2329;
+}
+
+.workbench {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.card {
+  background: #ffffff;
+  border: 1px solid #e3e6eb;
+  border-radius: 10px;
+  padding: 14px 16px;
+}
+
+.card h2 {
+  font-size: 14px;
+  margin: 0 0 10px;
+}
+
+textarea {
+  width: 100%;
+  min-height: 300px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  border: 1px solid #d4d9e0;
+  border-radius: 8px;
+  padding: 10px;
+  box-sizing: border-box;
+}
+
+button {
+  border: 1px solid #d4d9e0;
+  background: #ffffff;
+  border-radius: 6px;
+  padding: 7px 12px;
+  font-size: 13px;
+  cursor: pointer;
+  margin-right: 8px;
+}
+
+button.primary {
+  background: #2b6bf3;
+  border-color: #2b6bf3;
+  color: #ffffff;
+}
+
+pre {
+  background: #f2f4f7;
+  border-radius: 8px;
+  padding: 10px;
+  font-size: 12px;
+  overflow: auto;
+  max-height: 260px;
+}
+
+.notice {
+  font-size: 13px;
+  color: #1e7e34;
+}

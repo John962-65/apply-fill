@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ApplyFill Testbed · 映射记忆</title>
+    <style>
+      body { font-family: system-ui, sans-serif; margin: 40px; }
+      .form-field { margin-bottom: 12px; }
+      label { display: block; margin-bottom: 4px; }
+      input { padding: 6px 8px; width: 280px; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>映射记忆测试页</h1>
+      <form id="mem-form" autocomplete="off">
+        <div class="form-field">
+          <label for="m-name">姓名</label>
+          <input id="m-name" name="name" type="text" data-testid="m-name" />
+        </div>
+        <div class="form-field">
+          <label for="m-ec">紧急联系人</label>
+          <input id="m-ec" name="emergencyContact" type="text" data-testid="m-ec" required />
+        </div>
+      </form>
+    </main>
+  </body>
+</html>
