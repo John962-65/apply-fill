@@ -56,6 +56,7 @@ export interface RunSummary {
   recovery?: { reverified: number; refilled: number; manual: number };
   frames?: FrameRunRecord[];
   stepTransitions?: StepTransitionRecord[];
+  llm?: { requested: number; proposed: number; failed: boolean };
 }
 
 export type RunEvent =

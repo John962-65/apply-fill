@@ -21,6 +21,22 @@ describe('FormScanner', () => {
     expect(ids).toEqual(['visible']);
   });
 
+  it('跳过密码与验证码类敏感输入', () => {
+    document.body.innerHTML = `
+      <form>
+        <input type="password" id="password" name="password" />
+        <input type="text" id="sms" placeholder="短信验证码" />
+        <input type="tel" id="otp" name="otp" />
+        <label for="code">图形验证码</label><input type="text" id="code" />
+        <input type="text" id="autocomplete-otp" autocomplete="one-time-code" />
+        <input type="text" id="normal" name="city" />
+        <input type="checkbox" id="sms-notify" name="smsNotify" />
+      </form>`;
+    const found = scanFormElements(document);
+    const ids = found.map((element) => element.id);
+    expect(ids).toEqual(['normal', 'sms-notify']);
+  });
+
   it('根据祖先标题推断区块类型', () => {
     document.body.innerHTML = `
       <section>

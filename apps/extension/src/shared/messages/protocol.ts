@@ -1,3 +1,4 @@
+import type { LlmFieldRef, LlmProviderConfig } from '../contracts/llm';
 import type { ResumeFactsDocument } from '../contracts/resume';
 import type { RunEvent, RunSummary, SessionRunState } from '../contracts/run';
 
@@ -27,7 +28,11 @@ export type BackgroundMessage =
   | { type: 'INJECT_CONTENT_SCRIPT'; tabId?: number }
   | { type: 'BIND_TARGET_TAB'; tabId: number }
   | { type: 'CHECK_TAB_PERMISSION'; tabId?: number }
-  | { type: 'AUTHORIZE_TAB'; tabId?: number };
+  | { type: 'AUTHORIZE_TAB'; tabId?: number }
+  | { type: 'GET_LLM_CONFIG' }
+  | { type: 'SET_LLM_CONFIG'; config: Partial<LlmProviderConfig> }
+  | { type: 'LLM_TEST_CONNECTION' }
+  | { type: 'LLM_ROUTE_FIELDS'; fields: LlmFieldRef[] };
 
 export interface AttachmentInfo {
   name: string;
@@ -134,6 +139,10 @@ const BACKGROUND_MESSAGE_TYPES = new Set<string>([
   'BIND_TARGET_TAB',
   'CHECK_TAB_PERMISSION',
   'AUTHORIZE_TAB',
+  'GET_LLM_CONFIG',
+  'SET_LLM_CONFIG',
+  'LLM_TEST_CONNECTION',
+  'LLM_ROUTE_FIELDS',
 ]);
 
 function hasKnownType(value: unknown, known: Set<string>): boolean {

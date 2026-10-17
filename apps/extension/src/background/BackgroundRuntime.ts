@@ -1,3 +1,5 @@
+import type { LlmFieldRef, LlmProviderConfig } from '@/shared/contracts/llm';
+import { toLlmConfigView } from '@/shared/contracts/llm';
 import type { ResumeFactsDocument } from '@/shared/contracts/resume';
 import type { RunEvent, SessionRunState } from '@/shared/contracts/run';
 import type {
@@ -15,8 +17,10 @@ import type { PanelCommandResponse } from '@/shared/messages/protocol';
 import { compileResume } from '@/resume/compiler';
 import { loadAttachment } from '@/resume/storage/attachmentStore';
 import { clearCompiledResume, loadCompiledResume, saveCompiledResume } from '@/resume/storage/resumeStore';
+import { hostPermissionPattern } from '@/shared/utils';
 
 import { FrameRegistry } from './FrameRegistry';
+import { LLMGateway } from './LLMGateway';
 import { MessageRouter } from './MessageRouter';
 import { SessionStore } from './SessionStore';
 import { TabCoordinator } from './TabCoordinator';
@@ -39,52 +43,64 @@ export function installBackgroundRuntime(): void {
   void sessionStore.interruptStaleSessions();
   const panelPorts = new Set<chrome.runtime.Port>();
   const frameRegistry = new FrameRegistry();
-  const authorizedOrigins = new Set<string>();
-  void chrome.storage?.local?.get?.('applyfill_authorized_origins')?.then?.((res) => {
-    const list = res?.applyfill_authorized_origins;
-    if (Array.isArray(list)) {
-      for (const origin of list) {
-        if (typeof origin === 'string') authorizedOrigins.add(origin);
-      }
-    }
-  });
   let boundTabId: number | undefined;
+  let panelWindowId: number | undefined;
+
+  const readStoredBoundTab = async (): Promise<number | undefined> => {
+    try {
+      const stored = await chrome.storage.session.get('applyfill_bound_tab');
+      const tabId = (stored as { applyfill_bound_tab?: unknown }).applyfill_bound_tab;
+      return typeof tabId === 'number' ? tabId : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+
+  const persistBoundTab = (tabId: number | undefined): void => {
+    void chrome.storage.session
+      .set({ applyfill_bound_tab: tabId ?? null })
+      .catch(() => undefined);
+  };
 
   const isTabBusy = async (tabId: number): Promise<boolean> => {
     const session = await sessionStore.load(tabId);
     return session?.status === 'RUNNING' || session?.status === 'PAUSED';
   };
 
+  const pickMostRecentWeb = (tabs: chrome.tabs.Tab[]): chrome.tabs.Tab | undefined => {
+    let best: chrome.tabs.Tab | undefined;
+    for (const tab of tabs) {
+      if (!isWebUrl(tab.url || tab.pendingUrl)) {
+        continue;
+      }
+      if (best === undefined || (tab.lastAccessed ?? 0) > (best.lastAccessed ?? 0)) {
+        best = tab;
+      }
+    }
+    return best;
+  };
+
   const queryActiveWebTab = async (): Promise<chrome.tabs.Tab | undefined> => {
     try {
+      if (panelWindowId !== undefined) {
+        const activeTabs = await chrome.tabs.query({ active: true, windowId: panelWindowId });
+        const activeWeb = activeTabs.find((t) => isWebUrl(t.url || t.pendingUrl));
+        if (activeWeb?.id !== undefined) {
+          return activeWeb;
+        }
+        const windowTabs = await chrome.tabs.query({ windowId: panelWindowId });
+        const recentInWindow = pickMostRecentWeb(windowTabs);
+        if (recentInWindow?.id !== undefined) {
+          return recentInWindow;
+        }
+      }
       const focusedTabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
       const focusedWeb = focusedTabs.find((t) => isWebUrl(t.url || t.pendingUrl));
       if (focusedWeb?.id !== undefined) {
         return focusedWeb;
       }
-      const currentTabs = await chrome.tabs.query({ active: true, currentWindow: true });
-      const currentWeb = currentTabs.find((t) => isWebUrl(t.url || t.pendingUrl));
-      if (currentWeb?.id !== undefined) {
-        return currentWeb;
-      }
-      const allActive = await chrome.tabs.query({ active: true });
-      const activeWeb = allActive.find((t) => isWebUrl(t.url || t.pendingUrl));
-      if (activeWeb?.id !== undefined) {
-        return activeWeb;
-      }
-      const windowTabs = await chrome.tabs.query({ lastFocusedWindow: true });
-      const webTabs = windowTabs.filter((t) => isWebUrl(t.url || t.pendingUrl));
-      if (webTabs.length > 0) {
-        webTabs.sort((a, b) => (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0));
-        return webTabs[0];
-      }
       const allTabs = await chrome.tabs.query({});
-      const allWebTabs = allTabs.filter((t) => isWebUrl(t.url || t.pendingUrl));
-      if (allWebTabs.length > 0) {
-        allWebTabs.sort((a, b) => (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0));
-        return allWebTabs[0];
-      }
-      return undefined;
+      return pickMostRecentWeb(allTabs);
     } catch {
       return undefined;
     }
@@ -94,17 +110,19 @@ export function installBackgroundRuntime(): void {
     if (boundTabId !== undefined) {
       try {
         const boundTab = await chrome.tabs.get(boundTabId);
-        if (await isTabBusy(boundTabId)) {
+        if (isWebUrl(boundTab.url || boundTab.pendingUrl) && (await isTabBusy(boundTabId))) {
           return boundTab;
         }
       } catch {
         boundTabId = undefined;
+        persistBoundTab(undefined);
       }
     }
 
     const active = await queryActiveWebTab();
     if (active?.id !== undefined) {
       boundTabId = active.id;
+      persistBoundTab(active.id);
       return active;
     }
 
@@ -116,6 +134,7 @@ export function installBackgroundRuntime(): void {
         }
       } catch {
         boundTabId = undefined;
+        persistBoundTab(undefined);
       }
     }
 
@@ -123,16 +142,12 @@ export function installBackgroundRuntime(): void {
   };
 
   const hasPermissionForTab = async (tab: chrome.tabs.Tab): Promise<boolean> => {
-    const url = tab.url || tab.pendingUrl;
-    if (!url || !isWebUrl(url)) {
+    const pattern = hostPermissionPattern(tab.url || tab.pendingUrl);
+    if (pattern === undefined) {
       return false;
     }
     try {
-      const parsed = new URL(url);
-      if (parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1') {
-        return true;
-      }
-      return authorizedOrigins.has(parsed.origin);
+      return await chrome.permissions.contains({ origins: [pattern] });
     } catch {
       return false;
     }
@@ -305,6 +320,7 @@ export function installBackgroundRuntime(): void {
       return { ok: false, error: 'NO_TAB' };
     }
     boundTabId = tabId;
+    persistBoundTab(tabId);
     const summary = await tabCoordinator.run(tabId);
     return { ok: true, summary };
   });
@@ -416,6 +432,7 @@ export function installBackgroundRuntime(): void {
         return { ok: false, message: '目标标签页不是有效的网页' };
       }
       boundTabId = tab.id;
+      persistBoundTab(tab.id);
       await broadcastTabInfo();
       return { ok: true };
     } catch {
@@ -433,18 +450,25 @@ export function installBackgroundRuntime(): void {
 
   router.register('AUTHORIZE_TAB', async (message) => {
     const requested = (message as { tabId?: unknown }).tabId;
-    const tab = typeof requested === 'number' ? await chrome.tabs.get(requested) : await getTargetTab();
+    let tab: chrome.tabs.Tab | undefined;
+    try {
+      tab = typeof requested === 'number' ? await chrome.tabs.get(requested) : await getTargetTab();
+    } catch {
+      tab = undefined;
+    }
     const url = tab?.url || tab?.pendingUrl;
-    if (!tab || !url) {
+    const pattern = hostPermissionPattern(url);
+    if (!tab || !url || pattern === undefined) {
       return { ok: false, message: '无效的目标标签页' };
     }
     try {
-      const origin = new URL(url).origin;
-      authorizedOrigins.add(origin);
-      await chrome.storage?.local?.set?.({
-        applyfill_authorized_origins: Array.from(authorizedOrigins),
-      });
+      const granted = await chrome.permissions.contains({ origins: [pattern] });
+      if (!granted) {
+        return { ok: false, message: '浏览器尚未授予该网站访问权限，请在弹窗中确认授权后重试' };
+      }
       if (tab.id !== undefined) {
+        boundTabId = tab.id;
+        persistBoundTab(tab.id);
         const outcome = await injectContentScript(tab.id);
         await broadcastTabInfo();
         return outcome;
@@ -456,10 +480,64 @@ export function installBackgroundRuntime(): void {
     }
   });
 
+  const llmGateway = new LLMGateway();
+
+  router.register('GET_LLM_CONFIG', async () => {
+    const config = await llmGateway.loadConfig();
+    return { ok: true, config: toLlmConfigView(config) };
+  });
+
+  router.register('SET_LLM_CONFIG', async (message) => {
+    const patch = (message as { config?: unknown }).config;
+    if (patch === null || typeof patch !== 'object') {
+      return { ok: false, message: '配置格式无效' };
+    }
+    const saved = await llmGateway.saveConfig(patch as Partial<LlmProviderConfig>);
+    return { ok: true, config: toLlmConfigView(saved) };
+  });
+
+  router.register('LLM_TEST_CONNECTION', async () => llmGateway.testConnection());
+
+  router.register('LLM_ROUTE_FIELDS', async (message) => {
+    const rawFields = (message as { fields?: unknown }).fields;
+    if (!Array.isArray(rawFields)) {
+      return { ok: false, error: '字段列表无效' };
+    }
+    const fields: LlmFieldRef[] = [];
+    for (const entry of rawFields.slice(0, 50)) {
+      if (entry === null || typeof entry !== 'object') {
+        continue;
+      }
+      const record = entry as Record<string, unknown>;
+      const fieldKey = typeof record.fieldKey === 'string' ? record.fieldKey.trim().slice(0, 128) : '';
+      const label = typeof record.label === 'string' ? record.label.trim().slice(0, 200) : '';
+      const controlKind = typeof record.controlKind === 'string' ? record.controlKind : '';
+      const sectionType = typeof record.sectionType === 'string' ? record.sectionType : '';
+      if (fieldKey === '' || controlKind === '' || sectionType === '') {
+        continue;
+      }
+      const instanceIndex =
+        typeof record.instanceIndex === 'number' && Number.isInteger(record.instanceIndex) && record.instanceIndex >= 0
+          ? record.instanceIndex
+          : undefined;
+      fields.push({
+        fieldKey,
+        label,
+        controlKind: controlKind as LlmFieldRef['controlKind'],
+        sectionType: sectionType as LlmFieldRef['sectionType'],
+        ...(instanceIndex !== undefined ? { instanceIndex } : {}),
+      });
+    }
+    return llmGateway.routeFields(fields);
+  });
+
   router.attach();
 
   chrome.tabs.onActivated.addListener(async (activeInfo) => {
     if (boundTabId !== undefined && (await isTabBusy(boundTabId))) {
+      return;
+    }
+    if (panelWindowId !== undefined && activeInfo.windowId !== panelWindowId) {
       return;
     }
     try {
@@ -467,6 +545,7 @@ export function installBackgroundRuntime(): void {
       const url = tab.url || tab.pendingUrl;
       if (isWebUrl(url)) {
         boundTabId = tab.id;
+        persistBoundTab(tab.id);
         await broadcastTabInfo();
       }
     } catch {
@@ -484,13 +563,35 @@ export function installBackgroundRuntime(): void {
     frameRegistry.clear(tabId);
     if (tabId === boundTabId) {
       boundTabId = undefined;
+      persistBoundTab(undefined);
       void broadcastTabInfo();
     }
   });
 
-  chrome.runtime.onConnect.addListener((port) => {
-    if (port.name !== 'sidepanel') {
+  void (async () => {
+    const storedTabId = await readStoredBoundTab();
+    if (storedTabId === undefined) {
       return;
+    }
+    try {
+      const tab = await chrome.tabs.get(storedTabId);
+      if (isWebUrl(tab.url || tab.pendingUrl)) {
+        boundTabId = storedTabId;
+        return;
+      }
+    } catch {
+      // Ignore stale tab
+    }
+    persistBoundTab(undefined);
+  })();
+
+  chrome.runtime.onConnect.addListener((port) => {
+    if (!port.name.startsWith('sidepanel')) {
+      return;
+    }
+    const windowId = Number.parseInt(port.name.split(':')[1] ?? '', 10);
+    if (Number.isFinite(windowId)) {
+      panelWindowId = windowId;
     }
     panelPorts.add(port);
     port.onDisconnect.addListener(() => panelPorts.delete(port));

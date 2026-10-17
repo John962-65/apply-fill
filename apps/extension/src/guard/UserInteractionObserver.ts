@@ -14,9 +14,8 @@ const ALL_OBSERVED_EVENTS = [...EDIT_INTENT_EVENTS, ...POINTER_TAKEOVER_EVENTS];
 
 export interface UserInteractionObserverOptions {
   resolveFieldKey: (target: Element) => string | undefined;
-  onUserEdit: (fieldKey: string, event: Event) => void;
+  onUserEdit: (fieldKey: string, event: Event, target: Element) => void;
   shouldTreatAsUser?: (event: Event) => boolean;
-  isAgentWriting?: (fieldKey: string) => boolean;
   pluginUiSelector?: string;
 }
 
@@ -54,10 +53,7 @@ export class UserInteractionObserver {
     if (fieldKey === undefined) {
       return;
     }
-    if (this.options.isAgentWriting?.(fieldKey) === true) {
-      return;
-    }
-    this.options.onUserEdit(fieldKey, event);
+    this.options.onUserEdit(fieldKey, event, target);
   };
 
   constructor(options: UserInteractionObserverOptions) {

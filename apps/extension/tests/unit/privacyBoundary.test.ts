@@ -5,8 +5,10 @@ import { describe, expect, it } from 'vitest';
 
 const SRC_DIR = path.resolve(process.cwd(), 'src');
 
-const FORBIDDEN_PATTERNS: Array<{ name: string; pattern: RegExp }> = [
-  { name: 'fetch', pattern: /\bfetch\s*\(/ },
+const ALLOWED_FETCH_FILES = new Set([path.join('background', 'ModelProvider.ts')]);
+
+const FORBIDDEN_PATTERNS: Array<{ name: string; pattern: RegExp; allowlistedFile?: boolean }> = [
+  { name: 'fetch', pattern: /\bfetch\s*\(/, allowlistedFile: true },
   { name: 'XMLHttpRequest', pattern: /new\s+XMLHttpRequest/ },
   { name: 'sendBeacon', pattern: /navigator\.sendBeacon/ },
   { name: 'WebSocket', pattern: /new\s+WebSocket/ },
@@ -27,13 +29,17 @@ function collectSourceFiles(dir: string): string[] {
 }
 
 describe('本地隐私边界', () => {
-  it('扩展源码不包含任何网络出口 API', () => {
+  it('网络出口 API 仅允许出现在 background/ModelProvider.ts（用户主动开启的 LLM 通道）', () => {
     const violations: string[] = [];
     for (const file of collectSourceFiles(SRC_DIR)) {
+      const relative = path.relative(SRC_DIR, file);
       const content = readFileSync(file, 'utf8');
-      for (const { name, pattern } of FORBIDDEN_PATTERNS) {
+      for (const { name, pattern, allowlistedFile } of FORBIDDEN_PATTERNS) {
         if (pattern.test(content)) {
-          violations.push(`${name}: ${path.relative(SRC_DIR, file)}`);
+          if (allowlistedFile === true && ALLOWED_FETCH_FILES.has(relative)) {
+            continue;
+          }
+          violations.push(`${name}: ${relative}`);
         }
       }
     }

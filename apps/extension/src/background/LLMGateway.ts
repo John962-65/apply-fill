@@ -1,0 +1,106 @@
+import { validateLlmMappings, extractJsonObject } from '@/router/LLMResponseValidator';
+import { buildLlmRoutingPrompt } from '@/router/PromptBuilder';
+import {
+  DEFAULT_LLM_CONFIG,
+  LLM_CONFIG_STORAGE_KEY,
+  LLM_DISABLED_ERROR,
+  LLM_NOT_CONFIGURED_ERROR,
+  normalizeLlmConfig,
+} from '@/shared/contracts/llm';
+import type {
+  LlmFieldRef,
+  LlmMappingProposal,
+  LlmProviderConfig,
+  LlmRouteResponse,
+  LlmTestConnectionResponse,
+} from '@/shared/contracts/llm';
+
+import type { FetchLike } from './ModelProvider';
+import { ModelProvider } from './ModelProvider';
+
+export interface LlmGatewayOptions {
+  fetchFn?: FetchLike;
+  storageArea?: chrome.storage.StorageArea;
+}
+
+const MAX_FIELDS_PER_MESSAGE = 50;
+
+export class LLMGateway {
+  private readonly fetchFn: FetchLike | undefined;
+  private readonly storageArea: chrome.storage.StorageArea | undefined;
+
+  constructor(options: LlmGatewayOptions = {}) {
+    this.fetchFn = options.fetchFn;
+    this.storageArea = options.storageArea ?? chrome.storage?.local;
+  }
+
+  async loadConfig(): Promise<LlmProviderConfig> {
+    try {
+      const stored = await this.storageArea?.get?.(LLM_CONFIG_STORAGE_KEY);
+      return normalizeLlmConfig((stored as Record<string, unknown> | undefined)?.[LLM_CONFIG_STORAGE_KEY]);
+    } catch {
+      return { ...DEFAULT_LLM_CONFIG };
+    }
+  }
+
+  async saveConfig(patch: Partial<LlmProviderConfig>): Promise<LlmProviderConfig> {
+    const current = await this.loadConfig();
+    const merged = normalizeLlmConfig({ ...current, ...patch });
+    await this.storageArea?.set?.({ [LLM_CONFIG_STORAGE_KEY]: merged });
+    return merged;
+  }
+
+  private providerFor(config: LlmProviderConfig): ModelProvider {
+    return this.fetchFn === undefined ? new ModelProvider(config) : new ModelProvider(config, this.fetchFn);
+  }
+
+  async routeFields(rawFields: LlmFieldRef[]): Promise<LlmRouteResponse> {
+    const fields = rawFields.slice(0, MAX_FIELDS_PER_MESSAGE);
+    if (fields.length === 0) {
+      return { ok: true, proposals: [] };
+    }
+    const config = await this.loadConfig();
+    if (!config.enabled) {
+      return { ok: false, error: LLM_DISABLED_ERROR };
+    }
+    if (config.baseUrl === '' || config.model === '') {
+      return { ok: false, error: LLM_NOT_CONFIGURED_ERROR };
+    }
+    const provider = this.providerFor(config);
+    const collected = new Map<string, LlmMappingProposal>();
+    for (let offset = 0; offset < fields.length; offset += config.maxFieldsPerRequest) {
+      const batch = fields.slice(offset, offset + config.maxFieldsPerRequest);
+      const prompt = buildLlmRoutingPrompt(batch);
+      const result = await provider.complete(prompt);
+      if (!result.ok) {
+        return { ok: false, error: result.error };
+      }
+      const payload = extractJsonObject(result.content);
+      const validation = validateLlmMappings(payload, new Set(batch.map((field) => field.fieldKey)));
+      for (const proposal of validation.proposals) {
+        collected.set(proposal.fieldKey, proposal);
+      }
+    }
+    return { ok: true, proposals: [...collected.values()] };
+  }
+
+  async testConnection(): Promise<LlmTestConnectionResponse> {
+    const config = await this.loadConfig();
+    if (config.baseUrl === '' || config.model === '') {
+      return { ok: false, message: '请先填写 Base URL 与模型名称' };
+    }
+    const provider = this.providerFor(config);
+    const result = await provider.complete({
+      system: '连通性探测。只输出 JSON：{"ok":true}',
+      user: 'ping',
+    });
+    if (!result.ok) {
+      return { ok: false, message: `连接失败：${result.error}` };
+    }
+    const payload = extractJsonObject(result.content);
+    if (payload === undefined || typeof payload !== 'object') {
+      return { ok: false, message: '模型响应无法解析为 JSON，请检查模型是否兼容 OpenAI 接口' };
+    }
+    return { ok: true, message: `模型 ${config.model} 响应正常` };
+  }
+}

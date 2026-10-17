@@ -3,7 +3,7 @@ import { expect, test } from '@playwright/test';
 import { resumeFacts } from './fixtures/resumeFacts';
 import { importFacts, launchExtensionContext, openWorkbench, TESTBED_URL } from './helpers/extension';
 
-test('真实招聘网站动态授权、标签页同步绑定与防未授权自动填写', async () => {
+test('真实招聘网站标签页同步绑定与授权后自动填写', async () => {
   const session = await launchExtensionContext({
     extraArgs: [
       '--host-resolver-rules=MAP mock-recruitment.test 127.0.0.1',
@@ -28,12 +28,12 @@ test('真实招聘网站动态授权、标签页同步绑定与防未授权自�
     await panel.getByRole('button', { name: '刷新信息' }).click();
 
     await expect(panel.getByTestId('current-tab-url')).toContainText('mock-recruitment.test');
-    await expect(panel.getByTestId('current-tab-permission')).toContainText('未授权');
+    await expect(panel.getByTestId('current-tab-permission')).toContainText('已获得权限');
     await expect(panel.getByTestId('current-tab-connection')).toContainText('未连接');
 
     const startBtn = panel.getByTestId('start-fill-btn');
     await expect(startBtn).toBeDisabled();
-    await expect(panel.getByTestId('connection-reason')).toContainText('尚未授权访问');
+    await expect(panel.getByTestId('connection-reason')).toContainText('尚未连接内容脚本');
 
     await localhostPage.bringToFront();
     await panel.bringToFront();
@@ -47,13 +47,10 @@ test('真实招聘网站动态授权、标签页同步绑定与防未授权自�
     await panel.bringToFront();
     await panel.getByRole('button', { name: '刷新信息' }).click();
     await expect(panel.getByTestId('current-tab-url')).toContainText('mock-recruitment.test');
-    await expect(panel.getByTestId('current-tab-permission')).toContainText('未授权');
-
-    const authBtn = panel.getByTestId('btn-authorize');
-    await expect(authBtn).toBeVisible();
-    await authBtn.click();
-
     await expect(panel.getByTestId('current-tab-permission')).toContainText('已获得权限');
+    await expect(panel.getByTestId('current-tab-connection')).toContainText('未连接');
+
+    await panel.getByTestId('btn-inject').click();
     await expect(panel.getByTestId('current-tab-connection')).toContainText('已连接');
     await expect(startBtn).toBeEnabled();
 

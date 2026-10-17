@@ -5,7 +5,10 @@ const COMBOBOX_TRIGGER_SELECTOR =
   '[role="combobox"], [aria-haspopup="listbox"], [aria-haspopup="tree"], [aria-haspopup="grid"], [aria-haspopup="true"], button[aria-haspopup]';
 const POPUP_TRIGGER_VALUES = new Set(['listbox', 'tree', 'grid', 'true']);
 export const FORM_CONTROL_SELECTOR = `${NATIVE_CONTROL_SELECTOR}, ${COMBOBOX_TRIGGER_SELECTOR}`;
-const SKIPPED_INPUT_TYPES = new Set(['hidden', 'file', 'submit', 'button', 'reset', 'image']);
+const SKIPPED_INPUT_TYPES = new Set(['hidden', 'file', 'submit', 'button', 'reset', 'image', 'password']);
+const TEXT_LIKE_INPUT_TYPES = new Set(['text', 'tel', 'number', 'search', 'email']);
+const SENSITIVE_CONTEXT_PATTERN =
+  /验证码|校验码|动态码|短信码|支付密码|交易密码|图片验证|语音验证|one[-_ ]?time|verification[-_ ]?code|verify[-_ ]?code|captcha|\botp\b|security[-_ ]?code|sms[-_ ]?code/i;
 const PLUGIN_UI_SELECTOR = '[data-applyfill-ui]';
 
 const SECTION_KEYWORDS: Array<{ type: SectionType; keywords: string[] }> = [
@@ -31,6 +34,38 @@ export function isSkippedInputType(element: HTMLElement): boolean {
   }
   const type = (element as HTMLInputElement).type.toLowerCase();
   return SKIPPED_INPUT_TYPES.has(type);
+}
+
+export function isSensitiveField(element: HTMLElement): boolean {
+  const tag = element.tagName.toLowerCase();
+  if (tag === 'input') {
+    const type = (element as HTMLInputElement).type.toLowerCase();
+    if (type === 'password') {
+      return true;
+    }
+    if (!TEXT_LIKE_INPUT_TYPES.has(type)) {
+      return false;
+    }
+  } else if (tag !== 'textarea') {
+    return false;
+  }
+  const autocomplete = (element.getAttribute('autocomplete') ?? '').toLowerCase();
+  if (autocomplete.includes('one-time-code') || autocomplete.includes('password')) {
+    return true;
+  }
+  const parts: Array<string | null | undefined> = [
+    element.getAttribute('placeholder'),
+    element.getAttribute('name'),
+    element.getAttribute('id'),
+    element.getAttribute('aria-label'),
+  ];
+  if (tag === 'input') {
+    for (const label of Array.from((element as HTMLInputElement).labels ?? [])) {
+      parts.push(label.textContent);
+    }
+  }
+  const context = parts.filter((part): part is string => typeof part === 'string' && part !== '').join(' ');
+  return SENSITIVE_CONTEXT_PATTERN.test(context);
 }
 
 export function isElementVisible(element: HTMLElement): boolean {
@@ -86,6 +121,9 @@ export function scanFormElements(root: ParentNode): HTMLElement[] {
   for (const element of root.querySelectorAll(FORM_CONTROL_SELECTOR)) {
     const html = element as HTMLElement;
     if (isSkippedInputType(html)) {
+      continue;
+    }
+    if (isSensitiveField(html)) {
       continue;
     }
     if (html.closest(PLUGIN_UI_SELECTOR) !== null) {

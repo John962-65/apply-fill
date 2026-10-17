@@ -46,6 +46,7 @@ describe('UserInteractionObserver', () => {
 
     expect(onUserEdit).toHaveBeenCalledTimes(1);
     expect(onUserEdit.mock.calls[0]?.[0]).toBe('fk1_name');
+    expect(onUserEdit.mock.calls[0]?.[2]).toBe(input);
     expect(observer.isStarted()).toBe(true);
     observer.stop();
   });
@@ -147,20 +148,20 @@ describe('UserInteractionObserver', () => {
     observer.stop();
   });
 
-  it('Agent 持有活动租约的字段不视为用户接管', () => {
+  it('Agent 写入期间仍上报真实用户接管事件（由运行时撤销租约）', () => {
     const input = mountInput();
     const onUserEdit = vi.fn();
     const observer = new UserInteractionObserver({
       resolveFieldKey: () => 'fk1_name',
       onUserEdit,
       shouldTreatAsUser: () => true,
-      isAgentWriting: (fieldKey) => fieldKey === 'fk1_name',
     });
     observer.start();
 
     input.dispatchEvent(new Event('input', { bubbles: true }));
 
-    expect(onUserEdit).not.toHaveBeenCalled();
+    expect(onUserEdit).toHaveBeenCalledTimes(1);
+    expect(onUserEdit.mock.calls[0]?.[0]).toBe('fk1_name');
     observer.stop();
   });
 

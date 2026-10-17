@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { FieldExecutionResult, FieldStatus } from '@/shared/contracts/field';
 import type { SessionRunState } from '@/shared/contracts/run';
 import type { ActiveTabInfo, PanelPortMessage, ResumeStatusInfo, TabCommand } from '@/shared/messages/protocol';
+import { hostPermissionPattern } from '@/shared/utils';
 
 const STATUS_TEXT: Record<string, string> = {
   VERIFIED: '已填写',
@@ -25,6 +26,26 @@ function statusLabel(status: FieldStatus | string): string {
   return STATUS_TEXT[status] ?? status;
 }
 
+const PERMISSION_REQUEST_TIMEOUT_MS = 12_000;
+
+function requestPermissionsWithTimeout(request: Promise<boolean>): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    const timer = setTimeout(() => {
+      resolve(false);
+    }, PERMISSION_REQUEST_TIMEOUT_MS);
+    request.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      () => {
+        clearTimeout(timer);
+        resolve(false);
+      },
+    );
+  });
+}
+
 export function App() {
   const portRef = useRef<chrome.runtime.Port | null>(null);
   const [connected, setConnected] = useState(false);
@@ -42,28 +63,45 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    const port = chrome.runtime.connect({ name: 'sidepanel' });
-    portRef.current = port;
-    setConnected(true);
-    port.onMessage.addListener((message: PanelPortMessage) => {
-      if (message.type === 'RUN_STATE') {
-        setRunState(message.state);
-      } else if (message.type === 'RUN_EVENT') {
-        port.postMessage({ type: 'PANEL_COMMAND', command: 'GET_STATE' } satisfies PanelPortMessage);
-      } else if (message.type === 'TAB_INFO_UPDATED') {
-        setTabInfo(message.info);
-      } else if (message.type === 'COMMAND_RESULT') {
-        setBusy(false);
-        setNotice(message.message ?? '');
+    let disposed = false;
+    let port: chrome.runtime.Port | undefined;
+    void (async () => {
+      let windowId = -1;
+      try {
+        const current = await chrome.windows.getCurrent();
+        if (current.id !== undefined) {
+          windowId = current.id;
+        }
+      } catch {
+        // Ignore window lookup failures and connect without a window id
       }
-    });
-    port.onDisconnect.addListener(() => {
-      setConnected(false);
-      portRef.current = null;
-    });
-    void refreshInfo();
+      if (disposed) {
+        return;
+      }
+      port = chrome.runtime.connect({ name: `sidepanel:${windowId}` });
+      portRef.current = port;
+      setConnected(true);
+      port.onMessage.addListener((message: PanelPortMessage) => {
+        if (message.type === 'RUN_STATE') {
+          setRunState(message.state);
+        } else if (message.type === 'RUN_EVENT') {
+          port?.postMessage({ type: 'PANEL_COMMAND', command: 'GET_STATE' } satisfies PanelPortMessage);
+        } else if (message.type === 'TAB_INFO_UPDATED') {
+          setTabInfo(message.info);
+        } else if (message.type === 'COMMAND_RESULT') {
+          setBusy(false);
+          setNotice(message.message ?? '');
+        }
+      });
+      port.onDisconnect.addListener(() => {
+        setConnected(false);
+        portRef.current = null;
+      });
+      void refreshInfo();
+    })();
     return () => {
-      port.disconnect();
+      disposed = true;
+      port?.disconnect();
     };
   }, [refreshInfo]);
 
@@ -98,13 +136,37 @@ export function App() {
     if (!tabInfo?.url) return;
     setBusy(true);
     try {
-      const parsed = new URL(tabInfo.url);
-      const pattern = `${parsed.protocol}//${parsed.hostname}/*`;
+      const pattern = hostPermissionPattern(tabInfo.url);
+      if (pattern === undefined) {
+        setNotice('当前页面不支持网站授权');
+        return;
+      }
+      let granted = false;
       try {
-        const timeout = new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 200));
-        await Promise.race([chrome.permissions.request({ origins: [pattern] }), timeout]);
+        granted = await chrome.permissions.contains({ origins: [pattern] });
       } catch {
-        // Ignore native prompt dismiss/error in headless environments
+        granted = false;
+      }
+      if (!granted) {
+        try {
+          granted = await requestPermissionsWithTimeout(chrome.permissions.request({ origins: [pattern] }));
+        } catch {
+          granted = false;
+        }
+      }
+      if (!granted) {
+        setNotice('未获得网站访问权限（授权弹窗未确认或已被拒绝），请重试');
+        return;
+      }
+      let verified = false;
+      try {
+        verified = await chrome.permissions.contains({ origins: [pattern] });
+      } catch {
+        verified = false;
+      }
+      if (!verified) {
+        setNotice('浏览器权限验证失败，请重试');
+        return;
       }
       const res = (await chrome.runtime.sendMessage({
         type: 'AUTHORIZE_TAB',
@@ -245,7 +307,11 @@ export function App() {
             刷新信息
           </button>
         </div>
-        {notice !== '' ? <div className="notice">{notice}</div> : null}
+        {notice !== '' ? (
+          <div className="notice" data-testid="panel-notice">
+            {notice}
+          </div>
+        ) : null}
         <p className="safe-note">按设计约束：不会自动点击「下一步」或「最终提交」。</p>
       </div>
 
@@ -288,6 +354,12 @@ export function App() {
               </div>
               <div data-testid="report-final-submit">最终提交：未执行</div>
             </div>
+            {summary.llm !== undefined ? (
+              <div className="meta" data-testid="llm-line">
+                AI 语义辅助：请求 {summary.llm.requested} 字段 · 建议 {summary.llm.proposed} 字段
+                {summary.llm.failed ? '（部分请求失败，已回退本地规则）' : ''}
+              </div>
+            ) : null}
             {summary.recovery !== undefined ? (
               <div className="meta" data-testid="recovery-line">
                 有界恢复：重验 {summary.recovery.reverified} · 补填 {summary.recovery.refilled} · 转人工{' '}

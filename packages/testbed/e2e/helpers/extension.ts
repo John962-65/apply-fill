@@ -82,26 +82,33 @@ export interface ExtensionSession {
   close: () => Promise<void>;
 }
 
-export async function launchExtensionContext(options?: { extraArgs?: string[] }): Promise<ExtensionSession> {
+export async function launchExtensionContext(options?: {
+  extraArgs?: string[];
+  hostPermissions?: 'wildcard' | 'localhost-only';
+}): Promise<ExtensionSession> {
   const userDataDir = mkdtempSync(path.join(tmpdir(), 'applyfill-e2e-'));
   const defaultDir = path.join(userDataDir, 'Default');
   mkdirSync(defaultDir, { recursive: true });
   const extId = 'jlejhggcppolboemhhkdjhfchihaipne';
+  const hostOrigins =
+    options?.hostPermissions === 'localhost-only'
+      ? ['http://127.0.0.1/*', 'http://localhost/*']
+      : ['http://127.0.0.1/*', 'http://localhost/*', 'http://*/*', 'https://*/*'];
   const preferences = {
     extensions: {
       settings: {
         [extId]: {
           active_permissions: {
             api: ['storage', 'sidePanel', 'webNavigation', 'scripting', 'tabs', 'activeTab'],
-            explicit_host: ['http://127.0.0.1/*', 'http://localhost/*', 'http://*/*', 'https://*/*'],
+            explicit_host: hostOrigins,
             manifest_permissions: [],
-            scriptable_host: ['http://127.0.0.1/*', 'http://localhost/*', 'http://*/*', 'https://*/*'],
+            scriptable_host: hostOrigins,
           },
           granted_permissions: {
             api: ['storage', 'sidePanel', 'webNavigation', 'scripting', 'tabs', 'activeTab'],
-            explicit_host: ['http://127.0.0.1/*', 'http://localhost/*', 'http://*/*', 'https://*/*'],
+            explicit_host: hostOrigins,
             manifest_permissions: [],
-            scriptable_host: ['http://127.0.0.1/*', 'http://localhost/*', 'http://*/*', 'https://*/*'],
+            scriptable_host: hostOrigins,
           },
           location: 8,
           path: EXTENSION_PATH,

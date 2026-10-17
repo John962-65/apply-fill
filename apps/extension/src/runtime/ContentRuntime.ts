@@ -31,7 +31,8 @@ import type { DistilledElement, ScannedSection } from '@/perceptor';
 import { formatForField } from '@/formatter';
 import { listResumeValuePaths } from '@/resume/compiler/paths';
 import type { ResumePathOption } from '@/resume/compiler/paths';
-import { FingerprintCache, resolveResumePath } from '@/router';
+import { BatchLLMRouter, FingerprintCache, resolveResumePath } from '@/router';
+import type { RoutedProposal, UnmappedFieldRef } from '@/router';
 import { ExecutionMutex } from '@/scheduler/ExecutionMutex';
 import { RuntimeDependencyRegistry } from '@/scheduler/RuntimeDependencyRegistry';
 import { WaveBarrier } from '@/scheduler/WaveBarrier';
@@ -41,6 +42,8 @@ import type { ControlKind, FieldExecutionResult, MappingIssue, SectionType } fro
 import type { InstanceObservation, InstanceReport, ObservationField, ReanchorStatus } from '@/shared/contracts/reanchor';
 import type { RunEvent, RunSummary } from '@/shared/contracts/run';
 import type { ExecutionWave, WaveExecutionSummary } from '@/shared/contracts/scheduler';
+import { LLM_DISABLED_ERROR, LLM_NOT_CONFIGURED_ERROR } from '@/shared/contracts/llm';
+import type { LlmRouteResponse } from '@/shared/contracts/llm';
 import { sendToBackground } from '@/shared/messages/client';
 import { isTabMessage } from '@/shared/messages/protocol';
 import type { AttachmentInfo, AutofillRunResponse, SimpleAck, UploadAttachmentResponse } from '@/shared/messages/protocol';
@@ -83,6 +86,7 @@ const CACHE_STORAGE_KEY = 'applyfill.fingerprintCache';
 const MAX_RECONCILE_PASSES = 2;
 const MAX_STEP_TRANSITIONS = 5;
 const STEP_SETTLE_MS = 400;
+const USER_EDIT_PRECURSOR_WINDOW_MS = 1500;
 
 interface StepIterationOutcome {
   results: FieldExecutionResult[];
@@ -155,6 +159,10 @@ export class ContentRuntime {
   private pill: QuickFillPillController | null = null;
   private readonly stepObserver = new StepObserver(document);
   private readonly fileUploadAgent = new FileUploadAgent();
+  private readonly llmRouter: BatchLLMRouter;
+  private llmProposals = new Map<string, RoutedProposal>();
+  private llmInfo: NonNullable<RunSummary['llm']> | null = null;
+  private readonly lastUserInteractions = new WeakMap<Element, number>();
   private activeRun: ActiveRun | null = null;
   private started = false;
 
@@ -176,8 +184,26 @@ export class ContentRuntime {
     });
     this.observer = new UserInteractionObserver({
       resolveFieldKey: (target) => this.resolveFieldKey(target),
-      onUserEdit: (fieldKey) => this.handleUserEdit(fieldKey),
-      isAgentWriting: (fieldKey) => this.registry.activeLeaseFor(fieldKey) !== undefined,
+      onUserEdit: (fieldKey, event, target) => this.handleUserEdit(fieldKey, event, target),
+    });
+    this.llmRouter = new BatchLLMRouter(async (batch) => {
+      const response = await sendToBackground<LlmRouteResponse>({
+        type: 'LLM_ROUTE_FIELDS',
+        fields: batch.map((field) => ({
+          fieldKey: field.fieldKey,
+          label: field.label,
+          controlKind: field.controlKind,
+          sectionType: field.sectionType,
+          ...(field.instanceIndex !== undefined ? { instanceIndex: field.instanceIndex } : {}),
+        })),
+      });
+      if (response?.ok === true) {
+        return response.proposals ?? [];
+      }
+      if (response?.error === LLM_DISABLED_ERROR || response?.error === LLM_NOT_CONFIGURED_ERROR) {
+        return [];
+      }
+      throw new Error(response?.error ?? 'LLM_ROUTE_FAILED');
     });
   }
 
@@ -393,6 +419,8 @@ export class ContentRuntime {
     await this.loadCache();
     await this.loadMemory();
     await this.cacheJobContext();
+    this.llmProposals = new Map();
+    this.llmInfo = null;
 
     const executedKeys = new Set<string>();
     const results: FieldExecutionResult[] = [];
@@ -619,12 +647,20 @@ export class ContentRuntime {
 
     const flatElements = elements.filter((element) => !isInsideAny(element, containerElements));
     const flatDistilled = distillElements(flatElements);
-    const plan = buildExecutionPlan(compiled, flatDistilled, {
+    const planOptions = {
       instances: instanceInputs,
       cache: this.fingerprintCache,
       memory: this.mappingMemory,
       host: location.host,
-    });
+    };
+    let plan = buildExecutionPlan(compiled, flatDistilled, planOptions);
+    const llmAdded = await this.collectLlmProposals(plan);
+    if (llmAdded > 0) {
+      plan = buildExecutionPlan(compiled, flatDistilled, {
+        ...planOptions,
+        llmProposals: this.llmProposals,
+      });
+    }
     for (const [fieldKey, element] of plan.elementByKey) {
       this.elementByKey.set(fieldKey, element);
       this.keyByElement.set(element, fieldKey);
@@ -1427,6 +1463,42 @@ export class ContentRuntime {
     area.remove();
   }
 
+  private async collectLlmProposals(plan: ExecutionPlan): Promise<number> {
+    const refs: UnmappedFieldRef[] = [];
+    for (const issue of plan.issues) {
+      if (issue.kind !== 'UNMAPPED' || issue.fieldKey === undefined || this.llmProposals.has(issue.fieldKey)) {
+        continue;
+      }
+      const mapping = plan.mappings.find((entry) => entry.fieldKey === issue.fieldKey);
+      if (mapping === undefined) {
+        continue;
+      }
+      refs.push({
+        fieldKey: issue.fieldKey,
+        label: issue.label,
+        controlKind: mapping.signature.controlKind,
+        sectionType: mapping.signature.sectionType,
+      });
+    }
+    if (refs.length === 0) {
+      return 0;
+    }
+    this.llmInfo = this.llmInfo ?? { requested: 0, proposed: 0, failed: false };
+    this.llmInfo.requested += refs.length;
+    let routed: Map<string, RoutedProposal>;
+    try {
+      routed = await this.llmRouter.route(refs);
+    } catch {
+      this.llmInfo.failed = true;
+      return 0;
+    }
+    for (const [fieldKey, proposal] of routed) {
+      this.llmProposals.set(fieldKey, proposal);
+    }
+    this.llmInfo.proposed += routed.size;
+    return routed.size;
+  }
+
   private rebuildPlan(compiled: CompiledResume, containerElements: Set<HTMLElement>): ExecutionPlan {
     const elements = scanFormElements(document);
     const flat = elements.filter((element) => !isInsideAny(element, containerElements));
@@ -1434,6 +1506,7 @@ export class ContentRuntime {
       cache: this.fingerprintCache,
       memory: this.mappingMemory,
       host: location.host,
+      ...(this.llmProposals.size > 0 ? { llmProposals: this.llmProposals } : {}),
     });
     for (const [fieldKey, element] of rebuilt.elementByKey) {
       this.elementByKey.set(fieldKey, element);
@@ -1486,6 +1559,9 @@ export class ContentRuntime {
     };
     if (instances.length > 0) {
       summary.instances = instances;
+    }
+    if (this.llmInfo !== null) {
+      summary.llm = { ...this.llmInfo };
     }
     return summary;
   }
@@ -1546,11 +1622,20 @@ export class ContentRuntime {
     return undefined;
   }
 
-  private handleUserEdit(fieldKey: string): void {
-    this.registry.noteUserEdit(fieldKey);
-    if (this.activeRun !== null) {
-      this.engine.revokeField(fieldKey);
+  private handleUserEdit(fieldKey: string, event: Event, target: Element): void {
+    const activationEvent = event.type === 'input' || event.type === 'change';
+    if (activationEvent) {
+      const lastInteraction = this.lastUserInteractions.get(target);
+      const since =
+        lastInteraction === undefined ? Number.POSITIVE_INFINITY : Date.now() - lastInteraction;
+      if (this.engine.isWriting(fieldKey) && since > USER_EDIT_PRECURSOR_WINDOW_MS) {
+        return;
+      }
+    } else {
+      this.lastUserInteractions.set(target, Date.now());
     }
+    this.registry.noteUserEdit(fieldKey);
+    this.engine.revokeField(fieldKey);
   }
 
   private emit(event: RunEvent): void {

@@ -97,6 +97,10 @@ export class FieldExecutionEngine {
     this.registry.revokeActive(fieldKey, 'REVOKED');
   }
 
+  isWriting(fieldKey: string): boolean {
+    return this.fieldControllers.has(fieldKey);
+  }
+
   private async executeFieldWithRetry(
     field: ExecutableField,
     options: ExecuteRunOptions,

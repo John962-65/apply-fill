@@ -6,6 +6,12 @@ import type { ApplicationContext } from '@/jd/ApplicationContext';
 import { UserCorrectionStore } from '@/memory/UserCorrectionStore';
 import type { UserCorrectionRecord } from '@/memory/UserCorrectionStore';
 import { loadAttachment, saveAttachment } from '@/resume/storage/attachmentStore';
+import type {
+  LlmConfigResponse,
+  LlmConfigView,
+  LlmProviderConfig,
+  LlmTestConnectionResponse,
+} from '@/shared/contracts/llm';
 import type { CompiledResume } from '@/shared/contracts/resume';
 import type { CompiledResumeResponse, ResumeStatusInfo, UploadAttachmentResponse } from '@/shared/messages/protocol';
 import { createSampleResumeFacts } from '@/shared/samples/sampleResume';
@@ -24,6 +30,66 @@ export function App() {
   const [uploadNotice, setUploadNotice] = useState('');
   const [corrections, setCorrections] = useState<UserCorrectionRecord[]>([]);
   const [jdContexts, setJdContexts] = useState<ApplicationContext[]>([]);
+  const [llmConfig, setLlmConfig] = useState<LlmConfigView | null>(null);
+  const [llmApiKey, setLlmApiKey] = useState('');
+  const [llmNotice, setLlmNotice] = useState('');
+
+  const loadLlmConfig = useCallback(async () => {
+    const response = (await chrome.runtime.sendMessage({ type: 'GET_LLM_CONFIG' })) as LlmConfigResponse;
+    setLlmConfig(response?.config ?? null);
+  }, []);
+
+  const patchLlmConfig = useCallback((patch: Partial<LlmConfigView>) => {
+    setLlmConfig((prev) => (prev === null ? prev : { ...prev, ...patch }));
+  }, []);
+
+  const saveLlmConfig = useCallback(async () => {
+    if (llmConfig === null) {
+      return;
+    }
+    const patch: Partial<LlmProviderConfig> = {
+      enabled: llmConfig.enabled,
+      baseUrl: llmConfig.baseUrl,
+      model: llmConfig.model,
+      temperature: llmConfig.temperature,
+      maxFieldsPerRequest: llmConfig.maxFieldsPerRequest,
+      timeoutMs: llmConfig.timeoutMs,
+      maxRetries: llmConfig.maxRetries,
+    };
+    if (llmApiKey !== '') {
+      patch.apiKey = llmApiKey;
+    }
+    const response = (await chrome.runtime.sendMessage({ type: 'SET_LLM_CONFIG', config: patch })) as LlmConfigResponse;
+    if (response?.ok === true) {
+      setLlmConfig(response.config ?? null);
+      setLlmApiKey('');
+      setLlmNotice('配置已保存（API Key 仅保存在本机浏览器存储）');
+    } else {
+      setLlmNotice(`保存失败：${response?.message ?? '未知错误'}`);
+    }
+  }, [llmConfig, llmApiKey]);
+
+  const clearLlmApiKey = useCallback(async () => {
+    const response = (await chrome.runtime.sendMessage({
+      type: 'SET_LLM_CONFIG',
+      config: { apiKey: '' },
+    })) as LlmConfigResponse;
+    if (response?.ok === true) {
+      setLlmConfig(response.config ?? null);
+      setLlmApiKey('');
+      setLlmNotice('已清除本地 API Key');
+    }
+  }, []);
+
+  const testLlmConnection = useCallback(async () => {
+    setLlmNotice('正在测试连接…');
+    const response = (await chrome.runtime.sendMessage({ type: 'LLM_TEST_CONNECTION' })) as LlmTestConnectionResponse;
+    setLlmNotice(
+      response?.ok === true
+        ? `连接成功：${response.message ?? ''}`
+        : `连接失败：${response.message ?? '未知错误'}`,
+    );
+  }, []);
 
   const loadJdContexts = useCallback(async () => {
     const stored = await chrome.storage.session.get(ApplicationContextStore.STORAGE_KEY);
@@ -90,7 +156,8 @@ export function App() {
     void refresh();
     void loadCorrections();
     void loadJdContexts();
-  }, [refresh, loadCorrections, loadJdContexts]);
+    void loadLlmConfig();
+  }, [refresh, loadCorrections, loadJdContexts, loadLlmConfig]);
 
   const importResume = useCallback(async () => {
     try {
@@ -261,6 +328,71 @@ export function App() {
             </div>
           ))
         )}
+      </div>
+
+      <div className="card">
+        <h2>AI 模型设置（云端语义辅助 · LLM）</h2>
+        <p style={{ fontSize: 13 }}>
+          当本地规则与缓存无法识别表单字段时，可选择把字段标签等元信息（不含任何简历内容）发送到你自己配置的
+          OpenAI 兼容接口，由模型返回简历路径建议。默认关闭；API Key 仅保存在本机浏览器存储中，不会上传到任何其他服务器。
+        </p>
+        <label style={{ display: 'block', fontSize: 13, marginTop: 8 }}>
+          <input
+            data-testid="llm-enabled"
+            type="checkbox"
+            checked={llmConfig?.enabled ?? false}
+            onChange={(event) => patchLlmConfig({ enabled: event.target.checked })}
+          />{' '}
+          启用云端语义辅助（默认关闭）
+        </label>
+        <div style={{ marginTop: 8 }}>
+          <input
+            data-testid="llm-baseurl"
+            placeholder="Base URL（OpenAI 兼容，如 https://api.example.com/v1）"
+            style={{ width: '100%' }}
+            value={llmConfig?.baseUrl ?? ''}
+            onChange={(event) => patchLlmConfig({ baseUrl: event.target.value })}
+          />
+        </div>
+        <div style={{ marginTop: 8 }}>
+          <input
+            data-testid="llm-apikey"
+            type="password"
+            placeholder={llmConfig?.hasApiKey === true ? 'API Key（已保存，留空保持不变）' : 'API Key'}
+            style={{ width: '100%' }}
+            value={llmApiKey}
+            onChange={(event) => setLlmApiKey(event.target.value)}
+          />
+        </div>
+        <div style={{ marginTop: 8 }}>
+          <input
+            data-testid="llm-model"
+            placeholder="模型名称（如 gpt-4o-mini）"
+            style={{ width: '100%' }}
+            value={llmConfig?.model ?? ''}
+            onChange={(event) => patchLlmConfig({ model: event.target.value })}
+          />
+        </div>
+        <div style={{ marginTop: 10 }}>
+          <button data-testid="llm-save" className="primary" onClick={() => void saveLlmConfig()}>
+            保存配置
+          </button>
+          <button data-testid="llm-test" onClick={() => void testLlmConnection()}>
+            测试连接
+          </button>
+          <button data-testid="llm-clear-key" onClick={() => void clearLlmApiKey()}>
+            清除密钥
+          </button>
+        </div>
+        <p style={{ fontSize: 12, color: '#666' }}>
+          高级参数：温度 {llmConfig?.temperature ?? 0} · 单次最大字段数 {llmConfig?.maxFieldsPerRequest ?? 20} · 超时{' '}
+          {llmConfig?.timeoutMs ?? 10000}ms · 重试 {llmConfig?.maxRetries ?? 1} 次
+        </p>
+        {llmNotice !== '' ? (
+          <p className="notice" data-testid="llm-notice">
+            {llmNotice}
+          </p>
+        ) : null}
       </div>
 
       <div className="card">
