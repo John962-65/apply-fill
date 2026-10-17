@@ -74,7 +74,9 @@ describe('compileResume', () => {
     const normalized: NormalizedResume = {
       basic: { name: '张三', intro: '甲'.repeat(80) },
       education: [],
+      work: [],
       projects: [],
+      skills: [],
       preferences: {},
     };
     const projections = buildProjections(normalized);
@@ -85,7 +87,9 @@ describe('compileResume', () => {
     const normalized: NormalizedResume = {
       basic: { name: '张三', intro: '热爱前端' },
       education: [],
+      work: [],
       projects: [],
+      skills: [],
       preferences: {},
     };
     expect(buildProjections(normalized).introShort).toBe('热爱前端');

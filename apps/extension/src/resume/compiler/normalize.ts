@@ -8,6 +8,10 @@ import type {
   ProjectFacts,
   ResumeFact,
   ResumeFactsDocument,
+  SkillEntry,
+  SkillFacts,
+  WorkEntry,
+  WorkFacts,
 } from '@/shared/contracts/resume';
 import { parseDateAtom } from '@/shared/utils/date';
 
@@ -39,6 +43,48 @@ function normalizeEducationEntry(facts: EducationFacts): EducationEntry {
   }
   if (endParsed !== undefined) {
     entry.endDate = endParsed;
+  }
+  return entry;
+}
+
+function normalizeWorkEntry(facts: WorkFacts): WorkEntry {
+  const startRaw = requireFactValue(facts.startDate);
+  const endRaw = requireFactValue(facts.endDate);
+  const startParsed = startRaw === undefined ? undefined : parseDateAtom(startRaw);
+  const endParsed = endRaw === undefined ? undefined : parseDateAtom(endRaw);
+  const entry: WorkEntry = {
+    id: facts.id,
+    company: facts.company.value,
+  };
+  const role = requireFactValue(facts.role);
+  const description = requireFactValue(facts.description);
+  if (role !== undefined) {
+    entry.role = role;
+  }
+  if (description !== undefined) {
+    entry.description = description;
+  }
+  if (startParsed !== undefined && !('present' in startParsed)) {
+    entry.startDate = startParsed;
+  }
+  if (endParsed !== undefined) {
+    entry.endDate = endParsed;
+  }
+  return entry;
+}
+
+function normalizeSkillEntry(facts: SkillFacts): SkillEntry {
+  const entry: SkillEntry = {
+    id: facts.id,
+    name: facts.name.value,
+  };
+  const category = requireFactValue(facts.category);
+  const level = requireFactValue(facts.level);
+  if (category !== undefined) {
+    entry.category = category;
+  }
+  if (level !== undefined) {
+    entry.level = level;
   }
   return entry;
 }
@@ -108,7 +154,9 @@ export function normalizeResume(facts: ResumeFactsDocument): NormalizedResume {
   return {
     basic,
     education: facts.education.map(normalizeEducationEntry),
+    work: (facts.work ?? []).map(normalizeWorkEntry),
     projects: (facts.projects ?? []).map(normalizeProjectEntry),
+    skills: (facts.skills ?? []).map(normalizeSkillEntry),
     preferences,
   };
 }

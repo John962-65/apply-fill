@@ -80,6 +80,20 @@ export function listResumeValuePaths(compiled: CompiledResume): ResumePathOption
     push(`${prefix}.startDate`, `项目 ${index + 1} 开始时间`, entry.startDate);
     push(`${prefix}.endDate`, `项目 ${index + 1} 结束时间`, entry.endDate);
   });
+  compiled.normalized.work.forEach((entry, index) => {
+    const prefix = `work[${index}]`;
+    push(`${prefix}.company`, `工作 ${index + 1} 单位`, entry.company);
+    push(`${prefix}.role`, `工作 ${index + 1} 职位`, entry.role);
+    push(`${prefix}.description`, `工作 ${index + 1} 描述`, entry.description);
+    push(`${prefix}.startDate`, `工作 ${index + 1} 开始时间`, entry.startDate);
+    push(`${prefix}.endDate`, `工作 ${index + 1} 结束时间`, entry.endDate);
+  });
+  compiled.normalized.skills.forEach((entry, index) => {
+    const prefix = `skills[${index}]`;
+    push(`${prefix}.name`, `技能/证书 ${index + 1} 名称`, entry.name);
+    push(`${prefix}.category`, `技能/证书 ${index + 1} 类别`, entry.category);
+    push(`${prefix}.level`, `技能/证书 ${index + 1} 等级`, entry.level);
+  });
   for (const [key, value] of Object.entries(compiled.normalized.preferences)) {
     const label = key === 'expectedSalary' ? '期望薪资' : key === 'freshGraduate' ? '应届生' : '订阅通知';
     push(`preferences.${key}`, label, value);

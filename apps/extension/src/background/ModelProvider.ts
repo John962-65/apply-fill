@@ -29,7 +29,10 @@ export class ModelProvider {
   private readonly config: LlmProviderConfig;
   private readonly fetchFn: FetchLike;
 
-  constructor(config: LlmProviderConfig, fetchFn: FetchLike = fetch) {
+  constructor(
+    config: LlmProviderConfig,
+    fetchFn: FetchLike = (input, init) => globalThis.fetch(input, init),
+  ) {
     this.config = config;
     this.fetchFn = fetchFn;
   }

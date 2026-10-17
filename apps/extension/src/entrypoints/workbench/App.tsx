@@ -5,6 +5,9 @@ import { ApplicationContextStore } from '@/jd/ApplicationContext';
 import type { ApplicationContext } from '@/jd/ApplicationContext';
 import { UserCorrectionStore } from '@/memory/UserCorrectionStore';
 import type { UserCorrectionRecord } from '@/memory/UserCorrectionStore';
+import { extractPdfText } from '@/resume/parser/pdfText';
+import { extractResumeFacts, markFactsVerified } from '@/resume/parser/resumeStructureExtractor';
+import type { ResumeParseStats } from '@/resume/parser/resumeStructureExtractor';
 import { loadAttachment, saveAttachment } from '@/resume/storage/attachmentStore';
 import type {
   LlmConfigResponse,
@@ -12,9 +15,11 @@ import type {
   LlmProviderConfig,
   LlmTestConnectionResponse,
 } from '@/shared/contracts/llm';
-import type { CompiledResume } from '@/shared/contracts/resume';
+import { llmBaseUrlOriginPattern } from '@/shared/contracts/llm';
+import type { CompiledResume, ResumeFactsDocument } from '@/shared/contracts/resume';
 import type { CompiledResumeResponse, ResumeStatusInfo, UploadAttachmentResponse } from '@/shared/messages/protocol';
 import { createSampleResumeFacts } from '@/shared/samples/sampleResume';
+import { requestPermissionWithTimeout } from '@/shared/utils';
 
 const CORRECTION_KIND_LABELS: Record<UserCorrectionRecord['kind'], string> = {
   REMAP: '来源修正',
@@ -33,6 +38,10 @@ export function App() {
   const [llmConfig, setLlmConfig] = useState<LlmConfigView | null>(null);
   const [llmApiKey, setLlmApiKey] = useState('');
   const [llmNotice, setLlmNotice] = useState('');
+  const [parsing, setParsing] = useState(false);
+  const [parseNotice, setParseNotice] = useState('');
+  const [parseStats, setParseStats] = useState<ResumeParseStats | null>(null);
+  const [parseJson, setParseJson] = useState('');
 
   const loadLlmConfig = useCallback(async () => {
     const response = (await chrome.runtime.sendMessage({ type: 'GET_LLM_CONFIG' })) as LlmConfigResponse;
@@ -81,7 +90,45 @@ export function App() {
     }
   }, []);
 
+  const authorizeLlmHost = useCallback(() => {
+    const pattern = llmBaseUrlOriginPattern(llmConfig?.baseUrl ?? '');
+    if (pattern === undefined) {
+      setLlmNotice('请先填写有效的 Base URL（需为 HTTPS，本地调试可用 http://localhost）');
+      return;
+    }
+    const request = chrome.permissions.request({ origins: [pattern] });
+    setLlmNotice(`已发起对 ${pattern} 的访问授权，请在浏览器弹窗中确认…`);
+    void requestPermissionWithTimeout(request).then(async (granted) => {
+      let verified = false;
+      if (granted) {
+        try {
+          verified = await chrome.permissions.contains({ origins: [pattern] });
+        } catch {
+          verified = false;
+        }
+      }
+      setLlmNotice(
+        verified
+          ? `已获得 ${pattern} 的访问授权，可以测试连接`
+          : `未获得 ${pattern} 的访问授权（授权弹窗未确认或已被拒绝），请重试`,
+      );
+    });
+  }, [llmConfig]);
+
   const testLlmConnection = useCallback(async () => {
+    const pattern = llmBaseUrlOriginPattern(llmConfig?.baseUrl ?? '');
+    if (pattern !== undefined) {
+      let granted = false;
+      try {
+        granted = await chrome.permissions.contains({ origins: [pattern] });
+      } catch {
+        granted = false;
+      }
+      if (!granted) {
+        setLlmNotice('尚未授权访问模型服务域名，请先点击「授权模型服务」');
+        return;
+      }
+    }
     setLlmNotice('正在测试连接…');
     const response = (await chrome.runtime.sendMessage({ type: 'LLM_TEST_CONNECTION' })) as LlmTestConnectionResponse;
     setLlmNotice(
@@ -89,7 +136,7 @@ export function App() {
         ? `连接成功：${response.message ?? ''}`
         : `连接失败：${response.message ?? '未知错误'}`,
     );
-  }, []);
+  }, [llmConfig]);
 
   const loadJdContexts = useCallback(async () => {
     const stored = await chrome.storage.session.get(ApplicationContextStore.STORAGE_KEY);
@@ -160,6 +207,10 @@ export function App() {
   }, [refresh, loadCorrections, loadJdContexts, loadLlmConfig]);
 
   const importResume = useCallback(async () => {
+    if (json.trim() === '') {
+      setNotice('请先在文本框粘贴 JSON 简历数据，或点击「载入示例简历」');
+      return;
+    }
     try {
       const facts = JSON.parse(json) as unknown;
       const result = (await chrome.runtime.sendMessage({ type: 'IMPORT_RESUME', facts })) as {
@@ -205,6 +256,66 @@ export function App() {
     setUploadNotice(`已保存附件：${file.name}（${Math.max(1, Math.round(file.size / 1024))} KB）`);
   }, []);
 
+  const parseAttachment = useCallback(async () => {
+    const stored = await loadAttachment();
+    if (stored === null) {
+      setParseNotice('请先选择 PDF 附件');
+      return;
+    }
+    setParsing(true);
+    setParseStats(null);
+    setParseJson('');
+    setParseNotice('正在本地解析 PDF（不上传任何数据）…');
+    const textResult = await extractPdfText(stored.bytes);
+    if (!textResult.ok) {
+      setParseNotice(`PDF 文本提取失败：${textResult.error ?? '未知错误'}`);
+      setParsing(false);
+      return;
+    }
+    if (textResult.empty) {
+      setParseNotice('未能提取到文字（可能是扫描件/图片型 PDF），暂不支持 OCR 识别');
+      setParsing(false);
+      return;
+    }
+    const parsed = extractResumeFacts(textResult.text);
+    setParseStats(parsed.stats);
+    setParseJson(JSON.stringify(parsed.facts, null, 2));
+    setParseNotice(
+      `已提取 ${textResult.pageCount} 页文本（${textResult.text.replace(/\s/g, '').length} 字），请核对下方结果后确认导入`,
+    );
+    setParsing(false);
+  }, []);
+
+  const confirmParsedImport = useCallback(async () => {
+    if (parseJson.trim() === '') {
+      setParseNotice('没有可导入的解析结果');
+      return;
+    }
+    try {
+      const facts = JSON.parse(parseJson) as ResumeFactsDocument;
+      const result = (await chrome.runtime.sendMessage({ type: 'IMPORT_RESUME', facts: markFactsVerified(facts) })) as {
+        ok: boolean;
+        error?: string;
+      };
+      if (result?.ok === true) {
+        setParseNotice('已确认导入并写入知识库');
+        setParseStats(null);
+        setParseJson('');
+        await refresh();
+      } else {
+        setParseNotice(`导入失败：${result?.error ?? '未知错误'}`);
+      }
+    } catch (error) {
+      setParseNotice(`导入失败：${error instanceof Error ? error.message : String(error)}`);
+    }
+  }, [parseJson, refresh]);
+
+  const cancelParse = useCallback(() => {
+    setParseStats(null);
+    setParseJson('');
+    setParseNotice('已取消本次解析结果');
+  }, []);
+
   const uploadAttachment = useCallback(async () => {
     const response = (await chrome.runtime.sendMessage({ type: 'UPLOAD_ATTACHMENT' })) as
       | UploadAttachmentResponse
@@ -232,9 +343,14 @@ export function App() {
     <div className="workbench">
       <div className="card">
         <h2>三层简历知识库 · 原始事实层导入</h2>
-        <textarea value={json} onChange={(event) => setJson(event.target.value)} spellCheck={false} />
+        <textarea
+          data-testid="resume-json"
+          value={json}
+          onChange={(event) => setJson(event.target.value)}
+          spellCheck={false}
+        />
         <div style={{ marginTop: 10 }}>
-          <button className="primary" onClick={() => void importResume()}>
+          <button data-testid="import-resume" className="primary" onClick={() => void importResume()}>
             导入并编译
           </button>
           <button onClick={loadSample}>载入示例简历</button>
@@ -242,7 +358,11 @@ export function App() {
           <button onClick={() => void refresh()}>刷新状态</button>
           <button onClick={exportCompiled}>导出已编译 JSON</button>
         </div>
-        {notice !== '' ? <p className="notice">{notice}</p> : null}
+        {notice !== '' ? (
+          <p className="notice" data-testid="import-notice">
+            {notice}
+          </p>
+        ) : null}
       </div>
 
       <div className="card">
@@ -258,10 +378,49 @@ export function App() {
           <button data-testid="upload-attachment" className="primary" onClick={() => void uploadAttachment()}>
             上传附件到当前页面
           </button>
+          <button data-testid="parse-attachment" disabled={parsing} onClick={() => void parseAttachment()}>
+            解析为简历（本地）
+          </button>
           <span style={{ marginLeft: 10, fontSize: 13 }}>
             {attachmentName === '' ? '未选择附件' : `当前附件：${attachmentName}`}
           </span>
         </div>
+        {parseNotice !== '' ? (
+          <p className="notice" data-testid="parse-notice">
+            {parseNotice}
+          </p>
+        ) : null}
+        {parseStats !== null ? (
+          <div data-testid="parse-preview" style={{ marginTop: 10 }}>
+            <p style={{ fontSize: 13 }} data-testid="parse-stats">
+              个人信息 {parseStats.basic.length} 项 · 教育经历 {parseStats.education} 段 · 工作/实习{' '}
+              {parseStats.work} 段 · 项目经历 {parseStats.projects} 段 · 技能/证书 {parseStats.skills} 项 · 需要确认{' '}
+              {parseStats.uncertain.length} 项
+            </p>
+            {parseStats.uncertain.length > 0 ? (
+              <ul data-testid="parse-uncertain" style={{ paddingLeft: 18, fontSize: 12, color: '#a15c00' }}>
+                {parseStats.uncertain.map((item) => (
+                  <li key={item}>{item}</li>
+                ))}
+              </ul>
+            ) : null}
+            <textarea
+              data-testid="parse-json"
+              style={{ minHeight: 160, width: '100%' }}
+              value={parseJson}
+              spellCheck={false}
+              onChange={(event) => setParseJson(event.target.value)}
+            />
+            <div style={{ marginTop: 8 }}>
+              <button data-testid="parse-confirm" className="primary" onClick={() => void confirmParsedImport()}>
+                确认导入
+              </button>
+              <button data-testid="parse-cancel" onClick={cancelParse}>
+                取消
+              </button>
+            </div>
+          </div>
+        ) : null}
         {uploadNotice !== '' ? (
           <p className="notice" data-testid="upload-notice">
             {uploadNotice}
@@ -335,6 +494,7 @@ export function App() {
         <p style={{ fontSize: 13 }}>
           当本地规则与缓存无法识别表单字段时，可选择把字段标签等元信息（不含任何简历内容）发送到你自己配置的
           OpenAI 兼容接口，由模型返回简历路径建议。默认关闭；API Key 仅保存在本机浏览器存储中，不会上传到任何其他服务器。
+          首次使用需先点击「授权模型服务」在浏览器弹窗中允许访问所填域名（可随时在扩展管理页撤销）。
         </p>
         <label style={{ display: 'block', fontSize: 13, marginTop: 8 }}>
           <input
@@ -376,6 +536,9 @@ export function App() {
         <div style={{ marginTop: 10 }}>
           <button data-testid="llm-save" className="primary" onClick={() => void saveLlmConfig()}>
             保存配置
+          </button>
+          <button data-testid="llm-authorize" onClick={authorizeLlmHost}>
+            授权模型服务
           </button>
           <button data-testid="llm-test" onClick={() => void testLlmConnection()}>
             测试连接

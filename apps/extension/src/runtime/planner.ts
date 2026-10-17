@@ -285,5 +285,8 @@ function entriesOf(compiled: CompiledResume, sectionType: SectionType): Array<{ 
   if (sectionType === 'project') {
     return compiled.normalized.projects;
   }
+  if (sectionType === 'work') {
+    return compiled.normalized.work;
+  }
   return [];
 }

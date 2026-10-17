@@ -41,6 +41,22 @@ export interface ProjectFacts {
   endDate?: ResumeFact<string>;
 }
 
+export interface WorkFacts {
+  id: string;
+  company: ResumeFact<string>;
+  role?: ResumeFact<string>;
+  description?: ResumeFact<string>;
+  startDate?: ResumeFact<string>;
+  endDate?: ResumeFact<string>;
+}
+
+export interface SkillFacts {
+  id: string;
+  name: ResumeFact<string>;
+  category?: ResumeFact<string>;
+  level?: ResumeFact<string>;
+}
+
 export interface PreferenceFacts {
   expectedSalary?: ResumeFact<number>;
   freshGraduate?: ResumeFact<boolean>;
@@ -51,7 +67,9 @@ export interface ResumeFactsDocument {
   schemaVersion: number;
   basic: BasicFacts;
   education: EducationFacts[];
+  work?: WorkFacts[];
   projects?: ProjectFacts[];
+  skills?: SkillFacts[];
   preferences: PreferenceFacts;
   updatedAt: number;
 }
@@ -82,6 +100,22 @@ export interface ProjectEntry {
   endDate?: DateAtom | { present: true };
 }
 
+export interface WorkEntry {
+  id: string;
+  company: string;
+  role?: string;
+  description?: string;
+  startDate?: DateAtom;
+  endDate?: DateAtom | { present: true };
+}
+
+export interface SkillEntry {
+  id: string;
+  name: string;
+  category?: string;
+  level?: string;
+}
+
 export interface NormalizedBasic {
   name: string;
   phone?: string;
@@ -105,7 +139,9 @@ export interface NormalizedPreferences {
 export interface NormalizedResume {
   basic: NormalizedBasic;
   education: EducationEntry[];
+  work: WorkEntry[];
   projects: ProjectEntry[];
+  skills: SkillEntry[];
   preferences: NormalizedPreferences;
 }
 

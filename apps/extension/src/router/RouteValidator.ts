@@ -55,7 +55,9 @@ export function resolveResumePath(source: ResumeRouteSource, path: string): Reso
   const root: Record<string, unknown> = {
     basic: source.normalized.basic,
     education: source.normalized.education,
+    work: source.normalized.work,
     projects: source.normalized.projects,
+    skills: source.normalized.skills,
     preferences: source.normalized.preferences,
     projections: source.projections,
   };

@@ -5,7 +5,12 @@ import type { FetchLike } from '@/background/ModelProvider';
 import { ModelProvider } from '@/background/ModelProvider';
 import { extractJsonObject, validateLlmMappings } from '@/router/LLMResponseValidator';
 import { buildLlmRoutingPrompt } from '@/router/PromptBuilder';
-import { DEFAULT_LLM_CONFIG, LLM_DISABLED_ERROR, LLM_CONFIG_STORAGE_KEY } from '@/shared/contracts/llm';
+import {
+  DEFAULT_LLM_CONFIG,
+  LLM_DISABLED_ERROR,
+  LLM_CONFIG_STORAGE_KEY,
+  llmBaseUrlOriginPattern,
+} from '@/shared/contracts/llm';
 import type { LlmFieldRef, LlmProviderConfig } from '@/shared/contracts/llm';
 
 function makeStorage(initial?: Record<string, unknown>): {
@@ -155,6 +160,23 @@ describe('LLMGateway', () => {
     expect(result.message).toContain('test-model');
   });
 
+  it('模型返回 JSON 但缺少 ok:true 时视为测试失败', async () => {
+    const { area } = makeStorage({ [LLM_CONFIG_STORAGE_KEY]: enabledConfig() });
+    const fetchFn: FetchLike = async () => chatResponse('{"status":"ok"}');
+    const gateway = new LLMGateway({ fetchFn, storageArea: area });
+    const result = await gateway.testConnection();
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain('ok');
+  });
+
+  it('模型返回非 JSON 内容时视为测试失败', async () => {
+    const { area } = makeStorage({ [LLM_CONFIG_STORAGE_KEY]: enabledConfig() });
+    const fetchFn: FetchLike = async () => chatResponse('plain text');
+    const gateway = new LLMGateway({ fetchFn, storageArea: area });
+    const result = await gateway.testConnection();
+    expect(result.ok).toBe(false);
+  });
+
   it('保存配置时合并并归一化数值', async () => {
     const { area, state } = makeStorage();
     const gateway = new LLMGateway({ fetchFn: async () => chatResponse('{}'), storageArea: area });
@@ -166,7 +188,46 @@ describe('LLMGateway', () => {
   });
 });
 
+describe('llmBaseUrlOriginPattern', () => {
+  it('HTTPS 地址映射为域名 host 权限模式', () => {
+    expect(llmBaseUrlOriginPattern('https://api.deepseek.com')).toBe('https://api.deepseek.com/*');
+    expect(llmBaseUrlOriginPattern('https://api.deepseek.com/v1')).toBe('https://api.deepseek.com/*');
+    expect(llmBaseUrlOriginPattern(' https://api.example.com/v1 ')).toBe('https://api.example.com/*');
+  });
+
+  it('本地 http 调试地址允许授权', () => {
+    expect(llmBaseUrlOriginPattern('http://localhost:11434/v1')).toBe('http://localhost/*');
+    expect(llmBaseUrlOriginPattern('http://127.0.0.1:8000')).toBe('http://127.0.0.1/*');
+  });
+
+  it('拒绝公网 http、空值与非法输入', () => {
+    expect(llmBaseUrlOriginPattern('http://api.example.com/v1')).toBeUndefined();
+    expect(llmBaseUrlOriginPattern('')).toBeUndefined();
+    expect(llmBaseUrlOriginPattern('not a url')).toBeUndefined();
+    expect(llmBaseUrlOriginPattern('ftp://api.example.com')).toBeUndefined();
+  });
+});
+
 describe('ModelProvider', () => {
+  it('默认使用全局 fetch 并保持正确的 this 绑定', async () => {
+    const originalFetch = globalThis.fetch;
+    const calls: Array<{ thisArg: unknown }> = [];
+    const stub = function (this: unknown): Promise<Response> {
+      calls.push({ thisArg: this });
+      return Promise.resolve(chatResponse('{"ok":true}'));
+    };
+    globalThis.fetch = stub as unknown as typeof fetch;
+    try {
+      const provider = new ModelProvider(enabledConfig({ maxRetries: 0 }));
+      const result = await provider.complete({ system: 's', user: 'u' });
+      expect(result.ok).toBe(true);
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.thisArg).toBe(globalThis);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it('对 5xx 响应按 maxRetries 重试一次', async () => {
     let calls = 0;
     const fetchFn: FetchLike = async () => {

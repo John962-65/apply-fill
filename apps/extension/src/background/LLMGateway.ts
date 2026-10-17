@@ -101,6 +101,9 @@ export class LLMGateway {
     if (payload === undefined || typeof payload !== 'object') {
       return { ok: false, message: '模型响应无法解析为 JSON，请检查模型是否兼容 OpenAI 接口' };
     }
+    if ((payload as { ok?: unknown }).ok !== true) {
+      return { ok: false, message: '模型未返回 {"ok":true}，接口可能不是 OpenAI 兼容格式' };
+    }
     return { ok: true, message: `模型 ${config.model} 响应正常` };
   }
 }

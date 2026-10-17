@@ -105,6 +105,9 @@ function entryIdsOf(compiled: CompiledResume, sectionType: SectionType): string[
   if (sectionType === 'project') {
     return compiled.normalized.projects.map((entry) => entry.id);
   }
+  if (sectionType === 'work') {
+    return compiled.normalized.work.map((entry) => entry.id);
+  }
   return [];
 }
 

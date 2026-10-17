@@ -3,7 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { FieldExecutionResult, FieldStatus } from '@/shared/contracts/field';
 import type { SessionRunState } from '@/shared/contracts/run';
 import type { ActiveTabInfo, PanelPortMessage, ResumeStatusInfo, TabCommand } from '@/shared/messages/protocol';
-import { hostPermissionPattern } from '@/shared/utils';
+import { hostPermissionPattern, requestPermissionWithTimeout } from '@/shared/utils';
 
 const STATUS_TEXT: Record<string, string> = {
   VERIFIED: '已填写',
@@ -24,26 +24,6 @@ function fieldStatusText(result: FieldExecutionResult): string {
 
 function statusLabel(status: FieldStatus | string): string {
   return STATUS_TEXT[status] ?? status;
-}
-
-const PERMISSION_REQUEST_TIMEOUT_MS = 12_000;
-
-function requestPermissionsWithTimeout(request: Promise<boolean>): Promise<boolean> {
-  return new Promise<boolean>((resolve) => {
-    const timer = setTimeout(() => {
-      resolve(false);
-    }, PERMISSION_REQUEST_TIMEOUT_MS);
-    request.then(
-      (value) => {
-        clearTimeout(timer);
-        resolve(value);
-      },
-      () => {
-        clearTimeout(timer);
-        resolve(false);
-      },
-    );
-  });
 }
 
 export function App() {
@@ -149,7 +129,7 @@ export function App() {
       }
       if (!granted) {
         try {
-          granted = await requestPermissionsWithTimeout(chrome.permissions.request({ origins: [pattern] }));
+          granted = await requestPermissionWithTimeout(chrome.permissions.request({ origins: [pattern] }));
         } catch {
           granted = false;
         }

@@ -69,6 +69,31 @@ export interface LlmTestConnectionResponse {
 export const LLM_DISABLED_ERROR = 'LLM_DISABLED';
 export const LLM_NOT_CONFIGURED_ERROR = 'LLM_NOT_CONFIGURED';
 
+const LOCAL_LLM_HOSTS = new Set(['localhost', '127.0.0.1']);
+
+export function llmBaseUrlOriginPattern(raw: string): string | undefined {
+  const trimmed = raw.trim();
+  if (trimmed === '') {
+    return undefined;
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    return undefined;
+  }
+  if (parsed.hostname === '') {
+    return undefined;
+  }
+  if (parsed.protocol === 'https:') {
+    return `${parsed.protocol}//${parsed.hostname}/*`;
+  }
+  if (parsed.protocol === 'http:' && LOCAL_LLM_HOSTS.has(parsed.hostname)) {
+    return `${parsed.protocol}//${parsed.hostname}/*`;
+  }
+  return undefined;
+}
+
 function clampNumber(value: unknown, fallback: number, min: number, max: number): number {
   if (typeof value !== 'number' || !Number.isFinite(value)) {
     return fallback;

@@ -108,6 +108,29 @@ export const DEFAULT_RULES: RouteRule[] = [
     targetPath: 'education[{index}].major',
   },
   {
+    id: 'work.company',
+    patterns: ['公司名称', '公司', '单位名称', '工作单位', '公司全称', '实习单位', '实习公司'],
+    targetPath: 'work[{index}].company',
+  },
+  {
+    id: 'work.role',
+    patterns: ['职位', '岗位', '职位名称', '岗位名称', '工作职位', '职务', '实习岗位'],
+    targetPath: 'work[{index}].role',
+    controlKinds: ['text', 'select'],
+  },
+  {
+    id: 'work.description',
+    patterns: ['工作描述', '工作内容', '工作职责', '实习内容', '工作业绩'],
+    targetPath: 'work[{index}].description',
+    controlKinds: ['textarea', 'text'],
+  },
+  {
+    id: 'work.dateRange',
+    patterns: ['工作时间', '在职时间', '实习时间', '任职时间'],
+    targetPath: 'work[{index}].dateRange',
+    controlKinds: ['combobox'],
+  },
+  {
     id: 'project.name',
     patterns: ['项目名称', '项目标题', '项目名'],
     targetPath: 'projects[{index}].name',
