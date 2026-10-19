@@ -48,6 +48,15 @@ test('两段经历同名时触发人工确认且不盲目绑定', async () => {
     await expect(page.getByTestId('project-name-104')).toHaveValue(repeaterProjectAt(2).name);
     await expect(page.getByTestId('project-name-1')).toHaveValue(repeaterProjectAt(0).name);
     await expect(page.getByTestId('edu-school-102')).toHaveValue('示例职业学院');
+    const roleRow = page.getByTestId('pill-row').filter({ hasText: '担任角色' });
+    await expect(roleRow).toContainText('经历身份或字段来源存在歧义');
+    await roleRow.getByTestId('pill-source').click();
+    await roleRow.getByTestId('pill-source-select').selectOption('projects[1].role');
+    await expect(page.getByTestId('project-role-103')).toHaveValue(repeaterProjectAt(1).role);
+    await expect(roleRow).toHaveCount(0);
+    // Confirming one field does not authorize the rest of the contested block.
+    await expect(page.getByTestId('project-name-103')).toHaveValue(repeaterProjectAt(0).name);
+    await expect(page.getByTestId('project-desc-103')).toHaveValue(repeaterProjectAt(0).desc);
   } finally {
     await session.close();
   }

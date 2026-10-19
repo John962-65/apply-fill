@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import { readFileSync } from 'node:fs';
 
 import { launchExtensionContext, openWorkbench } from './helpers/extension';
 
@@ -92,6 +93,36 @@ test('空 JSON 导入给出友好提示而不是解析错误', async () => {
     const workbench = await openWorkbench(session.context, session.extensionId);
     await workbench.getByTestId('import-resume').click();
     await expect(workbench.getByTestId('import-notice')).toContainText('请先在文本框粘贴');
+  } finally {
+    await session.close();
+  }
+});
+
+test('工作台导出可重新导入，当前事实可编辑，非法导入不覆盖已存简历', async () => {
+  const session = await launchExtensionContext();
+  try {
+    const workbench = await openWorkbench(session.context, session.extensionId);
+    await workbench.getByRole('button', { name: '载入示例简历' }).click();
+    await workbench.getByTestId('import-resume').click();
+    await expect(workbench.getByTestId('import-notice')).toContainText('导入并编译成功');
+    const downloadPromise = workbench.waitForEvent('download');
+    await workbench.getByRole('button', { name: '导出已编译 JSON' }).click();
+    const download = await downloadPromise;
+    const exported = readFileSync((await download.path())!, 'utf8');
+    await workbench.getByTestId('resume-json').fill(exported);
+    await workbench.getByTestId('import-resume').click();
+    await expect(workbench.getByTestId('import-notice')).toContainText('导入并编译成功');
+    await workbench.getByRole('button', { name: '编辑当前简历' }).click();
+    const facts = JSON.parse(await workbench.getByTestId('resume-json').inputValue());
+    facts.basic.name.value = '审核后的姓名';
+    await workbench.getByTestId('resume-json').fill(JSON.stringify(facts));
+    await workbench.getByTestId('import-resume').click();
+    await expect(workbench.locator('body')).toContainText('已导入：审核后的姓名');
+    facts.education[1].id = facts.education[0].id;
+    await workbench.getByTestId('resume-json').fill(JSON.stringify(facts));
+    await workbench.getByTestId('import-resume').click();
+    await expect(workbench.getByTestId('import-notice')).toContainText('重复');
+    await expect(workbench.locator('body')).toContainText('已导入：审核后的姓名');
   } finally {
     await session.close();
   }

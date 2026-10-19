@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { expandSection } from '@/perceptor/RepeaterManager';
 import { scanRepeatableSections } from '@/perceptor/SectionScanner';
@@ -89,5 +89,26 @@ describe('expandSection', () => {
     expect(result.status).toBe('NO_PROGRESS');
     expect(result.clicks).toBe(2);
     expect(result.after).toBe(3);
+  });
+
+  it('扩容前取消不产生任何点击', async () => {
+    const section = setupRepeater(true);
+    const click = vi.spyOn(section.addControl!, 'click');
+    const controller = new AbortController();
+    controller.abort();
+    await expect(expandSection(section, 3, { signal: controller.signal })).rejects.toThrow('aborted');
+    expect(click).not.toHaveBeenCalled();
+  });
+
+  it('等待新增经历时取消，即使旧请求随后返回也不继续扩容', async () => {
+    const section = setupRepeater(true);
+    const click = vi.spyOn(section.addControl!, 'click');
+    const controller = new AbortController();
+    const pending = expandSection(section, 3, { signal: controller.signal, perAddTimeoutMs: 1000 });
+    await vi.waitFor(() => expect(click).toHaveBeenCalledTimes(1));
+    controller.abort();
+    await expect(pending).rejects.toThrow('aborted');
+    document.querySelector('.list')?.insertAdjacentHTML('beforeend', projectItem('late'));
+    expect(click).toHaveBeenCalledTimes(1);
   });
 });

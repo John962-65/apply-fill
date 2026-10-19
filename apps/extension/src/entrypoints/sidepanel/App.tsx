@@ -1,11 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { mappingIssueText } from '@/shared/utils/runReport';
 
 import type { FieldExecutionResult, FieldStatus } from '@/shared/contracts/field';
 import type { SessionRunState } from '@/shared/contracts/run';
 import type { ActiveTabInfo, PanelPortMessage, ResumeStatusInfo, TabCommand } from '@/shared/messages/protocol';
 import { hostPermissionPattern, requestPermissionWithTimeout } from '@/shared/utils';
+import { createId } from '@/shared/utils/id';
 
 const STATUS_TEXT: Record<string, string> = {
+  IDLE: '未开始', RUNNING: '填写中', PAUSED: '已暂停', COMPLETED: '已完成', FAILED: '失败', INTERRUPTED: '已中断',
   VERIFIED: '已填写',
   USER_OVERRIDDEN: '用户接管',
   NEEDS_MANUAL: '需人工',
@@ -28,6 +31,8 @@ function statusLabel(status: FieldStatus | string): string {
 
 export function App() {
   const portRef = useRef<chrome.runtime.Port | null>(null);
+  const pendingCommand = useRef<{ requestId: string; command: TabCommand; tabId?: number } | null>(null);
+  const refreshRevision = useRef(0);
   const [connected, setConnected] = useState(false);
   const [runState, setRunState] = useState<SessionRunState | null>(null);
   const [resumeStatus, setResumeStatus] = useState<ResumeStatusInfo | null>(null);
@@ -36,9 +41,12 @@ export function App() {
   const [notice, setNotice] = useState('');
 
   const refreshInfo = useCallback(async () => {
+    const revision = ++refreshRevision.current;
     const status = (await chrome.runtime.sendMessage({ type: 'GET_RESUME_STATUS' })) as ResumeStatusInfo;
+    if (revision !== refreshRevision.current) return;
     setResumeStatus(status);
     const info = (await chrome.runtime.sendMessage({ type: 'GET_ACTIVE_TAB_INFO' })) as ActiveTabInfo;
+    if (revision !== refreshRevision.current) return;
     setTabInfo(info);
   }, []);
 
@@ -63,14 +71,25 @@ export function App() {
       setConnected(true);
       port.onMessage.addListener((message: PanelPortMessage) => {
         if (message.type === 'RUN_STATE') {
-          setRunState(message.state);
+          const state = message.state;
+          setRunState((current) => {
+            if (current && state && state.tabId === current.tabId && state.updatedAt < current.updatedAt) return current;
+            if (current && state && state.runId === current.runId && !['RUNNING', 'PAUSED'].includes(current.status) && ['RUNNING', 'PAUSED'].includes(state.status)) return current;
+            return state;
+          });
         } else if (message.type === 'RUN_EVENT') {
           port?.postMessage({ type: 'PANEL_COMMAND', command: 'GET_STATE' } satisfies PanelPortMessage);
         } else if (message.type === 'TAB_INFO_UPDATED') {
           setTabInfo(message.info);
         } else if (message.type === 'COMMAND_RESULT') {
+          if (message.requestId && pendingCommand.current?.requestId !== message.requestId) return;
+          const tabId = pendingCommand.current?.tabId;
+          if (message.summary && tabId !== undefined) setRunState({ tabId, runId: message.summary.runId,
+            status: message.summary.status, summary: message.summary, updatedAt: Date.now(), startedAt: message.summary.startedAt });
+          pendingCommand.current = null;
           setBusy(false);
           setNotice(message.message ?? '');
+          void refreshInfo();
         }
       });
       port.onDisconnect.addListener(() => {
@@ -101,16 +120,20 @@ export function App() {
   }, [refreshInfo]);
 
   const sendCommand = useCallback((command: TabCommand, fieldKey?: string) => {
+    const requestId = createId('command');
     if (command !== 'GET_STATE') {
       setBusy(true);
       setNotice('');
+      pendingCommand.current = { requestId, command, ...(tabInfo?.tabId !== undefined ? { tabId: tabInfo.tabId } : {}) };
     }
     portRef.current?.postMessage({
       type: 'PANEL_COMMAND',
       command,
+      requestId,
+      ...(tabInfo?.tabId !== undefined ? { tabId: tabInfo.tabId } : {}),
       ...(fieldKey !== undefined ? { fieldKey } : {}),
     } satisfies PanelPortMessage);
-  }, []);
+  }, [tabInfo?.tabId]);
 
   const requestPermission = useCallback(async () => {
     if (!tabInfo?.url) return;
@@ -189,8 +212,14 @@ export function App() {
   const summary = runState?.summary;
   const fields = summary?.fields ?? [];
   const noDataIssues = summary?.mappingIssues.filter((issue) => issue.kind === 'NO_DATA').length ?? 0;
-  const userProtectedFields = summary?.dirty?.userProtected.length ?? 0;
-  const detectedUserEdits = (summary?.counts.userOverridden ?? 0) + userProtectedFields;
+  const userProtectedKeys = new Set([
+    ...fields.filter((field) => field.status === 'USER_OVERRIDDEN').map((field) => field.fieldKey),
+    ...(summary?.dirty?.userProtected ?? []),
+  ]);
+  const userProtectedFields = userProtectedKeys.size;
+  const detectedUserEdits = userProtectedKeys.size;
+  const taskActive = runState?.status === 'RUNNING' || runState?.status === 'PAUSED';
+  const taskStarting = busy && pendingCommand.current?.command === 'RUN_ACTIVE_TAB';
   const unconfirmedCommits = fields.filter((field) => field.commit?.status === 'UNKNOWN').length;
   const retryableStatuses = new Set(['NEEDS_MANUAL', 'RETRYABLE', 'CIRCUIT_BROKEN']);
 
@@ -248,7 +277,7 @@ export function App() {
           <button
             className="primary"
             data-testid="start-fill-btn"
-            disabled={busy || !connected || !tabInfo?.contentScriptAlive}
+            disabled={busy || taskActive || !connected || !tabInfo?.contentScriptAlive || !resumeStatus?.hasResume || !tabInfo?.hasPermission}
             onClick={() => {
               if (!tabInfo?.contentScriptAlive) {
                 setNotice('Content Script 未连接：请先授权并注入内容脚本');
@@ -259,13 +288,13 @@ export function App() {
           >
             开始填写
           </button>
-          <button disabled={busy || !connected} onClick={() => sendCommand('PAUSE_RUN')}>
+          <button disabled={!connected || runState?.status !== 'RUNNING'} onClick={() => sendCommand('PAUSE_RUN')}>
             暂停
           </button>
-          <button disabled={busy || !connected} onClick={() => sendCommand('RESUME_RUN')}>
+          <button disabled={!connected || runState?.status !== 'PAUSED'} onClick={() => sendCommand('RESUME_RUN')}>
             恢复
           </button>
-          <button className="danger" disabled={busy || !connected} onClick={() => sendCommand('CANCEL_RUN')}>
+          <button className="danger" disabled={!connected || (!taskActive && !taskStarting)} onClick={() => sendCommand('CANCEL_RUN')}>
             取消
           </button>
         </div>
@@ -305,6 +334,7 @@ export function App() {
         ) : (
           <>
             <div className="meta" data-testid="final-report">
+              <div>本次操作：{runState?.operation === 'upload' ? '附件上传' : runState?.operation === 'field' ? '单字段修正' : '整页填写'}</div>
               <div>
                 已扫描字段：<span data-testid="report-scanned">{summary.counts.scanned}</span>
               </div>
@@ -327,7 +357,7 @@ export function App() {
                 已保护用户修改：<span data-testid="report-protected">{userProtectedFields}</span>
               </div>
               <div>
-                跨段错填：<span data-testid="report-crosssection">0</span>
+                跨段错填：<span data-testid="report-crosssection">未独立测量</span>
               </div>
               <div>
                 未确认提交字段：<span data-testid="report-unconfirmed">{unconfirmedCommits}</span>
@@ -340,6 +370,11 @@ export function App() {
                 {summary.llm.failed ? '（部分请求失败，已回退本地规则）' : ''}
               </div>
             ) : null}
+            {summary.mappingIssues.filter((issue) => issue.reason === 'EXPAND_SECTION_AMBIGUOUS').map((issue, index) => (
+              <div className="notice" data-testid="repeater-choice-notice" key={`${issue.label}:${index}`}>
+                {issue.label}有多个添加入口。请手动添加需要的空白条目，再重新填写。
+              </div>
+            ))}
             {summary.recovery !== undefined ? (
               <div className="meta" data-testid="recovery-line">
                 有界恢复：重验 {summary.recovery.reverified} · 补填 {summary.recovery.refilled} · 转人工{' '}
@@ -374,6 +409,15 @@ export function App() {
                     </button>
                   ) : null}
                   <span className={statusClass(result.status)}>{fieldStatusText(result)}</span>
+                </li>
+              ))}
+            </ul>
+            <ul className="field-list" data-testid="mapping-issues">
+              {summary.mappingIssues.filter((issue) => !fields.some((field) => field.fieldKey === issue.fieldKey &&
+                ['VERIFIED', 'USER_OVERRIDDEN'].includes(field.status))).map((issue, index) => (
+                <li className="field-item" key={`${issue.fieldKey ?? issue.label}:${issue.reason}:${index}`}>
+                  <span className="field-label">{issue.label || '经历区块'}</span>
+                  <span>{mappingIssueText(issue)}</span>
                 </li>
               ))}
             </ul>

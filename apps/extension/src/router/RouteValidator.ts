@@ -80,6 +80,7 @@ export function resolveResumePath(source: ResumeRouteSource, path: string): Reso
       current = derived;
       continue;
     }
+    if (!Object.prototype.hasOwnProperty.call(current, key)) return { found: false };
     current = (current as Record<string, unknown>)[key];
     if (indexRaw !== undefined) {
       if (!Array.isArray(current)) {

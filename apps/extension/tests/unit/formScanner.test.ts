@@ -58,6 +58,17 @@ describe('FormScanner', () => {
 });
 
 describe('FieldDistiller', () => {
+  it('包裹式标签不混入 Select 选项、textarea 默认正文或组合框当前值', () => {
+    document.body.innerHTML = '<label>性别<select id="wrapped-select"><option>请选择</option><option>男</option><option>女</option></select></label>' +
+      '<label for="wrapped-text">个人简介<textarea id="wrapped-text">用户的私人正文</textarea></label>' +
+      '<label>城市<div id="wrapped-combo" role="combobox" aria-haspopup="listbox">北京市</div></label>';
+    expect(distillField(mustQuery('#wrapped-select'))?.label).toBe('性别');
+    expect(distillField(mustQuery('#wrapped-text'))?.label).toBe('个人简介');
+    expect(distillField(mustQuery('#wrapped-combo'))?.label).toBe('城市');
+    mustQuery('#wrapped-combo').textContent = '上海市';
+    expect(distillField(mustQuery('#wrapped-combo'))?.descriptor.normalizedLabel).toBe('城市');
+  });
+
   it('label-for 提供标签与来源', () => {
     document.body.innerHTML = '<label for="name">姓名</label><input id="name" name="fullName" required />';
     const field = distillField(mustQuery('#name'));
@@ -94,7 +105,8 @@ describe('FieldDistiller', () => {
     expect(field?.label).toBe('性别');
     expect(field?.controlKind).toBe('radio');
     expect(field?.options).toEqual(['男', '女']);
-    expect(field?.descriptor.disambiguator?.groupLabel).toBe('gender');
+    expect(field?.descriptor.disambiguator?.groupLabel).toBe('性别');
+    expect(field?.descriptor.disambiguator?.fieldName).toBe('gender');
   });
 
   it('distillElements 去重同一单选组', () => {

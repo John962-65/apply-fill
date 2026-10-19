@@ -56,6 +56,7 @@ export interface ReanchorResult {
 export type InstanceReportStatus = 'MATCHED' | 'NEW_INSTANCE' | 'AMBIGUOUS' | 'MISSING';
 
 export interface InstanceReport {
+  stepId?: string;
   sectionType: SectionType;
   containerIndex: number;
   instanceId?: string;

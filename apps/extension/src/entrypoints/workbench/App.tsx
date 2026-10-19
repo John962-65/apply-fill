@@ -1,10 +1,8 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ChangeEvent } from 'react';
 
-import { ApplicationContextStore } from '@/jd/ApplicationContext';
-import type { ApplicationContext } from '@/jd/ApplicationContext';
-import { UserCorrectionStore } from '@/memory/UserCorrectionStore';
-import type { UserCorrectionRecord } from '@/memory/UserCorrectionStore';
+import { CORRECTIONS_KEY, JOB_CONTEXTS_KEY, JOB_VERSIONS_KEY } from '@/shared/contracts/context';
+import type { ApplicationContext, CorrectionResponse, JobContextResponse, JobVersion, UserCorrectionRecord } from '@/shared/contracts/context';
 import { extractPdfText } from '@/resume/parser/pdfText';
 import { extractResumeFacts, markFactsVerified } from '@/resume/parser/resumeStructureExtractor';
 import type { ResumeParseStats } from '@/resume/parser/resumeStructureExtractor';
@@ -16,8 +14,8 @@ import type {
   LlmTestConnectionResponse,
 } from '@/shared/contracts/llm';
 import { llmBaseUrlOriginPattern } from '@/shared/contracts/llm';
-import type { CompiledResume, ResumeFactsDocument } from '@/shared/contracts/resume';
-import type { CompiledResumeResponse, ResumeStatusInfo, UploadAttachmentResponse } from '@/shared/messages/protocol';
+import type { CompiledResume, ResumeFactsDocument, ResumeVersionInfo } from '@/shared/contracts/resume';
+import type { ActiveTabInfo, CompiledResumeResponse, ResumeStatusInfo, SimpleAck, UploadAttachmentResponse } from '@/shared/messages/protocol';
 import { createSampleResumeFacts } from '@/shared/samples/sampleResume';
 import { requestPermissionWithTimeout } from '@/shared/utils';
 
@@ -31,10 +29,18 @@ export function App() {
   const [notice, setNotice] = useState('');
   const [status, setStatus] = useState<ResumeStatusInfo | null>(null);
   const [compiled, setCompiled] = useState<CompiledResume | null>(null);
+  const [versions, setVersions] = useState<ResumeVersionInfo[]>([]);
+  const [versionLabel, setVersionLabel] = useState('');
+  const [versionBusy, setVersionBusy] = useState(false);
+  const resumeLoadRevision = useRef(0);
   const [attachmentName, setAttachmentName] = useState('');
   const [uploadNotice, setUploadNotice] = useState('');
   const [corrections, setCorrections] = useState<UserCorrectionRecord[]>([]);
   const [jdContexts, setJdContexts] = useState<ApplicationContext[]>([]);
+  const [jobVersions, setJobVersions] = useState<JobVersion[]>([]);
+  const [jdNotice, setJdNotice] = useState('');
+  const correctionLoadRevision = useRef(0);
+  const contextLoadRevision = useRef(0);
   const [llmConfig, setLlmConfig] = useState<LlmConfigView | null>(null);
   const [llmApiKey, setLlmApiKey] = useState('');
   const [llmNotice, setLlmNotice] = useState('');
@@ -139,22 +145,17 @@ export function App() {
   }, [llmConfig]);
 
   const loadJdContexts = useCallback(async () => {
-    const stored = await chrome.storage.session.get(ApplicationContextStore.STORAGE_KEY);
-    const store = new ApplicationContextStore();
-    store.loadFromJSON(stored[ApplicationContextStore.STORAGE_KEY]);
-    setJdContexts(
-      store
-        .toJSON()
-        .entries.map(([, context]) => context)
-        .sort((a, b) => b.capturedAt - a.capturedAt),
-    );
+    const revision = ++contextLoadRevision.current;
+    const response = await chrome.runtime.sendMessage({ type: 'LIST_JOB_CONTEXTS' }) as JobContextResponse;
+    if (response?.ok && revision === contextLoadRevision.current) setJdContexts(response.contexts ?? []);
+    const saved = await chrome.runtime.sendMessage({ type: 'LIST_JOB_VERSIONS' }) as JobContextResponse;
+    if (saved?.ok && revision === contextLoadRevision.current) setJobVersions(saved.versions ?? []);
   }, []);
 
   const loadCorrections = useCallback(async () => {
-    const stored = await chrome.storage.local.get(UserCorrectionStore.STORAGE_KEY);
-    const store = new UserCorrectionStore();
-    store.loadFromJSON(stored[UserCorrectionStore.STORAGE_KEY]);
-    setCorrections(store.list().slice().reverse());
+    const revision = ++correctionLoadRevision.current;
+    const response = await chrome.runtime.sendMessage({ type: 'LOAD_CORRECTIONS' }) as CorrectionResponse;
+    if (response?.ok && revision === correctionLoadRevision.current) setCorrections(response.snapshot?.records.slice().reverse() ?? []);
   }, []);
 
   useEffect(() => {
@@ -162,10 +163,10 @@ export function App() {
       changes: Record<string, chrome.storage.StorageChange>,
       area: string,
     ): void => {
-      if (area === 'local' && changes[UserCorrectionStore.STORAGE_KEY] !== undefined) {
+      if (area === 'local' && changes[CORRECTIONS_KEY] !== undefined) {
         void loadCorrections();
       }
-      if (area === 'session' && changes[ApplicationContextStore.STORAGE_KEY] !== undefined) {
+      if ((area === 'session' && changes[JOB_CONTEXTS_KEY] !== undefined) || (area === 'local' && changes[JOB_VERSIONS_KEY] !== undefined)) {
         void loadJdContexts();
       }
     };
@@ -175,28 +176,44 @@ export function App() {
 
   const dismissCorrection = useCallback(
     async (id: string) => {
-      const stored = await chrome.storage.local.get(UserCorrectionStore.STORAGE_KEY);
-      const store = new UserCorrectionStore();
-      store.loadFromJSON(stored[UserCorrectionStore.STORAGE_KEY]);
-      store.remove(id);
-      await chrome.storage.local.set({ [UserCorrectionStore.STORAGE_KEY]: store.toJSON() });
+      const response = await chrome.runtime.sendMessage({ type: 'REMOVE_CORRECTION', id }) as SimpleAck;
+      if (!response?.ok) { setNotice('删除修正记录失败，请重试'); return; }
       await loadCorrections();
     },
     [loadCorrections],
   );
 
   const clearCorrections = useCallback(async () => {
-    await chrome.storage.local.remove(UserCorrectionStore.STORAGE_KEY);
+    const response = await chrome.runtime.sendMessage({ type: 'CLEAR_CORRECTIONS' }) as SimpleAck;
+    if (!response?.ok) { setNotice('清除修正记录失败，请重试'); return; }
     await loadCorrections();
   }, [loadCorrections]);
 
+  const assignJobContext = useCallback(async (id: string) => {
+    const target = await chrome.runtime.sendMessage({ type: 'GET_ACTIVE_TAB_INFO' }) as ActiveTabInfo;
+    if (target.tabId === undefined) { setJdNotice('请先打开需要填写的招聘页面'); return; }
+    const response = await chrome.runtime.sendMessage({ type: 'ASSIGN_JOB_CONTEXT', id, tabId: target.tabId }) as JobContextResponse;
+    setJdNotice(response?.ok ? `已用于当前页面：${target.title ?? target.url ?? ''}` : '选择失败，请确认已授权当前页面且岗位缓存未过期');
+    if (response?.ok) await loadJdContexts();
+  }, [loadJdContexts]);
+
+  const changeJobVersion = useCallback(async (type: 'SAVE_JOB_VERSION' | 'DELETE_JOB_VERSION' | 'ASSIGN_JOB_VERSION', id: string) => {
+    const target = type === 'ASSIGN_JOB_VERSION' ? await chrome.runtime.sendMessage({ type: 'GET_ACTIVE_TAB_INFO' }) as ActiveTabInfo : undefined;
+    const response = await chrome.runtime.sendMessage({ type, id, ...(target?.tabId === undefined ? {} : { tabId: target.tabId }) }) as JobContextResponse;
+    setJdNotice(response.ok ? type === 'SAVE_JOB_VERSION' ? '已保存岗位版本到本机' : type === 'DELETE_JOB_VERSION' ? '已删除岗位版本' : '已用于当前页面' : '岗位版本操作失败，请检查当前页面授权');
+    if (response.ok) await loadJdContexts();
+  }, [loadJdContexts]);
+
   const refresh = useCallback(async () => {
-    const info = (await chrome.runtime.sendMessage({ type: 'GET_RESUME_STATUS' })) as ResumeStatusInfo;
-    setStatus(info);
-    const response = (await chrome.runtime.sendMessage({ type: 'GET_COMPILED_RESUME' })) as CompiledResumeResponse;
-    setCompiled((response?.document as CompiledResume | null) ?? null);
-    const stored = await loadAttachment();
-    setAttachmentName(stored?.name ?? '');
+    const revision = ++resumeLoadRevision.current;
+    const [info, response, history, stored] = await Promise.all([
+      chrome.runtime.sendMessage({ type: 'GET_RESUME_STATUS' }) as Promise<ResumeStatusInfo>,
+      chrome.runtime.sendMessage({ type: 'GET_COMPILED_RESUME' }) as Promise<CompiledResumeResponse>,
+      chrome.runtime.sendMessage({ type: 'LIST_RESUME_VERSIONS' }) as Promise<{ versions?: ResumeVersionInfo[] }>, loadAttachment(),
+    ]);
+    if (revision !== resumeLoadRevision.current) return;
+    setStatus(info); setCompiled((response?.document as CompiledResume | null) ?? null);
+    setVersions(history?.versions ?? []); setAttachmentName(stored?.name ?? '');
   }, []);
 
   useEffect(() => {
@@ -206,6 +223,24 @@ export function App() {
     void loadLlmConfig();
   }, [refresh, loadCorrections, loadJdContexts, loadLlmConfig]);
 
+  useEffect(() => {
+    const listener = (message: { type?: string }, sender: chrome.runtime.MessageSender) => {
+      if (message.type === 'RESUME_CHANGED' && sender.id === chrome.runtime.id && !/^https?:/.test(sender.url ?? '')) void refresh();
+    };
+    chrome.runtime.onMessage.addListener(listener);
+    return () => chrome.runtime.onMessage.removeListener(listener);
+  }, [refresh]);
+
+  const changeVersion = useCallback(async (type: 'ACTIVATE_RESUME_VERSION' | 'DELETE_RESUME_VERSION', id: string) => {
+    setVersionBusy(true);
+    try {
+      const result = await chrome.runtime.sendMessage({ type, id }) as { ok: boolean; error?: string };
+      setNotice(result.ok ? type === 'ACTIVATE_RESUME_VERSION' ? '已切换简历版本' : '已删除历史版本' :
+        result.error === 'RUN_IN_PROGRESS' ? '填写任务进行中，请结束任务后再操作版本' : '版本操作失败，当前使用的版本不能删除');
+      if (result.ok) await refresh();
+    } finally { setVersionBusy(false); }
+  }, [refresh]);
+
   const importResume = useCallback(async () => {
     if (json.trim() === '') {
       setNotice('请先在文本框粘贴 JSON 简历数据，或点击「载入示例简历」');
@@ -213,7 +248,7 @@ export function App() {
     }
     try {
       const facts = JSON.parse(json) as unknown;
-      const result = (await chrome.runtime.sendMessage({ type: 'IMPORT_RESUME', facts })) as {
+      const result = (await chrome.runtime.sendMessage({ type: 'IMPORT_RESUME', facts, label: versionLabel })) as {
         ok: boolean;
         error?: string;
       };
@@ -221,17 +256,17 @@ export function App() {
         setNotice('导入并编译成功');
         await refresh();
       } else {
-        setNotice(`导入失败：${result?.error ?? '未知错误'}`);
+        setNotice(result?.error === 'RUN_IN_PROGRESS' ? '填写任务进行中，请结束任务后再导入' : `导入失败：${result?.error ?? '未知错误'}`);
       }
     } catch (error) {
       setNotice(`JSON 解析失败：${error instanceof Error ? error.message : String(error)}`);
     }
-  }, [json, refresh]);
+  }, [json, refresh, versionLabel]);
 
   const clearResume = useCallback(async () => {
-    await chrome.runtime.sendMessage({ type: 'CLEAR_RESUME' });
-    setNotice('已清空简历数据');
-    await refresh();
+    const result = await chrome.runtime.sendMessage({ type: 'CLEAR_RESUME' }) as { ok: boolean };
+    setNotice(result.ok ? '已清空简历及历史版本' : '填写任务进行中，请结束任务后再清空');
+    if (result.ok) await refresh();
   }, [refresh]);
 
   const loadSample = useCallback(() => {
@@ -343,6 +378,7 @@ export function App() {
     <div className="workbench">
       <div className="card">
         <h2>三层简历知识库 · 原始事实层导入</h2>
+        <input data-testid="version-label" aria-label="简历版本名称" placeholder="版本名称（可选，例如：前端岗位）" value={versionLabel} onChange={(event) => setVersionLabel(event.target.value)} />
         <textarea
           data-testid="resume-json"
           value={json}
@@ -357,12 +393,27 @@ export function App() {
           <button onClick={() => void clearResume()}>清空简历</button>
           <button onClick={() => void refresh()}>刷新状态</button>
           <button onClick={exportCompiled}>导出已编译 JSON</button>
+          <button disabled={compiled === null} onClick={() => {
+            if (compiled !== null) setJson(JSON.stringify(compiled.facts, null, 2));
+          }}>编辑当前简历</button>
         </div>
         {notice !== '' ? (
           <p className="notice" data-testid="import-notice">
             {notice}
           </p>
         ) : null}
+      </div>
+
+      <div className="card">
+        <h2>简历版本</h2>
+        <p>每次导入保留一个版本，最多保存最近 20 个。切换后使用选定版本填写；清空简历会删除全部历史版本。</p>
+        {versions.length === 0 ? <p>暂无历史版本</p> : versions.map((version) => (
+          <div key={version.id} data-testid="resume-version">
+            <span>{version.label}</span> · {new Date(version.createdAt).toLocaleString()} {version.active ? '（当前使用）' : ''}
+            <button data-testid="version-activate" disabled={versionBusy || version.active} onClick={() => void changeVersion('ACTIVATE_RESUME_VERSION', version.id)}>使用此版本</button>
+            <button data-testid="version-delete" disabled={versionBusy || version.active} onClick={() => void changeVersion('DELETE_RESUME_VERSION', version.id)}>删除</button>
+          </div>
+        ))}
       </div>
 
       <div className="card">
@@ -463,13 +514,15 @@ export function App() {
 
       <div className="card">
         <h2>岗位上下文缓存（临时 JD）</h2>
+        <p style={{ fontSize: 13 }}>岗位仅自动用于采集它的页面。手动选择后用于当前页面及已授权的内嵌表单；缓存有效期为六小时。</p>
+        {jdNotice ? <p className="notice" data-testid="jd-notice">{jdNotice}</p> : null}
         {jdContexts.length === 0 ? (
           <p style={{ fontSize: 13 }} data-testid="jd-empty">
             暂无岗位上下文（在含职位描述的页面执行一次填写后缓存）
           </p>
         ) : (
           jdContexts.map((context) => (
-            <div key={context.host} data-testid="jd-context" style={{ fontSize: 13, marginBottom: 8 }}>
+            <div key={context.id} data-testid="jd-context" style={{ fontSize: 13, marginBottom: 8 }}>
               <p>
                 岗位：<span data-testid="jd-title">{context.title ?? '未知'}</span> · 公司：
                 <span data-testid="jd-company">{context.company ?? '未知'}</span>
@@ -484,9 +537,21 @@ export function App() {
               {context.requirements !== undefined ? (
                 <p data-testid="jd-requirements">要求：{context.requirements.slice(0, 120)}</p>
               ) : null}
+              <button data-testid="jd-select" onClick={() => context.id && void assignJobContext(context.id)}>用于当前目标页</button>
+              <button data-testid="jd-save-version" onClick={() => context.id && void changeJobVersion('SAVE_JOB_VERSION', context.id)}>保存岗位版本</button>
             </div>
           ))
         )}
+      </div>
+
+      <div className="card">
+        <h2>已保存岗位版本</h2>
+        <p>岗位版本保存在本机，最多 20 个。只有点击使用后才应用到当前页面，临时上下文仍保留六小时有效期。</p>
+        {jobVersions.map((version) => <div key={version.id} data-testid="job-version">
+          {version.label} · {new Date(version.capturedAt).toLocaleString()}
+          <button data-testid="job-version-use" onClick={() => void changeJobVersion('ASSIGN_JOB_VERSION', version.id)}>用于当前目标页</button>
+          <button data-testid="job-version-delete" onClick={() => void changeJobVersion('DELETE_JOB_VERSION', version.id)}>删除</button>
+        </div>)}
       </div>
 
       <div className="card">

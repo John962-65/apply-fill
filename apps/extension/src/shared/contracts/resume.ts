@@ -1,4 +1,5 @@
 export const RESUME_SCHEMA_VERSION = 1;
+export const RESUME_COMPILER_VERSION = 2;
 
 export type FactSource = 'user' | 'resume-import' | 'verified-document';
 
@@ -21,6 +22,8 @@ export interface BasicFacts {
   postalCode?: ResumeFact<string>;
   idType?: ResumeFact<string>;
   idExplanation?: ResumeFact<string>;
+  awards?: ResumeFact<string>;
+  additionalInfo?: ResumeFact<string>;
 }
 
 export interface EducationFacts {
@@ -28,6 +31,7 @@ export interface EducationFacts {
   school: ResumeFact<string>;
   degree: ResumeFact<string>;
   major?: ResumeFact<string>;
+  gpa?: ResumeFact<string | number>;
   startDate?: ResumeFact<string>;
   endDate?: ResumeFact<string>;
 }
@@ -39,6 +43,9 @@ export interface ProjectFacts {
   description?: ResumeFact<string>;
   startDate?: ResumeFact<string>;
   endDate?: ResumeFact<string>;
+  responsibilities?: ResumeFact<string>;
+  outcomes?: ResumeFact<string>;
+  keywords?: ResumeFact<string[]>;
 }
 
 export interface WorkFacts {
@@ -87,6 +94,7 @@ export interface EducationEntry {
   school: string;
   degree: string;
   major?: string;
+  gpa?: string | number;
   startDate?: DateAtom;
   endDate?: DateAtom | { present: true };
 }
@@ -98,6 +106,9 @@ export interface ProjectEntry {
   description?: string;
   startDate?: DateAtom;
   endDate?: DateAtom | { present: true };
+  responsibilities?: string;
+  outcomes?: string;
+  keywords?: string[];
 }
 
 export interface WorkEntry {
@@ -128,6 +139,8 @@ export interface NormalizedBasic {
   postalCode?: string;
   idType?: string;
   idExplanation?: string;
+  awards?: string;
+  additionalInfo?: string;
 }
 
 export interface NormalizedPreferences {
@@ -147,12 +160,33 @@ export interface NormalizedResume {
 
 export interface Projections {
   introShort?: string;
+  projects?: ProjectProjection[];
+}
+
+export interface ProjectProjection {
+  resumeEntryId: string;
+  title: string;
+  one_liner: string;
+  summary_150: string;
+  responsibilities: string;
+  outcomes: string;
+  full_description: string;
+  keywords: string[];
+  sourceFactPaths: string[];
 }
 
 export interface CompiledResume {
+  compilerVersion?: number;
   schemaVersion: number;
   facts: ResumeFactsDocument;
   normalized: NormalizedResume;
   projections: Projections;
   compiledAt: number;
+}
+
+export interface ResumeVersionInfo {
+  id: string;
+  label: string;
+  createdAt: number;
+  active: boolean;
 }

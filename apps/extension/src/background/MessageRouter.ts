@@ -6,6 +6,8 @@ export type MessageHandler = (
 export class MessageRouter {
   private readonly handlers = new Map<string, MessageHandler>();
 
+  constructor(private readonly authorize?: (type: string, message: unknown, sender: chrome.runtime.MessageSender) => Promise<void>) {}
+
   register(type: string, handler: MessageHandler): void {
     this.handlers.set(type, handler);
   }
@@ -20,10 +22,10 @@ export class MessageRouter {
       if (handler === undefined) {
         return undefined;
       }
-      const result = handler(message, sender);
-      if (result === undefined) {
-        return undefined;
-      }
+      const result = Promise.resolve().then(async () => {
+        await this.authorize?.(type, message, sender);
+        return handler(message, sender);
+      });
       void result.then(
         (value) => sendResponse(value),
         (error: unknown) =>

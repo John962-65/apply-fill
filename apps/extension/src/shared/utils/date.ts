@@ -14,12 +14,13 @@ export function parseDateAtom(input: string): DateAtom | { present: true } | und
   if (isPresentMarker(trimmed)) {
     return { present: true };
   }
-  const match = /^(\d{4})(?:[-/.](\d{1,2}))?(?:[-/.](\d{1,2}))?/.exec(trimmed);
+  const normalized = trimmed.replace(/\s+/g, '').replace(/年|月/g, '-').replace(/[日号]$/, '').replace(/-$/, '');
+  const match = /^(\d{4})(?:[-/.](\d{1,2}))?(?:[-/.](\d{1,2}))?$/.exec(normalized);
   if (!match) {
     return undefined;
   }
   const year = Number.parseInt(match[1] ?? '', 10);
-  if (!Number.isFinite(year)) {
+  if (!Number.isFinite(year) || year < 1) {
     return undefined;
   }
   const monthRaw = match[2];
@@ -27,10 +28,12 @@ export function parseDateAtom(input: string): DateAtom | { present: true } | und
   if (dayRaw !== undefined) {
     const day = Number.parseInt(dayRaw, 10);
     const month = monthRaw === undefined ? 1 : Number.parseInt(monthRaw, 10);
+    if (month < 1 || month > 12 || day < 1 || day > lastDayOfMonth(year, month)) return undefined;
     return { year, month, day, precision: 'day' };
   }
   if (monthRaw !== undefined) {
     const month = Number.parseInt(monthRaw, 10);
+    if (month < 1 || month > 12) return undefined;
     return { year, month, precision: 'month' };
   }
   return { year, precision: 'year' };
@@ -58,7 +61,7 @@ export function parseDateRange(input: string): ParsedDateRange | undefined {
   }
   const start = parseDateAtom(startText);
   const end = parseDateAtom(endText);
-  if (start === undefined && end === undefined) {
+  if (start === undefined || end === undefined) {
     return undefined;
   }
   const range: ParsedDateRange = {};
@@ -89,7 +92,8 @@ export function toISODate(atom: DateAtom): string {
 }
 
 export function lastDayOfMonth(year: number, month: number): number {
-  return new Date(year, month, 0).getDate();
+  const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  return [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1] ?? 0;
 }
 
 export function dateAtomEquals(a: DateAtom, b: DateAtom): boolean {

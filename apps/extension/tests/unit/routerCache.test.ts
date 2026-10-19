@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest';
 
 import { BatchLLMRouter } from '@/router/BatchLLMRouter';
 import type { UnmappedFieldRef } from '@/router/BatchLLMRouter';
-import { FingerprintCache } from '@/router/FingerprintCache';
+import { FingerprintCache, fingerprintInputFor } from '@/router/FingerprintCache';
+import { makeSignature } from './helpers';
 
 function ref(fieldKey: string): UnmappedFieldRef {
   return { fieldKey, label: fieldKey, controlKind: 'text', sectionType: 'basic' };
@@ -62,6 +63,23 @@ describe('FingerprintCache', () => {
     );
     restored.loadFromJSON(undefined);
     expect(restored.size).toBe(1);
+  });
+
+  it('字段约束、步骤和组件变化使缓存失效', () => {
+    const cache = new FingerprintCache();
+    const signature = makeSignature('text');
+    cache.record(fingerprintInputFor('ats.test', signature), 'basic.name');
+    expect(cache.get(fingerprintInputFor('ats.test', { ...signature, constraints: { maxLength: 10 } }))).toBeUndefined();
+    expect(cache.get(fingerprintInputFor('ats.test', { ...signature, descriptor: { ...signature.descriptor, stepId: 'step.2' } }))).toBeUndefined();
+    expect(cache.get(fingerprintInputFor('ats.test', { ...signature, componentHints: ['ant-design'] }))).toBeUndefined();
+    expect(cache.get(fingerprintInputFor('ats.test', signature))).toBeDefined();
+  });
+
+  it('旧版本与损坏缓存不复用', () => {
+    const cache = new FingerprintCache();
+    cache.loadFromJSON({ entries: [['old-key', { targetPathTemplate: 'basic.name', hits: 1, verifiedAt: 1 }]] });
+    cache.loadFromJSON({ schemaVersion: 2, entries: [null, ['2::bad', null], ['2::bad2', {}]] });
+    expect(cache.size).toBe(0);
   });
 });
 

@@ -1,4 +1,4 @@
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import ReactDOM from 'react-dom/client';
 
@@ -29,6 +29,27 @@ function DatePickerPage() {
   const [viewMonth, setViewMonth] = useState(6);
   const [decadeStart, setDecadeStart] = useState(2010);
   const triggerRef = useRef<HTMLDivElement>(null);
+  const navigationTimer = useRef<ReturnType<typeof setTimeout>>();
+  const [busy, setBusy] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [popupVersion, setPopupVersion] = useState(0);
+  const openDelay = Math.max(0, Math.min(1500, Number(new URLSearchParams(window.location.search).get('openDelay')) || 0));
+  const replacePopup = new URLSearchParams(window.location.search).has('replacePopup');
+  const navigationDelay = Math.max(0, Math.min(3000, Number(new URLSearchParams(window.location.search).get('navigationDelay')) || 0));
+
+  useEffect(() => () => clearTimeout(navigationTimer.current), []);
+
+  const navigate = (update: () => void) => {
+    if (navigationDelay === 0) { update(); if (replacePopup) setPopupVersion((version) => version + 1); return; }
+    if (navigationTimer.current !== undefined) return;
+    setBusy(true);
+    navigationTimer.current = setTimeout(() => {
+      navigationTimer.current = undefined;
+      update();
+      if (replacePopup) setPopupVersion((version) => version + 1);
+      setBusy(false);
+    }, navigationDelay);
+  };
 
   const deadNav = new URLSearchParams(window.location.search).has('deadnav');
 
@@ -48,6 +69,7 @@ function DatePickerPage() {
     }
     setView('day');
     setOpen(true);
+    if (openDelay) { setLoading(true); setTimeout(() => setLoading(false), openDelay); }
   };
 
   const commit = (text: string) => {
@@ -61,11 +83,14 @@ function DatePickerPage() {
     open &&
     createPortal(
       <div
+        key={popupVersion}
         id="date-popup"
         role="dialog"
+        aria-busy={busy || loading}
         data-testid="date-popup"
         style={{ position: 'absolute', left: anchor.left, top: anchor.top, background: '#fff', border: '1px solid #d9d9d9', padding: 8, zIndex: 10, width: 240 }}
       >
+        {loading ? <span role="progressbar">加载日历</span> : <>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           {view === 'day' && (
             <button
@@ -76,14 +101,13 @@ function DatePickerPage() {
                 if (deadNav) {
                   return;
                 }
-                let month = viewMonth - 1;
-                let year = viewYear;
-                if (month < 1) {
-                  month = 12;
-                  year -= 1;
-                }
-                setViewMonth(month);
-                setViewYear(year);
+                navigate(() => {
+                  let month = viewMonth - 1;
+                  let year = viewYear;
+                  if (month < 1) { month = 12; year -= 1; }
+                  setViewMonth(month);
+                  setViewYear(year);
+                });
               }}
             >
               ‹
@@ -98,7 +122,7 @@ function DatePickerPage() {
                 if (deadNav) {
                   return;
                 }
-                setDecadeStart(decadeStart - 10);
+                navigate(() => setDecadeStart(decadeStart - 10));
               }}
             >
               «
@@ -110,10 +134,9 @@ function DatePickerPage() {
             aria-label="切换年视图"
             onClick={() => {
               if (view === 'day') {
-                setDecadeStart(Math.floor(viewYear / 10) * 10);
-                setView('year');
+                navigate(() => { setDecadeStart(Math.floor(viewYear / 10) * 10); setView('year'); });
               } else if (view === 'month') {
-                setView('day');
+                navigate(() => setView('day'));
               }
             }}
             style={{ border: 'none', background: 'none', cursor: 'pointer' }}
@@ -129,14 +152,13 @@ function DatePickerPage() {
                 if (deadNav) {
                   return;
                 }
-                let month = viewMonth + 1;
-                let year = viewYear;
-                if (month > 12) {
-                  month = 1;
-                  year += 1;
-                }
-                setViewMonth(month);
-                setViewYear(year);
+                navigate(() => {
+                  let month = viewMonth + 1;
+                  let year = viewYear;
+                  if (month > 12) { month = 1; year += 1; }
+                  setViewMonth(month);
+                  setViewYear(year);
+                });
               }}
             >
               ›
@@ -151,7 +173,7 @@ function DatePickerPage() {
                 if (deadNav) {
                   return;
                 }
-                setDecadeStart(decadeStart + 10);
+                navigate(() => setDecadeStart(decadeStart + 10));
               }}
             >
               »
@@ -169,8 +191,7 @@ function DatePickerPage() {
                   if (deadNav) {
                     return;
                   }
-                  setViewYear(year);
-                  setView('month');
+                  navigate(() => { setViewYear(year); setView('month'); });
                 }}
                 style={{ width: '30%', margin: 2 }}
               >
@@ -190,8 +211,7 @@ function DatePickerPage() {
                   if (deadNav) {
                     return;
                   }
-                  setViewMonth(month);
-                  setView('day');
+                  navigate(() => { setViewMonth(month); setView('day'); });
                 }}
                 style={{ width: '30%', margin: 2 }}
               >
@@ -221,6 +241,7 @@ function DatePickerPage() {
             ))}
           </div>
         )}
+        </>}
       </div>,
       document.body,
     );

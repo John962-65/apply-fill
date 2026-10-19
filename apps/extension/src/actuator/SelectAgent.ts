@@ -2,6 +2,7 @@ import { isElementVisible, isOverlayRelatedToTrigger, readComboboxCommitted } fr
 import type { PortalTracker } from '@/perceptor';
 import { classifyExecutionError, throwIfAborted } from '@/shared/errors';
 import { choiceTextMatches } from '@/shared/utils/text';
+import { assertActionAllowed } from '@/shared/utils/action';
 import { delay } from '@/shared/utils/timing';
 
 import { BudgetTracker, SEARCH_SELECT_FIELD_BUDGET } from './ExecutionBudget';
@@ -59,6 +60,7 @@ export const DEFAULT_SELECT_AGENT_CONFIG: SelectAgentConfig = {
 };
 
 export interface SelectOptions {
+  assertActive?: () => void;
   signal?: AbortSignal;
   now?: () => number;
 }
@@ -74,6 +76,7 @@ export class SelectAgent {
 
   async select(trigger: HTMLElement, expectedText: string, options: SelectOptions = {}): Promise<SelectOutcome> {
     const signal = options.signal;
+    const check = () => assertActionAllowed(options);
     const budget = new BudgetTracker(this.config.searchBudget, options.now ?? (() => Date.now()));
     let actions = 0;
     let usedSearch = false;
@@ -86,10 +89,11 @@ export class SelectAgent {
     const aborted = () => signal?.aborted === true;
     try {
       throwIfAborted(signal);
+      check();
       const expanded = this.isExpanded(trigger);
       const before = expanded ? [] : this.tracker.snapshot(trigger.ownerDocument);
       if (!expanded) {
-        dispatchClickSequence(trigger);
+        dispatchClickSequence(trigger, signal, options.assertActive);
         record();
       }
       let overlay = await this.tracker.waitForOverlay(trigger, before, {
@@ -99,10 +103,11 @@ export class SelectAgent {
       if (overlay === null) {
         return this.outcome('NO_POPUP', usedSearch, actions, 'popup did not appear');
       }
+      await this.waitForCandidates(overlay, signal, budget, true);
       const searchBox = findSearchBox(overlay);
       if (searchBox !== null && expectedText.trim() !== '') {
         usedSearch = true;
-        await setTextValue(searchBox, expectedText, signal);
+        await setTextValue(searchBox, expectedText, signal, options.assertActive);
         record();
         try {
           await delay(this.config.searchSettleMs, signal);
@@ -113,6 +118,7 @@ export class SelectAgent {
         if (refreshed !== null) {
           overlay = refreshed;
         }
+        await this.waitForCandidates(overlay, signal, budget, false);
       }
 
       let lastKey = '';
@@ -141,9 +147,11 @@ export class SelectAgent {
         if (match.status !== 'NONE') {
           break;
         }
+        check();
         const scroller = findScroller(overlay);
         const beforeTop = scroller.scrollTop;
         scroller.scrollTop = beforeTop + Math.max(scroller.clientHeight, 40);
+        check();
         scroller.dispatchEvent(new Event('scroll', { bubbles: true }));
         record();
         try {
@@ -167,8 +175,9 @@ export class SelectAgent {
         return this.outcome(status, usedSearch, actions, 'no matching option');
       }
       const optionElement = match.element;
+      check();
       optionElement.scrollIntoView?.({ block: 'nearest' });
-      dispatchClickSequence(optionElement);
+      dispatchClickSequence(optionElement, signal, options.assertActive);
       record();
       const committed = await this.waitForCommit(trigger, expectedText, overlay, signal, budget);
       if (aborted()) {
@@ -195,6 +204,18 @@ export class SelectAgent {
 
   private isExpanded(trigger: HTMLElement): boolean {
     return trigger.getAttribute('aria-expanded') === 'true';
+  }
+
+  private async waitForCandidates(overlay: HTMLElement, signal: AbortSignal | undefined, budget: BudgetTracker, allowSearch: boolean): Promise<void> {
+    const startedAt = Date.now();
+    while (!budget.exceeded()) {
+      throwIfAborted(signal);
+      const loading = overlay.getAttribute('aria-busy') === 'true' || overlay.querySelector('[aria-busy="true"], [role="progressbar"]') !== null;
+      if (!loading && (collectOptions(overlay).length > 0 || (allowSearch && findSearchBox(overlay) !== null))) return;
+      if (!loading && Date.now() - startedAt >= this.config.popupTimeoutMs) return;
+      if (!overlay.isConnected) return;
+      await delay(this.config.commitPollMs, signal);
+    }
   }
 
   private findRelatedOverlay(trigger: HTMLElement): HTMLElement | null {

@@ -19,9 +19,10 @@ interface PanelProps {
   onPrev: () => void;
   onNext: () => void;
   onPick: (day: number) => void;
+  selected?: string;
 }
 
-function RangePanel({ year, month, onPrev, onNext, onPick }: PanelProps) {
+function RangePanel({ year, month, onPrev, onNext, onPick, selected }: PanelProps) {
   const days = daysInMonth(year, month);
   return (
     <div className="date-panel" style={{ display: 'inline-block', margin: 8, verticalAlign: 'top' }}>
@@ -36,7 +37,7 @@ function RangePanel({ year, month, onPrev, onNext, onPick }: PanelProps) {
       </div>
       <div role="grid" style={{ width: 200 }}>
         {Array.from({ length: days }, (_, index) => index + 1).map((day) => (
-          <button type="button" key={day} data-day={day} onClick={() => onPick(day)} style={{ width: '13%', margin: 1 }}>
+          <button type="button" key={day} data-day={day} aria-pressed={selected === `${year}-${pad(month)}-${pad(day)}`} onClick={() => onPick(day)} style={{ width: '13%', margin: 1 }}>
             {day}
           </button>
         ))}
@@ -54,6 +55,8 @@ function DateRangePage() {
   const [anchor, setAnchor] = useState<Anchor>({ left: 0, top: 0 });
   const [left, setLeft] = useState({ year: 2019, month: 6 });
   const [right, setRight] = useState({ year: 2019, month: 6 });
+  const [busy, setBusy] = useState(false);
+  const linkingDelay = Math.max(0, Math.min(1500, Number(new URLSearchParams(location.search).get('linkingDelay')) || 0));
   const triggerRef = useRef<HTMLDivElement>(null);
 
   const toggle = () => {
@@ -89,8 +92,9 @@ function DateRangePage() {
   };
 
   const pickStart = (day: number) => {
-    setStartPick(`${left.year}-${pad(left.month)}-${pad(day)}`);
-    setRight({ year: left.year, month: left.month });
+    const apply = () => { setStartPick(`${left.year}-${pad(left.month)}-${pad(day)}`); setRight({ year: left.year, month: left.month }); setBusy(false); };
+    if (linkingDelay) { setBusy(true); setTimeout(apply, linkingDelay); }
+    else apply();
   };
 
   const pickEnd = (day: number) => {
@@ -104,6 +108,7 @@ function DateRangePage() {
       <div
         id="range-popup"
         role="dialog"
+        aria-busy={busy}
         data-testid="range-popup"
         style={{ position: 'absolute', left: anchor.left, top: anchor.top, background: '#fff', border: '1px solid #d9d9d9', padding: 8, zIndex: 10 }}
       >
@@ -113,6 +118,7 @@ function DateRangePage() {
           onPrev={() => setLeft(step(left, -1))}
           onNext={() => setLeft(step(left, 1))}
           onPick={pickStart}
+          selected={startPick}
         />
         <RangePanel
           year={right.year}

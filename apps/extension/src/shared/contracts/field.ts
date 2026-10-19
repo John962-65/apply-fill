@@ -122,6 +122,10 @@ export type FieldStatus =
   | 'CANCELLED';
 
 export interface FieldExecutionResult {
+  frameId?: number;
+  stepId?: string;
+  sectionType?: SectionType;
+  instanceId?: string;
   fieldKey: string;
   label: string;
   controlKind: ControlKind;
@@ -134,6 +138,7 @@ export interface FieldExecutionResult {
 }
 
 export interface MappingIssue {
+  frameId?: number;
   label: string;
   kind: 'UNMAPPED' | 'NO_DATA' | 'NO_OPTION' | 'READONLY' | 'DISABLED' | 'AMBIGUOUS' | 'REPEATER';
   reason: string;

@@ -1,10 +1,7 @@
 import type { CompiledResume, DateAtom } from '@/shared/contracts/resume';
 
-export interface ResumePathOption {
-  path: string;
-  label: string;
-  preview: string;
-}
+import type { ResumePathOption } from '@/shared/contracts/ui';
+export type { ResumePathOption } from '@/shared/contracts/ui';
 
 const MAX_OPTIONS = 80;
 
@@ -69,6 +66,7 @@ export function listResumeValuePaths(compiled: CompiledResume): ResumePathOption
     push(`${prefix}.school`, `教育 ${index + 1} 学校`, entry.school);
     push(`${prefix}.degree`, `教育 ${index + 1} 学历`, entry.degree);
     push(`${prefix}.major`, `教育 ${index + 1} 专业`, entry.major);
+    push(`${prefix}.gpa`, `教育 ${index + 1} GPA`, entry.gpa);
     push(`${prefix}.startDate`, `教育 ${index + 1} 入学时间`, entry.startDate);
     push(`${prefix}.endDate`, `教育 ${index + 1} 毕业时间`, entry.endDate);
   });
@@ -102,5 +100,11 @@ export function listResumeValuePaths(compiled: CompiledResume): ResumePathOption
     const label = key === 'introShort' ? '简介摘要' : key;
     push(`projections.${key}`, label, value);
   }
+  compiled.projections.projects?.forEach((entry, index) => {
+    const labels = { title: '名称', one_liner: '50字简介', summary_150: '150字介绍', responsibilities: '职责', outcomes: '成果', full_description: '完整描述' };
+    for (const [key, label] of Object.entries(labels)) {
+      push(`projections.projects[${index}].${key}`, `项目 ${index + 1} ${label}`, entry[key as keyof typeof labels]);
+    }
+  });
   return options.slice(0, MAX_OPTIONS);
 }

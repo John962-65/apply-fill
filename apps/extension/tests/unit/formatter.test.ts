@@ -96,3 +96,15 @@ describe('ConstraintAwareFormatter', () => {
     }
   });
 });
+describe('native date precision', () => {
+  it('拒绝向日期输入框补造月份或日期', () => {
+    expect(formatForField({ year: 2026, precision: 'year' }, { controlKind: 'date', inputType: 'date' }))
+      .toEqual({ ok: false, reason: 'INSUFFICIENT_DATE_PRECISION' });
+    expect(formatForField({ year: 2026, month: 6, precision: 'month' }, { controlKind: 'date', inputType: 'date' }))
+      .toEqual({ ok: false, reason: 'INSUFFICIENT_DATE_PRECISION' });
+  });
+  it('年月输入框保留已知月份，不补造日', () => {
+    expect(formatForField({ year: 2026, month: 6, precision: 'month' }, { controlKind: 'date', inputType: 'month' }))
+      .toEqual({ ok: true, value: '2026-06', expectedText: '2026-06' });
+  });
+});

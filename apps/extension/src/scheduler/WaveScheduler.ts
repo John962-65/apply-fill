@@ -97,7 +97,7 @@ export class WaveScheduler {
     const delta = WaveBarrier.diff(before, after, quiet.mutated);
 
     const executedFieldKeys = results.filter((result) => result.attempts > 0).map((result) => result.fieldKey);
-    const cycles = this.recordDependencies(executedFieldKeys, delta);
+    const cycles = options.signal.aborted ? [] : this.recordDependencies(executedFieldKeys, delta);
 
     const completed = results.filter((result) => result.status === 'VERIFIED').length;
     const failed = results.filter(

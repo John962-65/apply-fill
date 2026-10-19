@@ -36,6 +36,7 @@ export interface FrameRunRecord {
 
 export interface StepTransitionRecord {
   index: number;
+  stepId?: string;
   fingerprint: string;
   fields: number;
 }
@@ -48,6 +49,7 @@ export interface RunSummary {
   counts: RunCounts;
   fields: FieldExecutionResult[];
   mappingIssues: MappingIssue[];
+  error?: string;
   instances?: InstanceReport[];
   waves?: WaveExecutionSummary[];
   dependencies?: RuntimeDependency[];
@@ -66,7 +68,8 @@ export type RunEvent =
   | { type: 'FIELD_STARTED'; runId: string; fieldKey: string; label: string }
   | { type: 'FIELD_FINISHED'; runId: string; result: FieldExecutionResult }
   | { type: 'RUN_CANCELLED'; runId: string }
-  | { type: 'RUN_FINISHED'; runId: string; summary: RunSummary };
+  | { type: 'RUN_FINISHED'; runId: string; summary: RunSummary }
+  | { type: 'REPORT_UPDATED'; runId: string; summary: RunSummary };
 
 export interface SessionRunState {
   tabId: number;
@@ -76,4 +79,6 @@ export interface SessionRunState {
   updatedAt: number;
   summary?: RunSummary;
   error?: string;
+  coordinated?: boolean;
+  operation?: 'field' | 'upload';
 }

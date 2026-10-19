@@ -21,15 +21,17 @@ test('SidePanel 最终报告：按 13.4 输出统计并支持单字段重试', a
     const report = panel.getByTestId('final-report');
     await expect(report).toBeVisible();
     await expect(panel.getByTestId('report-verified')).toHaveText('4');
-    await expect(panel.getByTestId('report-manual')).toHaveText('1');
+    await expect(panel.getByTestId('report-manual')).toHaveText('2');
+    await expect(panel.getByTestId('mapping-issues')).toContainText('政治面貌');
+    await expect(panel.getByTestId('report-crosssection')).toHaveText('未独立测量');
     await expect(panel.getByTestId('report-final-submit')).toHaveText('最终提交：未执行');
     await expect(panel.getByTestId('recovery-line')).toContainText('补填 1');
 
-    const emailRow = panel.locator('.field-item', { hasText: '邮箱' });
+    const emailRow = panel.locator('.field-item', { hasText: '邮箱' }).filter({ has: panel.getByRole('button', { name: '重试' }) });
     await expect(emailRow).toContainText('需人工');
     await emailRow.getByRole('button', { name: '重试' }).click();
     await expect(panel.locator('.notice')).toContainText('已触发单字段重试');
-    await expect(panel.getByTestId('report-manual')).toHaveText('1');
+    await expect(panel.getByTestId('report-manual')).toHaveText('2');
   } finally {
     await session.close();
   }

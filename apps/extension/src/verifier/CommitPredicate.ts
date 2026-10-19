@@ -16,13 +16,13 @@ function dateAtomTolerantMatches(observed: DateAtomLike, expected: DateAtomLike)
   if (expected.precision === 'year') {
     return true;
   }
-  if ((observed.month ?? 1) !== (expected.month ?? 1)) {
+  if (observed.month !== expected.month) {
     return false;
   }
   if (expected.precision === 'month') {
     return true;
   }
-  return (observed.day ?? 1) === (expected.day ?? 1);
+  return observed.day !== undefined && observed.day === expected.day;
 }
 
 function dateTextMatches(observed: string, expectedText: string): boolean {

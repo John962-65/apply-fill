@@ -80,6 +80,55 @@ describe('MappingMemory', () => {
   });
 
   it('memoryKeyOf 稳定生成主键', () => {
-    expect(memoryKeyOf(input)).toBe('a.com::basic::紧急联系人::text');
+    expect(memoryKeyOf(input)).toBe(JSON.stringify([2, 'a.com', 'basic', '紧急联系人', 'text', '']));
+  });
+
+  it('字段上下文不同的同名控件不会复用记忆', () => {
+    const memory = new MappingMemory();
+    memory.recordUserChoice({ ...input, context: 'group-a' }, 'basic.name');
+    expect(memory.lookup({ ...input, context: 'group-a' })?.targetPath).toBe('basic.name');
+    expect(memory.lookup({ ...input, context: 'group-b' })).toBeUndefined();
+    expect(memory.lookup(input)).toBeUndefined();
+  });
+
+  it('绑定条目的用户选择被保存为相对路径并可应用于另一条绑定经历', () => {
+    const memory = new MappingMemory();
+    const projectInput = { ...input, sectionType: 'project' as const, boundEntryIndex: 1 };
+    memory.recordUserChoice(projectInput, 'projections.projects[1].one_liner');
+    expect(memory.lookup({ ...projectInput, boundEntryIndex: 0 })?.targetPath).toBe('projections.projects[{index}].one_liner');
+    memory.recordVerified({ ...projectInput, boundEntryIndex: 0 }, 'projections.projects[0].one_liner');
+    expect(memory.lookup(projectInput)?.source).toBe('user');
+  });
+
+  it('跨条目、跨集合或未绑定的用户选择不成为通用记忆，并清除旧解释', () => {
+    const memory = new MappingMemory();
+    const projectInput = { ...input, sectionType: 'project' as const, boundEntryIndex: 0 };
+    memory.recordUserChoice(projectInput, 'projects[0].role');
+    expect(memory.size).toBe(1);
+    memory.recordUserChoice(projectInput, 'projects[1].role');
+    expect(memory.size).toBe(0);
+    memory.recordUserChoice(projectInput, 'work[0].role');
+    memory.recordUserChoice(projectInput, 'basic.name');
+    memory.recordUserChoice({ ...input, sectionType: 'project' }, 'projects[0].role');
+    expect(memory.size).toBe(0);
+  });
+
+  it('旧格式和持久化的具体经历索引不能直接恢复为自动映射', () => {
+    const memory = new MappingMemory();
+    memory.loadFromJSON({ entries: [[memoryKeyOf(input), { targetPath: 'basic.name', source: 'user', hits: 1, updatedAt: 1 }]] });
+    expect(memory.size).toBe(0);
+    const projectInput = { ...input, sectionType: 'project' as const, boundEntryIndex: 1 };
+    memory.loadFromJSON({ schemaVersion: 2, entries: [[memoryKeyOf(projectInput), { targetPath: 'projects[1].role', source: 'user', hits: 1, updatedAt: 1 }]] });
+    expect(memory.lookup(projectInput)).toBeUndefined();
+    expect(memory.size).toBe(0);
+  });
+
+  it('暂时没有条目绑定时不执行也不删除其他已绑定实例可用的相对语义', () => {
+    const memory = new MappingMemory();
+    const project = { ...input, sectionType: 'project' as const, boundEntryIndex: 1 };
+    memory.recordUserChoice(project, 'projects[1].role'); memory.acknowledgeMutations(1);
+    expect(memory.lookup({ ...input, sectionType: 'project' })).toBeUndefined();
+    expect(memory.pendingMutations()).toEqual([]);
+    expect(memory.lookup({ ...project, boundEntryIndex: 0 })?.targetPath).toBe('projects[{index}].role');
   });
 });

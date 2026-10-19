@@ -64,4 +64,16 @@ describe('DeterministicFieldKey', () => {
     };
     expect(computeFieldKey(shuffled)).toBe(computeFieldKey(base));
   });
+
+  it('同名控件在不同语义组中拥有不同身份', () => {
+    expect(computeFieldKey({ ...base, disambiguator: { groupLabel: '本人' } }))
+      .not.toBe(computeFieldKey({ ...base, disambiguator: { groupLabel: '紧急联系人' } }));
+  });
+
+  it('值中的分隔符不能制造描述符串联碰撞', () => {
+    const left = { ...base, formId: 'a&instanceId=b', instanceId: 'c' };
+    const right = { ...base, formId: 'a', instanceId: 'b&instanceId=c' };
+    expect(canonicalizeDescriptor(left)).not.toBe(canonicalizeDescriptor(right));
+    expect(computeFieldKey(left)).not.toBe(computeFieldKey(right));
+  });
 });

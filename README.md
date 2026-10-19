@@ -18,7 +18,7 @@ applyfill/
 │   ├── src/actuator/          原生 Primitives 与字段执行引擎
 │   ├── src/verifier/          CommitPredicate 与稳定性验证
 │   ├── src/runtime/           内容脚本编排（扫描→映射→执行→摘要）
-│   ├── src/background/        消息路由、会话状态、储层
+│   ├── src/background/        消息路由、会话状态、存储层
 │   └── tests/unit/            Vitest 单元测试
 └── packages/testbed/          React/Vue 动态靶场与 Playwright 回归
     ├── src/pages/             react-native / react-controlled / vue-controlled
@@ -33,9 +33,13 @@ pnpm dev                      # 扩展开发模式（WXT）
 pnpm dev:testbed              # 靶场开发服务器（http://localhost:5173）
 pnpm typecheck                # 全仓类型检查
 pnpm lint                     # ESLint（含模块边界规则）
+pnpm lint:boundaries          # 验证别名/相对路径不能绕过模块边界
 pnpm test                     # Vitest 单元测试
-pnpm build                    # 构建扩展（.output/chrome-mv3）
+pnpm build                    # 构建扩展与靶场（扩展输出 apps/extension/.output/chrome-mv3）
 pnpm test:e2e                 # Playwright E2E（自动构建扩展并启动靶场）
+APPLYFILL_E2E_BROWSER=edge pnpm test:e2e # 使用本机 Microsoft Edge 与 Edge 构建
+pnpm --filter @applyfill/extension zip  # Chrome ZIP
+pnpm --filter @applyfill/extension exec wxt zip -b edge # Edge ZIP
 ```
 
 ## 架构边界
@@ -44,4 +48,8 @@ pnpm test:e2e                 # Playwright E2E（自动构建扩展并启动靶�
 
 ## 当前状态
 
-Week 1 已完成并通过验收：标准字段（text/textarea/number/email/select/checkbox/radio）可填写并验证，React/Vue 受控组件与重绘场景通过，用户接管与任务取消受保护。详见 `docs/week1-acceptance.md`。
+当前为 **V2.1 Beta，本地开发已交付，可加载测试**。2026-10-18 按 `design.md` 重构任务协调、取消链路、字段身份、附件传输、简历编译、持久化与模块边界，并补齐简历/岗位版本、GPA/奖项事实、主观题切面审核、异步日期、消息调用方权限和可追溯报告。真实招聘网站按用户安排由用户本地测试，反馈后继续修复。
+
+最新本地验证：57 个单测文件 / 520 用例、Chrome 94 项、Edge 94 项全部通过；类型、lint、模块边界、Testbed 生产构建和安装包逐文件校验通过。两包各 695,362 字节，最终 SHA-256 及证据记录于下方交付说明。这些功能回归不替代真实 ATS 与独立 KPI 验收。
+
+安装、使用、接口迁移、实际验证范围及已知限制见 [本地开发交付说明](docs/local-handoff-2026-10-18.md)。[V2.1 重构审计](docs/refactor-audit-2026-10-18.md) 保留设计要求的追踪；此前 Week 1–5 及各轮验收报告为历史快照。真实 ATS、独立 KPI 和远端 CI 未执行，分别记录，未宣称完整设计五大门禁全部通过。

@@ -5,10 +5,11 @@ import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, '../../..');
-const extensionOutput = path.resolve(repoRoot, 'apps/extension/.output/chrome-mv3');
+const browser = process.env.APPLYFILL_E2E_BROWSER === 'edge' ? 'edge' : 'chrome';
+const extensionOutput = path.resolve(repoRoot, `apps/extension/.output/${browser}-mv3`);
 
 export default function globalSetup(): void {
-  execSync('pnpm --filter @applyfill/extension build', {
+  execSync(`pnpm --filter @applyfill/extension exec wxt build -b ${browser}`, {
     cwd: repoRoot,
     stdio: 'inherit',
   });

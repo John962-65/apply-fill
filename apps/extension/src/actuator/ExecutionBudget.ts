@@ -69,7 +69,7 @@ export class BudgetTracker {
   }
 
   exceeded(): boolean {
-    return this.elapsedMs() > this.budget.maxElapsedMs || this.actions > this.budget.maxActions;
+    return this.elapsedMs() >= this.budget.maxElapsedMs || this.actions > this.budget.maxActions;
   }
 
   maxRetries(): number {

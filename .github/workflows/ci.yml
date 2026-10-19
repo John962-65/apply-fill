@@ -1,0 +1,45 @@
+name: Validate and package
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: applyfill-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm lint
+      - run: pnpm lint:boundaries
+      - run: pnpm test
+      - run: pnpm build
+      - run: pnpm --filter @applyfill/testbed exec playwright install --with-deps chromium
+      - run: pnpm test:e2e
+      - run: pnpm --filter @applyfill/extension zip
+      - run: pnpm --filter @applyfill/extension exec wxt zip -b edge
+      - uses: actions/upload-artifact@v4
+        with:
+          name: applyfill-installable
+          path: apps/extension/.output/*.zip
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-failures
+          path: packages/testbed/test-results/
+          retention-days: 7

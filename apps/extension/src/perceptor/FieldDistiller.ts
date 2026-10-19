@@ -88,13 +88,39 @@ function cleanLabelText(raw: string): string {
   return raw.replace(/\s+/g, ' ').trim();
 }
 
+function controlLabelText(label: Element): string {
+  const parts: string[] = [];
+  const visit = (node: Node): void => {
+    if (node instanceof Element && node.matches(`${FORM_CONTROL_SELECTOR}, [role="listbox"], [role="option"]`)) return;
+    if (node.nodeType === Node.TEXT_NODE) parts.push(node.textContent ?? '');
+    else for (const child of node.childNodes) visit(child);
+  };
+  visit(label);
+  return cleanLabelText(parts.join(''));
+}
+
+function semanticGroupLabel(element: HTMLElement): string | undefined {
+  let node = element.parentElement;
+  for (let depth = 0; node && depth < 6; depth += 1, node = node.parentElement) {
+    const heading = node.querySelector(':scope > legend, :scope > h2, :scope > h3, :scope > h4');
+    const labelledBy = node.getAttribute('aria-labelledby');
+    const labelledText = labelledBy?.split(/\s+/).map((id) => node?.ownerDocument.getElementById(id)?.textContent ?? '').join(' ');
+    const text = node.matches('fieldset, [role="group"], [role="radiogroup"]')
+      ? node.getAttribute('aria-label') ?? labelledText ?? heading?.textContent
+      : heading?.textContent;
+    const cleaned = text ? normalizeLabel(cleanLabelText(text)) : '';
+    if (cleaned && cleaned.length <= 120) return cleaned;
+  }
+  return undefined;
+}
+
 function resolveExplicitLabel(element: HTMLElement): { text: string; source: LabelSource } | undefined {
   const id = element.id;
   if (id !== '') {
     const root = element.getRootNode();
     if (root instanceof Document || root instanceof ShadowRoot) {
       const label = root.querySelector(`label[for="${cssEscape(id)}"]`);
-      const text = label?.textContent === undefined ? '' : cleanLabelText(label.textContent);
+      const text = label === null ? '' : controlLabelText(label);
       if (text !== '') {
         return { text, source: 'label-for' };
       }
@@ -102,7 +128,7 @@ function resolveExplicitLabel(element: HTMLElement): { text: string; source: Lab
   }
   const wrapping = element.closest('label');
   if (wrapping !== null) {
-    const text = cleanLabelText(wrapping.textContent ?? '');
+    const text = controlLabelText(wrapping);
     if (text !== '') {
       return { text, source: 'wrapping-label' };
     }
@@ -120,7 +146,7 @@ function resolveExplicitLabel(element: HTMLElement): { text: string; source: Lab
         if (refId === '') continue;
         const refNode = root.querySelector(`#${cssEscape(refId)}`);
         if (refNode?.textContent !== undefined && refNode.textContent !== null) {
-          parts.push(cleanLabelText(refNode.textContent));
+          parts.push(controlLabelText(refNode));
         }
       }
       const text = parts.join(' ').trim();
@@ -299,13 +325,13 @@ export function distillField(element: HTMLElement, options: DistillOptions = {})
 
   let label: { text: string; source: LabelSource };
   let optionsList: string[] | undefined;
-  let groupName: string | undefined;
+  let groupName = semanticGroupLabel(element);
 
   if (isRadioElement(element)) {
     const group = collectRadioGroup(element);
     label = resolveRadioGroupLabel(group);
     optionsList = group.map(radioOptionText).filter((text) => text !== '');
-    groupName = element.name !== '' ? element.name : undefined;
+    groupName ??= element.name !== '' ? element.name : undefined;
   } else {
     label = resolvePlainLabel(element);
     if (element instanceof HTMLSelectElement) {

@@ -1,15 +1,5 @@
-export type JobContextSource = 'jsonld' | 'dom';
-
-export interface JobContextCandidate {
-  title?: string;
-  company?: string;
-  description?: string;
-  responsibilities?: string;
-  requirements?: string;
-  location?: string;
-  source: JobContextSource;
-  confidence: 'high' | 'medium';
-}
+import type { JobContextCandidate } from '@/shared/contracts/context';
+export type { JobContextSource, JobContextCandidate } from '@/shared/contracts/context';
 
 const TITLE_MAX = 120;
 const COMPANY_MAX = 80;

@@ -25,9 +25,14 @@ function openDatabase(): Promise<IDBDatabase> {
         db.createObjectStore(STORE_NAME);
       }
     };
-    request.onsuccess = () => resolve(request.result);
+    request.onsuccess = () => {
+      const db = request.result;
+      db.onversionchange = () => { db.close(); dbPromise = undefined; };
+      resolve(db);
+    };
     request.onerror = () => reject(request.error ?? new Error('indexedDB open failed'));
   });
+  void dbPromise.catch(() => { dbPromise = undefined; });
   return dbPromise;
 }
 
@@ -40,7 +45,9 @@ function withStore<T>(
       new Promise<T>((resolve, reject) => {
         const tx = db.transaction(STORE_NAME, mode);
         const request = operation(tx.objectStore(STORE_NAME));
-        request.onsuccess = () => resolve(request.result);
+        tx.oncomplete = () => resolve(request.result);
+        tx.onabort = () => reject(tx.error ?? new Error('indexedDB transaction aborted'));
+        tx.onerror = () => reject(tx.error ?? new Error('indexedDB transaction failed'));
         request.onerror = () => reject(request.error ?? new Error('indexedDB operation failed'));
       }),
   );

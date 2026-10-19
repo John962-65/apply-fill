@@ -18,6 +18,7 @@ describe('generateEssayDraft', () => {
     expect(draft).toContain('我应聘示例科技的“高级前端工程师”岗位。');
     expect(draft).toContain('项目经历「招聘推荐系统」：负责候选人匹配引擎，覆盖百万级数据。');
     expect(draft).toContain('岗位要求中提到“5 年经验，精通 TypeScript”');
+    expect(draft).not.toContain('这与我的上述经历直接相关');
     expect(draft).toContain('期待有机会进一步交流');
     expect(draft).toBe(
       generateEssayDraft({

@@ -1,8 +1,13 @@
+import { throwIfAborted } from '@/shared/errors';
+import { delay } from '@/shared/utils/timing';
+
 import type { DOMRevisionTracker } from './DOMRevisionTracker';
 import { findInstanceContainers } from './SectionScanner';
 import type { ScannedSection } from './SectionScanner';
 
 export interface ExpandOptions {
+  signal?: AbortSignal;
+  checkpoint?: (signal?: AbortSignal) => Promise<void>;
   tracker?: DOMRevisionTracker;
   maxAdds?: number;
   perAddTimeoutMs?: number;
@@ -23,24 +28,15 @@ const DEFAULT_MAX_ADDS = 6;
 const DEFAULT_PER_ADD_TIMEOUT_MS = 2000;
 const DEFAULT_MAX_TOTAL_MS = 10000;
 
-function waitUntil(predicate: () => boolean, timeoutMs: number): Promise<boolean> {
-  if (predicate()) {
-    return Promise.resolve(true);
+async function waitUntil(predicate: () => boolean, timeoutMs: number, signal?: AbortSignal): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    throwIfAborted(signal);
+    if (predicate()) return true;
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return false;
+    await delay(Math.min(40, remaining), signal);
   }
-  return new Promise<boolean>((resolve) => {
-    const startedAt = Date.now();
-    const timer = setInterval(() => {
-      if (predicate()) {
-        clearInterval(timer);
-        resolve(true);
-        return;
-      }
-      if (Date.now() - startedAt >= timeoutMs) {
-        clearInterval(timer);
-        resolve(false);
-      }
-    }, 40);
-  });
 }
 
 export async function expandSection(
@@ -48,6 +44,7 @@ export async function expandSection(
   targetCount: number,
   options: ExpandOptions = {},
 ): Promise<ExpandResult> {
+  throwIfAborted(options.signal);
   const maxAdds = options.maxAdds ?? DEFAULT_MAX_ADDS;
   const perAddTimeoutMs = options.perAddTimeoutMs ?? DEFAULT_PER_ADD_TIMEOUT_MS;
   const maxTotalMs = options.maxTotalMs ?? DEFAULT_MAX_TOTAL_MS;
@@ -63,11 +60,13 @@ export async function expandSection(
   }
 
   const wait = options.tracker !== undefined
-    ? (predicate: () => boolean, timeoutMs: number) => options.tracker?.waitFor(predicate, timeoutMs) ?? Promise.resolve(false)
+    ? (predicate: () => boolean, timeoutMs: number, signal?: AbortSignal) => options.tracker?.waitFor(predicate, timeoutMs, signal) ?? Promise.resolve(false)
     : waitUntil;
 
   const startedAt = Date.now();
   while (result.after < targetCount) {
+    await options.checkpoint?.(options.signal);
+    throwIfAborted(options.signal);
     if (result.clicks >= maxAdds) {
       result.status = 'NO_PROGRESS';
       break;
@@ -77,9 +76,19 @@ export async function expandSection(
       break;
     }
     const countBefore = result.after;
+    if (!section.addControl.isConnected || !section.scope.isConnected) {
+      result.status = 'NO_PROGRESS';
+      break;
+    }
     section.addControl.click();
     result.clicks += 1;
-    const grown = await wait(() => findInstanceContainers(section.scope).length > countBefore, perAddTimeoutMs);
+    const remaining = maxTotalMs - (Date.now() - startedAt);
+    const grown = await wait(
+      () => findInstanceContainers(section.scope).length > countBefore,
+      Math.min(perAddTimeoutMs, Math.max(0, remaining)),
+      options.signal,
+    );
+    throwIfAborted(options.signal);
     const countAfter = findInstanceContainers(section.scope).length;
     result.after = countAfter;
     if (!grown || countAfter <= countBefore) {

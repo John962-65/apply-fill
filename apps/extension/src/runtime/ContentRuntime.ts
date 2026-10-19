@@ -32,13 +32,15 @@ import { formatForField } from '@/formatter';
 import { listResumeValuePaths } from '@/resume/compiler/paths';
 import type { ResumePathOption } from '@/resume/compiler/paths';
 import { BatchLLMRouter, FingerprintCache, resolveResumePath } from '@/router';
+import { fingerprintInputFor } from '@/router/FingerprintCache';
+import { privateFactStrings, sanitizeRoutingLabel } from '@/router/MetadataPrivacy';
 import type { RoutedProposal, UnmappedFieldRef } from '@/router';
 import { ExecutionMutex } from '@/scheduler/ExecutionMutex';
 import { RuntimeDependencyRegistry } from '@/scheduler/RuntimeDependencyRegistry';
 import { WaveBarrier } from '@/scheduler/WaveBarrier';
 import { WaveScheduler } from '@/scheduler/WaveScheduler';
 import type { CompiledResume } from '@/shared/contracts/resume';
-import type { ControlKind, FieldExecutionResult, MappingIssue, SectionType } from '@/shared/contracts/field';
+import type { ControlKind, FieldExecutionResult, FieldSignature, MappingIssue, SectionType } from '@/shared/contracts/field';
 import type { InstanceObservation, InstanceReport, ObservationField, ReanchorStatus } from '@/shared/contracts/reanchor';
 import type { RunEvent, RunSummary } from '@/shared/contracts/run';
 import type { ExecutionWave, WaveExecutionSummary } from '@/shared/contracts/scheduler';
@@ -48,13 +50,15 @@ import { sendToBackground } from '@/shared/messages/client';
 import { isTabMessage } from '@/shared/messages/protocol';
 import type { AttachmentInfo, AutofillRunResponse, SimpleAck, UploadAttachmentResponse } from '@/shared/messages/protocol';
 import { createId } from '@/shared/utils/id';
-import { ApplicationContextStore } from '@/jd/ApplicationContext';
+import { decodeBytes } from '@/shared/utils/binary';
+import { executionCounts } from '@/shared/utils/runReport';
 import type { ApplicationContext } from '@/jd/ApplicationContext';
 import { generateEssayDraft } from '@/jd/EssayGenerator';
 import type { EssayProjection } from '@/jd/EssayGenerator';
 import { sniffJobDescription } from '@/jd/JDSniffer';
 import { MappingMemory } from '@/memory/MappingMemory';
-import { UserCorrectionStore } from '@/memory/UserCorrectionStore';
+import type { MappingMemoryInput } from '@/memory/MappingMemory';
+import type { JobContextResponse } from '@/shared/contracts/context';
 import { DirtyChecker, isDirtyCheckable, observedValueMatches } from '@/verifier/DirtyChecker';
 import type { DirtyCandidate } from '@/verifier/DirtyChecker';
 import { RecoveryPlanner } from '@/verifier/RecoveryPlanner';
@@ -62,27 +66,31 @@ import type { RecoveryCandidate } from '@/verifier/RecoveryPlanner';
 import { NativeCommitPredicate } from '@/verifier/CommitPredicate';
 import { FieldVerifier } from '@/verifier/FieldVerifier';
 import { detectValidationError } from '@/verifier/ValidationErrorDetector';
-import { mountQuickFillPill } from '@/ui/QuickFillPill';
-import type { EssayDraft, PillFieldView, QuickFillPillActions, QuickFillPillController } from '@/ui/QuickFillPill';
+import type { EssayDraft, PillFieldView, QuickFillPillActions, QuickFillPillController } from '@/shared/contracts/ui';
 
 import { PauseGate } from './PauseGate';
 import { buildExecutionPlan } from './planner';
-import type { ExecutionPlan, ScopedInstanceInput } from './planner';
+import type { CacheCandidate, ExecutionPlan, ScopedInstanceInput } from './planner';
 import { StepObserver } from './StepObserver';
+import { FrameTaskRunner } from './FrameTaskRunner';
+import { isFieldBindingValid } from './FieldBinding';
+import { RoutingPersistence } from './RoutingPersistence';
+import { CorrectionPersistence } from './CorrectionPersistence';
+import type { ActiveRun } from './FrameTaskRunner';
+import { classifyExecutionError, throwIfAborted } from '@/shared/errors';
+import { withAbort } from '@/shared/utils/timing';
 
-interface ActiveRun {
-  runId: string;
-  controller: AbortController;
-  pauseGate: PauseGate;
+export interface ContentRuntimeDeps {
+  mountPill(actions: QuickFillPillActions): QuickFillPillController;
 }
 
 interface ContainerRole {
   sectionType: SectionType;
   instanceId: string;
+  stepId: string;
 }
 
-const SCOPED_SECTION_TYPES = new Set<SectionType>(['education', 'project']);
-const CACHE_STORAGE_KEY = 'applyfill.fingerprintCache';
+const SCOPED_SECTION_TYPES = new Set<SectionType>(['education', 'project', 'work']);
 const MAX_RECONCILE_PASSES = 2;
 const MAX_STEP_TRANSITIONS = 5;
 const STEP_SETTLE_MS = 400;
@@ -94,7 +102,7 @@ interface StepIterationOutcome {
   cycles: Array<{ sourceFieldKey: string; targetFieldKey: string }>;
   issues: MappingIssue[];
   instances: InstanceReport[];
-  scanned: number;
+  observedKeys: string[];
   plan: ExecutionPlan;
 }
 
@@ -141,17 +149,22 @@ function reportStatusOf(status: ReanchorStatus): InstanceReport['status'] {
 
 export class ContentRuntime {
   private readonly registry = new GuardRegistry();
+  private readonly formId = createId('form');
   private readonly engine: FieldExecutionEngine;
   private readonly observer: UserInteractionObserver;
   private readonly elementByKey = new Map<string, HTMLElement>();
   private readonly keyByElement = new WeakMap<Element, string>();
   private readonly containerRoles = new WeakMap<Element, ContainerRole>();
-  private readonly instanceRegistry = new FormInstanceRegistry();
+  private readonly instanceRegistries = new Map<string, FormInstanceRegistry>();
+  private readonly signatures = new Map<string, FieldSignature>();
+  private stepExecution?: { stepId: string; controller: AbortController };
   private readonly reanchorManager = new ReanchorManager();
   private readonly revisionTracker = new DOMRevisionTracker(document);
   private readonly fingerprintCache = new FingerprintCache();
+  private readonly pendingCacheCandidates = new Map<string, CacheCandidate & { cached?: boolean }>();
   private readonly mappingMemory = new MappingMemory();
-  private readonly userCorrections = new UserCorrectionStore();
+  private readonly routingPersistence = new RoutingPersistence(this.fingerprintCache, this.mappingMemory);
+  private readonly corrections = new CorrectionPersistence();
   private readonly dependencyRegistry = new RuntimeDependencyRegistry();
   private readonly waveScheduler: WaveScheduler;
   private readonly dirtyChecker = new DirtyChecker();
@@ -160,28 +173,61 @@ export class ContentRuntime {
   private lastPlan: ExecutionPlan | null = null;
   private lastSummary: RunSummary | null = null;
   private pill: QuickFillPillController | null = null;
-  private readonly stepObserver = new StepObserver(document);
+  private readonly stepObserver = new StepObserver(document, (text) => {
+    for (const value of privateFactStrings(this.lastCompiled)) if (value) text = text.split(value).join('[private]');
+    return text;
+  });
   private readonly fileUploadAgent = new FileUploadAgent();
   private readonly llmRouter: BatchLLMRouter;
   private llmProposals = new Map<string, RoutedProposal>();
   private llmInfo: NonNullable<RunSummary['llm']> | null = null;
   private readonly lastUserInteractions = new WeakMap<Element, number>();
   private activeRun: ActiveRun | null = null;
+  private readonly frameTasks = new FrameTaskRunner({
+    getActive: () => this.activeRun,
+    setActive: (run) => { this.activeRun = run; },
+    revoke: (runId) => this.registry.revokeRunLeases(runId),
+    getSummary: () => this.lastSummary,
+  });
   private started = false;
 
-  constructor() {
+  private get fieldContext(): { formId: string; stepId: string } {
+    return { formId: this.formId, stepId: this.stepObserver.stepId() };
+  }
+
+  private instancesFor(stepId: string): FormInstanceRegistry {
+    let registry = this.instanceRegistries.get(stepId);
+    if (!registry) { registry = new FormInstanceRegistry(); this.instanceRegistries.set(stepId, registry); }
+    return registry;
+  }
+
+  private rememberPlan(plan: ExecutionPlan): void {
+    for (const mapping of plan.mappings) this.signatures.set(mapping.fieldKey, mapping.signature);
+    for (const [fieldKey, element] of plan.elementByKey) {
+      this.elementByKey.set(fieldKey, element); this.keyByElement.set(element, fieldKey);
+    }
+  }
+
+  private isCurrentField(fieldKey: string): boolean {
+    return this.signatures.get(fieldKey)?.descriptor.stepId === this.stepObserver.stepId();
+  }
+
+  constructor(private readonly deps: ContentRuntimeDeps) {
     const verifier = new FieldVerifier(new NativeCommitPredicate());
     const portalTracker = new PortalTracker();
     const selectAgent = new SelectAgent(portalTracker);
     this.engine = new FieldExecutionEngine(this.registry, {
       resolveElement: (fieldKey) => this.resolveElement(fieldKey),
+      getDomRevision: () => this.revisionTracker.revision,
+      isIdentityValid: (element, field) => isFieldBindingValid(element, field.signature, this.formId,
+        this.findContainerRole(element), this.stepObserver.stepId()),
       verifyField: (context) => verifier.verify(context),
       selectAgent,
       cascaderWalker: new CascaderWalker(portalTracker),
       dateAgent: new DateAgent(portalTracker, selectAgent),
     });
     this.waveScheduler = new WaveScheduler({
-      barrier: new WaveBarrier(document),
+      barrier: new WaveBarrier(document, undefined, (element) => this.resolveFieldKey(element)),
       registry: this.dependencyRegistry,
       mutex: new ExecutionMutex(),
     });
@@ -190,11 +236,13 @@ export class ContentRuntime {
       onUserEdit: (fieldKey, event, target) => this.handleUserEdit(fieldKey, event, target),
     });
     this.llmRouter = new BatchLLMRouter(async (batch) => {
+      const privateValues = privateFactStrings(this.lastCompiled);
       const response = await sendToBackground<LlmRouteResponse>({
         type: 'LLM_ROUTE_FIELDS',
+        runId: this.activeRun?.runId,
         fields: batch.map((field) => ({
           fieldKey: field.fieldKey,
-          label: field.label,
+          label: sanitizeRoutingLabel(field.label, privateValues),
           controlKind: field.controlKind,
           sectionType: field.sectionType,
           ...(field.instanceIndex !== undefined ? { instanceIndex: field.instanceIndex } : {}),
@@ -215,9 +263,21 @@ export class ContentRuntime {
       return;
     }
     this.started = true;
+    this.stepObserver.subscribe(() => {
+      if (this.activeRun) this.registry.revokeRunLeases(this.activeRun.runId);
+      if (this.stepExecution) this.stepExecution.controller.abort('STEP_CHANGED');
+      else if (this.activeRun?.runId.startsWith('task_')) this.activeRun.controller.abort('STEP_CHANGED');
+      this.pill?.destroy(); this.pill = null;
+    });
     this.revisionTracker.start();
     this.observer.start(document);
     this.stepObserver.start();
+    window.addEventListener('pagehide', () => {
+      if (this.activeRun !== null) {
+        this.registry.revokeRunLeases(this.activeRun.runId);
+        this.activeRun.controller.abort('DOCUMENT_UNLOADED');
+      }
+    });
     try {
       void chrome.runtime
         .sendMessage({ type: 'FRAME_HELLO', url: location.href, title: document.title })
@@ -225,33 +285,54 @@ export class ContentRuntime {
     } catch {
       void 0;
     }
-    chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) => {
+    chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) => {
+      if (sender.id !== chrome.runtime.id || /^https?:/.test(sender.url ?? '')) return undefined;
       if (!isTabMessage(message)) {
         return undefined;
       }
       switch (message.type) {
+        case 'RESUME_CHANGED':
+          this.lastCompiled = null; this.lastPlan = null; this.lastSummary = null;
+          this.instanceRegistries.clear(); this.llmProposals.clear();
+          this.pill?.destroy(); this.pill = null;
+          sendResponse({ ok: true });
+          return undefined;
+        case 'FRAME_NAVIGATED':
+          this.stepObserver.refresh();
+          sendResponse({ ok: true });
+          return undefined;
+        case 'CORRECTIONS_EPOCH':
+          this.corrections.observeEpoch(message.epoch);
+          sendResponse({ ok: true });
+          return undefined;
         case 'PING':
           sendResponse({ ok: true, url: location.href, title: document.title } satisfies SimpleAck);
           return undefined;
         case 'RUN_AUTOFILL':
+          void sendToBackground({ type: 'RUN_COORDINATED' }).then(sendResponse, () => sendResponse({ ok: false }));
+          return true;
         case 'RUN_AUTOFILL_FRAME':
-          this.handleRunRequest(sendResponse);
+          this.handleRunRequest(sendResponse, message.runId);
           return true;
         case 'CANCEL_RUN':
-          sendResponse(this.handleCancel());
+          sendResponse(this.handleCancel(message.runId));
           return undefined;
         case 'PAUSE_RUN':
-          sendResponse(this.handlePause());
+          sendResponse(this.handlePause(message.runId));
           return undefined;
         case 'RESUME_RUN':
-          sendResponse(this.handleResume());
+          sendResponse(this.handleResume(message.runId));
           return undefined;
         case 'UPLOAD_ATTACHMENT':
           this.handleUploadAttachment(sendResponse as (response: UploadAttachmentResponse) => void);
           return true;
         case 'RETRY_FIELD':
-          void this.pillRetryField(message.fieldKey);
-          sendResponse({ ok: true });
+          if (this.executableFor(message.fieldKey) === undefined || this.activeRun !== null) {
+            sendResponse({ ok: false, message: 'FIELD_UNAVAILABLE' });
+          } else {
+            void this.pillRetryField(message.fieldKey).then((ok) => sendResponse({ ok }));
+            return true;
+          }
           return undefined;
         default:
           return undefined;
@@ -261,31 +342,54 @@ export class ContentRuntime {
 
   private handleUploadAttachment(sendResponse: (response: UploadAttachmentResponse) => void): void {
     void (async () => {
+      const input = this.findFileInput();
+      const initialFiles = input ? [...input.files ?? []] : [];
+      let userSelected = false; let uploadRun: ActiveRun | undefined; let summary: RunSummary | null = null;
+      const onSelect = (event: Event) => { if (event.isTrusted) { userSelected = true; uploadRun?.controller.abort('USER_FILE_SELECTION'); } };
+      input?.addEventListener('change', onSelect, true);
       try {
-        const attachment = await sendToBackground<AttachmentInfo | null>({ type: 'GET_ATTACHMENT' });
-        if (attachment === null || attachment === undefined) {
-          sendResponse({ ok: false, status: 'NO_ATTACHMENT', message: '工作台尚未选择附件' });
-          return;
-        }
-        const input = this.findFileInput();
-        if (input === null) {
-          sendResponse({ ok: false, status: 'NO_FILE_INPUT', message: '当前页面未找到可用的文件上传控件' });
-          return;
-        }
-        const file = new File([attachment.bytes], attachment.name, { type: attachment.type });
-        const result = await this.fileUploadAgent.upload(input, file);
-        sendResponse({
-          ok: result.outcome === 'SITE_CONFIRMED',
-          status: result.outcome,
-          message: result.message,
-        });
+        const response = await this.frameTasks.run('upload', async (run): Promise<UploadAttachmentResponse> => {
+          uploadRun = run;
+          const startedAt = Date.now();
+          const finish = (response: UploadAttachmentResponse, attempts = 0): UploadAttachmentResponse => {
+            const fields: FieldExecutionResult[] = [];
+            if (input) {
+              const label = input.labels?.[0]?.textContent?.trim() || input.getAttribute('aria-label') || '简历附件';
+              const descriptor = { ...this.fieldContext, sectionType: 'attachment' as const, controlKind: 'unknown' as const, normalizedLabel: label,
+                disambiguator: { fieldName: input.name || input.id } };
+              fields.push({ fieldKey: buildFieldIdentity(descriptor).fieldKey, stepId: descriptor.stepId, sectionType: 'attachment', label,
+                controlKind: 'unknown', attempts, status: response.ok ? 'VERIFIED' : 'NEEDS_MANUAL', reason: response.status });
+            }
+            summary = { runId: run.runId, startedAt, finishedAt: Date.now(), status: response.ok ? 'COMPLETED' : 'FAILED',
+              counts: { scanned: fields.length, mapped: attempts ? fields.length : 0, ...executionCounts(fields) }, fields, mappingIssues: [],
+              ...(response.ok ? {} : { error: response.status }) };
+            return response;
+          };
+          if (userSelected) run.controller.abort('USER_FILE_SELECTION');
+          throwIfAborted(run.controller.signal);
+          const attachment = await withAbort(sendToBackground<AttachmentInfo | null>({ type: 'GET_ATTACHMENT', runId: run.runId }), run.controller.signal);
+          if (attachment === null || attachment === undefined) return finish({ ok: false, status: 'NO_ATTACHMENT', message: '工作台尚未选择附件' });
+          await this.checkpointRun(run.runId, run.controller.signal, run.pauseGate);
+          throwIfAborted(run.controller.signal);
+          if (input === null) return finish({ ok: false, status: 'NO_FILE_INPUT', message: '当前页面未找到可用的文件上传控件' });
+          if (!input.isConnected || userSelected || [...input.files ?? []].some((file, index) => {
+            const before = initialFiles[index]; return !before || file.name !== before.name || file.size !== before.size || file.type !== before.type || file.lastModified !== before.lastModified;
+          }) || input.files?.length !== initialFiles.length)
+            return finish({ ok: false, status: 'FILE_CHANGED', message: '文件选择已变化，请核对后重新上传' });
+          const bytes = decodeBytes(attachment.dataBase64, attachment.size);
+          const file = new File([bytes], attachment.name, { type: attachment.type });
+          const result = await this.fileUploadAgent.upload(input, file, { signal: run.controller.signal });
+          throwIfAborted(run.controller.signal);
+          return finish({ ok: result.outcome === 'SITE_CONFIRMED', status: result.outcome, message: result.message }, 1);
+        }, { status: (response) => response.ok ? 'COMPLETED' : 'FAILED', getSummary: () => summary });
+        sendResponse(response);
       } catch (error) {
         sendResponse({
           ok: false,
-          status: 'ERROR',
-          message: error instanceof Error ? error.message : String(error),
+          status: classifyExecutionError(error) === 'ABORTED' ? 'CANCELLED' : 'ERROR',
+          message: classifyExecutionError(error) === 'ABORTED' ? '上传已取消' : error instanceof Error ? error.message : String(error),
         });
-      }
+      } finally { input?.removeEventListener('change', onSelect, true); }
     })();
   }
 
@@ -297,16 +401,20 @@ export class ContentRuntime {
     return visible ?? inputs[0] ?? null;
   }
 
-  private handleRunRequest(sendResponse: (response: AutofillRunResponse) => void): void {
+  private handleRunRequest(sendResponse: (response: AutofillRunResponse) => void, coordinatedRunId?: string): void {
+    if (typeof coordinatedRunId !== 'string' || coordinatedRunId === '') {
+      sendResponse({ ok: false, error: 'INVALID_RUN' });
+      return;
+    }
     if (this.activeRun !== null) {
       sendResponse({ ok: false, error: 'RUN_IN_PROGRESS' });
       return;
     }
-    const runId = createId('run');
+    const runId = coordinatedRunId;
     const controller = new AbortController();
     const pauseGate = new PauseGate();
     this.activeRun = { runId, controller, pauseGate };
-    this.executeRun(runId, controller.signal, pauseGate)
+    this.checkpointRun(runId, controller.signal, pauseGate).then(() => this.executeRun(runId, controller.signal, pauseGate))
       .then((summary) => {
         this.activeRun = null;
         sendResponse({ ok: true, summary });
@@ -318,18 +426,26 @@ export class ContentRuntime {
       });
   }
 
-  private handleCancel(): SimpleAck {
-    if (this.activeRun === null) {
+  private handleCancel(runId?: string): SimpleAck {
+    if (this.activeRun === null || (runId !== undefined && this.activeRun.runId !== runId)) {
       return { ok: false, message: 'NO_ACTIVE_RUN' };
     }
-    const { runId, controller } = this.activeRun;
-    this.emit({ type: 'RUN_CANCELLED', runId });
+    const { runId: activeRunId, controller } = this.activeRun;
+    this.registry.revokeRunLeases(activeRunId);
+    this.emit({ type: 'RUN_CANCELLED', runId: activeRunId });
     controller.abort('USER_CANCEL');
     return { ok: true };
   }
 
-  private handlePause(): SimpleAck {
-    if (this.activeRun === null) {
+  private async checkpointRun(runId: string, signal: AbortSignal, pauseGate: PauseGate): Promise<void> {
+    await pauseGate.checkpoint(signal);
+    const response = await withAbort(sendToBackground<SimpleAck>({ type: 'CHECK_RUN_AUTH', runId }), signal);
+    if (response?.ok !== true && this.activeRun?.runId === runId) this.activeRun.controller.abort('RUN_INVALIDATED');
+    throwIfAborted(signal);
+  }
+
+  private handlePause(runId?: string): SimpleAck {
+    if (this.activeRun === null || (runId !== undefined && this.activeRun.runId !== runId)) {
       return { ok: false, message: 'NO_ACTIVE_RUN' };
     }
     this.activeRun.pauseGate.pause();
@@ -337,8 +453,8 @@ export class ContentRuntime {
     return { ok: true };
   }
 
-  private handleResume(): SimpleAck {
-    if (this.activeRun === null) {
+  private handleResume(runId?: string): SimpleAck {
+    if (this.activeRun === null || (runId !== undefined && this.activeRun.runId !== runId)) {
       return { ok: false, message: 'NO_ACTIVE_RUN' };
     }
     this.activeRun.pauseGate.resume();
@@ -346,63 +462,19 @@ export class ContentRuntime {
     return { ok: true };
   }
 
-  private async loadCache(): Promise<void> {
-    try {
-      const stored = await chrome.storage.local.get(CACHE_STORAGE_KEY);
-      const serialized = stored[CACHE_STORAGE_KEY];
-      if (serialized !== undefined) {
-        this.fingerprintCache.loadFromJSON(serialized as ReturnType<FingerprintCache['toJSON']>);
-      }
-    } catch {
-      return;
-    }
+  private async saveRouting(): Promise<boolean> {
+    const run = this.activeRun;
+    return run !== null && this.routingPersistence.flush(run.runId, run.controller.signal);
   }
 
-  private async saveCache(): Promise<void> {
-    try {
-      await chrome.storage.local.set({ [CACHE_STORAGE_KEY]: this.fingerprintCache.toJSON() });
-    } catch {
-      return;
-    }
-  }
-
-  private async cacheJobContext(): Promise<void> {
+  private async cacheJobContext(runId: string, signal: AbortSignal): Promise<void> {
     try {
       const candidate = sniffJobDescription(document);
       if (candidate === undefined) {
         return;
       }
-      const stored = await chrome.storage.session.get(ApplicationContextStore.STORAGE_KEY);
-      const store = new ApplicationContextStore();
-      store.loadFromJSON(stored[ApplicationContextStore.STORAGE_KEY]);
-      store.save(candidate, location.host, location.href);
-      await chrome.storage.session.set({ [ApplicationContextStore.STORAGE_KEY]: store.toJSON() });
-    } catch {
-      return;
-    }
-  }
-
-  private async loadMemory(): Promise<void> {
-    try {
-      const stored = await chrome.storage.local.get([MappingMemory.STORAGE_KEY, UserCorrectionStore.STORAGE_KEY]);
-      this.mappingMemory.loadFromJSON(stored[MappingMemory.STORAGE_KEY]);
-      this.userCorrections.loadFromJSON(stored[UserCorrectionStore.STORAGE_KEY]);
-    } catch {
-      return;
-    }
-  }
-
-  private async saveMemory(): Promise<void> {
-    try {
-      await chrome.storage.local.set({ [MappingMemory.STORAGE_KEY]: this.mappingMemory.toJSON() });
-    } catch {
-      return;
-    }
-  }
-
-  private async saveCorrections(): Promise<void> {
-    try {
-      await chrome.storage.local.set({ [UserCorrectionStore.STORAGE_KEY]: this.userCorrections.toJSON() });
+      await withAbort(sendToBackground({ type: 'SAVE_JOB_CONTEXT', candidate, runId }),
+        AbortSignal.any([signal, AbortSignal.timeout(3000)]));
     } catch {
       return;
     }
@@ -410,7 +482,8 @@ export class ContentRuntime {
 
   private async executeRun(runId: string, signal: AbortSignal, pauseGate: PauseGate): Promise<RunSummary> {
     const startedAt = Date.now();
-    const response = await sendToBackground<{ document: CompiledResume | null }>({ type: 'GET_COMPILED_RESUME' });
+    const response = await withAbort(sendToBackground<{ document: CompiledResume | null }>({ type: 'GET_COMPILED_RESUME', runId }),
+      AbortSignal.any([signal, AbortSignal.timeout(5000)]));
     const compiled = response?.document ?? null;
     if (compiled === null) {
       const empty = this.summary(runId, startedAt, 'FAILED', [], [], 0, 0, []);
@@ -419,9 +492,10 @@ export class ContentRuntime {
     }
     this.lastCompiled = compiled;
 
-    await this.loadCache();
-    await this.loadMemory();
-    await this.cacheJobContext();
+    await this.routingPersistence.load(runId, signal);
+    this.pendingCacheCandidates.clear();
+    await this.corrections.load(signal);
+    await this.cacheJobContext(runId, signal);
     this.llmProposals = new Map();
     this.llmInfo = null;
 
@@ -433,49 +507,95 @@ export class ContentRuntime {
     const waves: WaveExecutionSummary[] = [];
     const cycles: Array<{ sourceFieldKey: string; targetFieldKey: string }> = [];
     const steps: NonNullable<RunSummary['stepTransitions']> = [];
-    let scanned = 0;
+    const observedKeys = new Set<string>();
     let lastPlan: ExecutionPlan | null = null;
-    let pendingFromWait = false;
     let transitionCount = 0;
+    let currentStepId = this.stepObserver.stepId();
+    let dirty: RunSummary['dirty'];
+    let recovery: RunSummary['recovery'];
+    let settled = false;
 
-    for (let index = 0; index <= MAX_STEP_TRANSITIONS; index += 1) {
+    for (let index = 0; index < (MAX_STEP_TRANSITIONS + 1) * (MAX_RECONCILE_PASSES + 1); index += 1) {
+      if (index > 0 && !await this.stepObserver.waitForStable({ signal })) {
+        if (!signal.aborted) issues.push({ label: '表单步骤', kind: 'AMBIGUOUS', reason: 'STEP_NOT_STABLE' });
+        break;
+      }
       const before = this.stepObserver.capture();
-      const iteration = await this.executeStepIteration(runId, signal, pauseGate, compiled, executedKeys, index === 0);
-      lastPlan = iteration.plan;
-      for (const result of iteration.results) {
-        executedKeys.add(result.fieldKey);
-      }
-      results.push(...iteration.results);
-      for (const issue of iteration.issues) {
-        const key = JSON.stringify(issue);
-        if (!issueKeys.has(key)) {
-          issueKeys.add(key);
-          issues.push(issue);
-        }
-      }
-      for (const instance of iteration.instances) {
-        instances.set(`${instance.sectionType}|${instance.instanceId}`, instance);
-      }
-      waves.push(...iteration.waves);
-      cycles.push(...iteration.cycles);
-      scanned += iteration.scanned;
-      const after = this.stepObserver.capture();
-      if (pendingFromWait || after !== before) {
+      const stepId = this.stepObserver.stepId();
+      if (stepId !== currentStepId) {
         transitionCount += 1;
-        steps.push({ index: transitionCount, fingerprint: after, fields: iteration.results.length });
-        pendingFromWait = false;
+        if (transitionCount > MAX_STEP_TRANSITIONS) {
+          issues.push({ label: '表单步骤', kind: 'AMBIGUOUS', reason: 'STEP_TRANSITION_LIMIT' }); break;
+        }
+        steps.push({ index: transitionCount, stepId, fingerprint: before, fields: 0 });
+        currentStepId = stepId;
+        executedKeys.clear();
       }
-      if (signal.aborted || index >= MAX_STEP_TRANSITIONS) {
-        break;
+      const controller = new AbortController();
+      const execution = { stepId, controller };
+      this.stepExecution = execution;
+      const stepSignal = AbortSignal.any([signal, controller.signal]);
+      let iteration: StepIterationOutcome | undefined;
+      try {
+        iteration = await this.executeStepIteration(runId, stepSignal, pauseGate, compiled, executedKeys, index === 0, stepId);
+      } catch (error) {
+        if (signal.aborted) break;
+        if (!controller.signal.aborted) throw error;
+      } finally {
+        if (this.stepExecution === execution) this.stepExecution = undefined;
       }
-      const next = await this.stepObserver.waitForChange(after, { timeoutMs: STEP_SETTLE_MS, signal });
-      if (next === null) {
-        break;
+      if (iteration) {
+        lastPlan = iteration.plan;
+        for (const result of iteration.results) {
+          if (controller.signal.aborted && result.status === 'CANCELLED') result.reason = 'STEP_CHANGED';
+          executedKeys.add(result.fieldKey);
+          const previous = results.findIndex((item) => item.fieldKey === result.fieldKey);
+          if (previous < 0) results.push(result); else results[previous] = result;
+        }
+        for (const issue of iteration.issues) {
+          const key = JSON.stringify(issue);
+          if (!issueKeys.has(key)) { issueKeys.add(key); issues.push(issue); }
+        }
+        for (const instance of iteration.instances) {
+          const key = `${stepId}|${instance.sectionType}|${instance.instanceId}`;
+          const previous = instances.get(key);
+          // Rescanning a just-created instance in this Run does not turn its
+          // creation report into a match against an earlier Run's snapshot.
+          instances.set(key, previous?.status === 'NEW_INSTANCE' && instance.status === 'MATCHED'
+            ? { ...instance, status: 'NEW_INSTANCE' } : instance);
+        }
+        waves.push(...iteration.waves);
+        cycles.push(...iteration.cycles);
+        for (const fieldKey of iteration.observedKeys) observedKeys.add(fieldKey);
+        if (steps.at(-1)?.stepId === stepId) steps.at(-1)!.fields = iteration.results.length;
+        // A temporary root replacement can return to the same logical step.
+        for (const result of iteration.results) if (result.status === 'CANCELLED' && controller.signal.aborted) executedKeys.delete(result.fieldKey);
       }
-      pendingFromWait = true;
+      if (signal.aborted) break;
+      const after = this.stepObserver.capture();
+      if (after === before && await this.stepObserver.waitForChange(after, { timeoutMs: STEP_SETTLE_MS, signal }) === null) {
+        if (signal.aborted) break;
+        if (lastPlan && this.stepObserver.stepId() === stepId) {
+          this.stepExecution = execution;
+          try {
+            dirty = await this.runDirtyCheck(runId, stepSignal, pauseGate, lastPlan, results);
+            recovery = await this.runRecovery(runId, stepSignal, pauseGate, lastPlan, results);
+          } catch (error) {
+            if (!stepSignal.aborted) throw error;
+          } finally {
+            if (this.stepExecution === execution) this.stepExecution = undefined;
+          }
+        }
+        if (this.stepObserver.stepId() === stepId) { settled = true; break; }
+      }
     }
 
-    const status = signal.aborted ? 'CANCELLED' : 'COMPLETED';
+    if (!settled && !signal.aborted && !issues.some((issue) => issue.reason.startsWith('STEP_'))) {
+      issues.push({ label: '表单步骤', kind: 'AMBIGUOUS', reason: 'STEP_DISCOVERY_LIMIT' });
+    }
+
+    const stepFailure = issues.find((issue) => ['STEP_DISCOVERY_LIMIT', 'STEP_TRANSITION_LIMIT', 'STEP_NOT_STABLE'].includes(issue.reason))?.reason;
+    const status = signal.aborted ? 'CANCELLED' : stepFailure ? 'FAILED' : 'COMPLETED';
     this.lastPlan = lastPlan;
     const summary = this.summary(
       runId,
@@ -483,10 +603,11 @@ export class ContentRuntime {
       status,
       results,
       issues,
-      scanned,
+      observedKeys.size,
       results.length,
       [...instances.values()],
     );
+    if (stepFailure) summary.error = stepFailure;
     if (waves.length > 0) {
       summary.waves = waves;
     }
@@ -497,20 +618,25 @@ export class ContentRuntime {
     if (cycles.length > 0) {
       summary.cycles = cycles;
     }
-    if (lastPlan !== null && !signal.aborted) {
-      const dirtyReport = await this.runDirtyCheck(runId, signal, pauseGate, lastPlan, results);
-      if (dirtyReport !== undefined) {
-        summary.dirty = dirtyReport;
-      }
-      const recovery = await this.runRecovery(runId, signal, pauseGate, lastPlan, results);
-      if (recovery !== undefined) {
-        summary.recovery = recovery;
-      }
-    }
+    if (dirty) summary.dirty = dirty;
+    if (recovery) summary.recovery = recovery;
     if (steps.length > 0) {
       summary.stepTransitions = steps;
     }
-    summary.counts = { ...summary.counts, ...this.computeStatusCounts(results) };
+    for (const result of results) {
+      if (!signal.aborted && result.status === 'CANCELLED' && !this.isCurrentField(result.fieldKey)) result.reason = 'STEP_CHANGED';
+    }
+    summary.counts = { ...summary.counts, ...this.computeStatusCounts(results, summary.mappingIssues) };
+    summary.status = signal.aborted ? 'CANCELLED' : summary.status;
+    const finalResults = new Map(results.map((result) => [result.fieldKey, result]));
+    for (const candidate of this.pendingCacheCandidates.values()) {
+      if (!signal.aborted && finalResults.get(candidate.fieldKey)?.status === 'VERIFIED') {
+        if (!candidate.cached) this.fingerprintCache.record(candidate.input, candidate.template);
+      } else {
+        this.fingerprintCache.invalidate(candidate.input);
+      }
+    }
+    await this.saveRouting();
     summary.finishedAt = Date.now();
     this.lastSummary = summary;
     this.emit({ type: 'RUN_FINISHED', runId, summary });
@@ -525,18 +651,35 @@ export class ContentRuntime {
     compiled: CompiledResume,
     executedKeys: Set<string>,
     emitStart: boolean,
+    stepId: string,
   ): Promise<StepIterationOutcome> {
+    const instanceRegistry = this.instancesFor(stepId);
     const preIssues: MappingIssue[] = [];
     let elements = scanFormElements(document);
     let sections = this.collectScopedSections(elements);
 
     let expanded = false;
-    for (const section of sections) {
-      const target = targetCountOf(compiled, section.sectionType);
-      if (target <= 0 || section.containers.length >= target) {
+    for (const [sectionType, peers] of this.groupScopedSections(sections)) {
+      const missing = targetCountOf(compiled, sectionType) - new Set(peers.flatMap((section) => section.containers)).size;
+      if (missing <= 0) continue;
+      const uncertainScope = new Set(peers.map((section) => section.scope.closest('form'))).size > 1 ||
+        peers.some((section) => sections.some((other) => other !== section && section.scope.contains(other.scope)));
+      if (uncertainScope) {
+        preIssues.push({ label: peers[0]?.headingText ?? '经历区块', kind: 'AMBIGUOUS', reason: 'SECTION_SCOPE_REQUIRES_CONFIRMATION' });
         continue;
       }
-      const result = await expandSection(section, target, { tracker: this.revisionTracker });
+      const addable = peers.filter((section) => section.addControl !== null);
+      const section = addable[0] ?? peers[0];
+      if (!section) continue;
+      if (addable.length > 1) {
+        preIssues.push({ label: section.headingText, kind: 'REPEATER', reason: 'EXPAND_SECTION_AMBIGUOUS' });
+        continue;
+      }
+      const result = await expandSection(section, section.containers.length + missing, {
+        tracker: this.revisionTracker,
+        signal,
+        checkpoint: () => this.checkpointRun(runId, signal, pauseGate),
+      });
       if (result.clicks > 0) {
         expanded = true;
       }
@@ -556,25 +699,36 @@ export class ContentRuntime {
     const containerElements = new Set<HTMLElement>();
     const now = Date.now();
 
-    for (const section of sections) {
-      const sectionType = section.sectionType;
+    // One allocation pass owns all same-type containers in this step. Separate
+    // passes could claim the same snapshot twice or misreport other scopes as missing.
+    for (const [sectionType, peers] of this.groupScopedSections(sections)) {
+      const records = [...new Set(peers.flatMap((section) => section.containers))].map((container) => {
+        const owner = peers.filter((section) => section.containers.includes(container))
+          .sort((a, b) => a.scope.contains(b.scope) ? 1 : b.scope.contains(a.scope) ? -1 : 0)[0]!;
+        const distilled = distillScopedElements(container, { formId: this.formId, stepId, sectionType, instanceId: 'instance_pending' })
+          .filter((item) => owner.scope.contains(item.element) && !sections.some((other) => other !== owner &&
+            owner.scope.contains(other.scope) && other.scope.contains(item.element)));
+        return { container, distilled };
+      }).filter((record) => record.distilled.length > 0);
+      const containers = records.map((record) => record.container);
       const availableEntryIds = entryIdsOf(compiled, sectionType);
-      const distilledPerContainer = section.containers.map((container) =>
-        distillScopedElements(container, { sectionType, instanceId: 'instance_pending' }),
-      );
+      const distilledPerContainer = records.map((record) => record.distilled);
       const observations = distilledPerContainer.map((items) => toObservation(sectionType, items));
-      const snapshots = this.instanceRegistry.bySection(sectionType);
-      const output = this.reanchorManager.reanchorSection({
+      const snapshots = instanceRegistry.bySection(sectionType);
+      const scopeAmbiguous = new Set(peers.map((section) => section.scope.closest('form'))).size > 1 ||
+        peers.some((section) => sections.some((other) => other !== section && section.scope.contains(other.scope)));
+      const output: ReturnType<ReanchorManager['reanchorSection']> = scopeAmbiguous ? { results: observations.map(() => ({ status: 'AMBIGUOUS' as const, reason: 'SECTION_SCOPE_REQUIRES_CONFIRMATION',
+        evidence: { stableIdMatched: false, witnessMatched: false, topologyMatched: false, contextMatched: false } })), missingSnapshots: [] } : this.reanchorManager.reanchorSection({
         sectionType,
         observations,
         snapshots,
         availableEntryIds,
-        claimedEntryIds: this.instanceRegistry.entryIdsOwnedBy(sectionType),
-        allocateInstanceId: () => this.instanceRegistry.allocateInstanceId(sectionType),
+        claimedEntryIds: instanceRegistry.entryIdsOwnedBy(sectionType),
+        allocateInstanceId: () => instanceRegistry.allocateInstanceId(sectionType),
       });
 
       output.results.forEach((result, index) => {
-        const container = section.containers[index];
+        const container = containers[index];
         const items = distilledPerContainer[index] ?? [];
         const observation = observations[index];
         if (container === undefined || observation === undefined) {
@@ -582,19 +736,19 @@ export class ContentRuntime {
         }
         let instanceId = result.instanceId;
         if (instanceId === undefined) {
-          instanceId = this.instanceRegistry.allocateInstanceId(sectionType);
+          instanceId = instanceRegistry.allocateInstanceId(sectionType);
         }
         for (const item of items) {
           item.field.instanceId = instanceId;
           item.field.descriptor.instanceId = instanceId;
         }
         containerElements.add(container);
-        this.containerRoles.set(container, { sectionType, instanceId });
+        this.containerRoles.set(container, { sectionType, instanceId, stepId });
 
         const witness = extractWitness(sectionType, observation.fields);
         const topology = buildTopology(observation.fields);
         if (result.status === 'MATCHED' || result.status === 'NEW_INSTANCE') {
-          this.instanceRegistry.upsert(instanceId, {
+          instanceRegistry.upsert(instanceId, {
             sectionType,
             resumeEntryId: result.resumeEntryId,
             witness,
@@ -602,7 +756,7 @@ export class ContentRuntime {
             observedAt: now,
           });
         } else {
-          this.instanceRegistry.reserveInstanceId(sectionType, instanceId);
+          instanceRegistry.reserveInstanceId(sectionType, instanceId);
         }
 
         instanceInputs.push({
@@ -614,6 +768,7 @@ export class ContentRuntime {
           reason: result.reason,
         });
         const report: InstanceReport = {
+          stepId,
           sectionType,
           containerIndex: index,
           instanceId,
@@ -633,6 +788,7 @@ export class ContentRuntime {
 
       for (const snapshot of output.missingSnapshots) {
         const report: InstanceReport = {
+          stepId,
           sectionType,
           containerIndex: -1,
           instanceId: snapshot.instanceId,
@@ -649,7 +805,7 @@ export class ContentRuntime {
     }
 
     const flatElements = elements.filter((element) => !isInsideAny(element, containerElements));
-    const flatDistilled = distillElements(flatElements);
+    const flatDistilled = distillElements(flatElements, { formId: this.formId, stepId });
     const planOptions = {
       instances: instanceInputs,
       cache: this.fingerprintCache,
@@ -657,17 +813,14 @@ export class ContentRuntime {
       host: location.host,
     };
     let plan = buildExecutionPlan(compiled, flatDistilled, planOptions);
-    const llmAdded = await this.collectLlmProposals(plan);
+    const llmAdded = await this.collectLlmProposals(plan, signal);
     if (llmAdded > 0) {
       plan = buildExecutionPlan(compiled, flatDistilled, {
         ...planOptions,
         llmProposals: this.llmProposals,
       });
     }
-    for (const [fieldKey, element] of plan.elementByKey) {
-      this.elementByKey.set(fieldKey, element);
-      this.keyByElement.set(element, fieldKey);
-    }
+    this.rememberPlan(plan);
 
     if (emitStart) {
       this.emit({ type: 'RUN_STARTED', runId, totalFields: plan.executable.length });
@@ -687,19 +840,19 @@ export class ContentRuntime {
     });
     const results = orchestration.results;
 
-    this.refreshSnapshots(instanceInputs);
+    if (!signal.aborted) this.refreshSnapshots(instanceInputs, instanceRegistry);
     const verifiedKeys = new Set(
       results.filter((result) => result.status === 'VERIFIED').map((result) => result.fieldKey),
     );
-    let cacheChanged = false;
     for (const candidate of plan.cacheCandidates) {
-      if (verifiedKeys.has(candidate.fieldKey)) {
-        this.fingerprintCache.record(candidate.input, candidate.template);
-        cacheChanged = true;
-      }
+      this.pendingCacheCandidates.set(candidate.fieldKey, candidate);
     }
-    if (cacheChanged) {
-      await this.saveCache();
+    for (const mapping of plan.mappings) {
+      if (mapping.source === 'cache' && mapping.targetPath !== undefined) {
+        this.pendingCacheCandidates.set(mapping.fieldKey, {
+          fieldKey: mapping.fieldKey, input: fingerprintInputFor(location.host, mapping.signature), template: mapping.targetPath, cached: true,
+        });
+      }
     }
 
     let memoryChanged = false;
@@ -707,33 +860,24 @@ export class ContentRuntime {
       if (
         mapping.source === 'memory' &&
         mapping.targetPath !== undefined &&
-        verifiedKeys.has(mapping.fieldKey)
+        verifiedKeys.has(mapping.fieldKey) && !signal.aborted
       ) {
-        this.mappingMemory.recordVerified(
-          {
-            host: location.host,
-            sectionType: mapping.signature.sectionType,
-            normalizedLabel: mapping.signature.descriptor.normalizedLabel,
-            controlKind: mapping.signature.controlKind,
-          },
-          mapping.targetPath,
-        );
+        this.mappingMemory.recordVerified(this.memoryInputFor(mapping.signature, compiled), mapping.targetPath);
         memoryChanged = true;
       }
     }
     if (memoryChanged) {
-      await this.saveMemory();
+      await this.saveRouting();
     }
 
-    const scannedCount = flatDistilled.length + instanceInputs.reduce((sum, input) => sum + input.distilled.length, 0);
     return {
       results,
       waves: orchestration.waves,
       cycles: orchestration.cycles,
       issues: [...preIssues, ...plan.issues, ...orchestration.finalPlan.issues],
       instances: instanceReports,
-      scanned: scannedCount,
-      plan: orchestration.finalPlan,
+      observedKeys: [...new Set([...plan.elementByKey.keys(), ...orchestration.finalPlan.elementByKey.keys()])],
+      plan: orchestration.finalPlan === runnable ? plan : orchestration.finalPlan,
     };
   }
 
@@ -756,7 +900,7 @@ export class ContentRuntime {
       this.engine.executeRun(fields, {
         runId,
         signal: waveSignal,
-        checkpoint: (checkpointSignal) => pauseGate.checkpoint(checkpointSignal),
+        checkpoint: (checkpointSignal) => this.checkpointRun(runId, checkpointSignal, pauseGate),
         onEvent: (event) => this.emit(event),
       });
     const results: FieldExecutionResult[] = [];
@@ -810,6 +954,7 @@ export class ContentRuntime {
     }
     const verified = new Map<string, FieldExecutionResult>();
     for (const result of results) {
+      if (!this.isCurrentField(result.fieldKey)) continue;
       if (result.status === 'VERIFIED') {
         verified.set(result.fieldKey, result);
       } else {
@@ -863,7 +1008,7 @@ export class ContentRuntime {
         this.engine.executeRun(fields, {
           runId,
           signal,
-          checkpoint: (checkpointSignal) => pauseGate.checkpoint(checkpointSignal),
+          checkpoint: (checkpointSignal) => this.checkpointRun(runId, checkpointSignal, pauseGate),
           onEvent: (event) => this.emit(event),
         }),
     });
@@ -933,8 +1078,8 @@ export class ContentRuntime {
       const role = this.findContainerRole(element);
       const distilled =
         role === undefined
-          ? distillField(element)
-          : distillField(element, { sectionType: role.sectionType, instanceId: role.instanceId });
+          ? distillField(element, { ...this.fieldContext })
+          : distillField(element, { ...this.fieldContext, sectionType: role.sectionType, instanceId: role.instanceId });
       const label = distilled !== undefined && distilled.label !== '' ? distilled.label : '';
       newRequired.push(label !== '' ? label : fieldKey);
     }
@@ -957,6 +1102,7 @@ export class ContentRuntime {
     }
     const candidates: RecoveryCandidate[] = [];
     for (const result of results) {
+      if (!this.isCurrentField(result.fieldKey)) continue;
       if (result.status !== 'RETRYABLE' && result.status !== 'NEEDS_MANUAL' && result.status !== 'CIRCUIT_BROKEN') {
         continue;
       }
@@ -1022,7 +1168,7 @@ export class ContentRuntime {
       const refillResults = await this.engine.executeRun(refillFields, {
         runId,
         signal,
-        checkpoint: (checkpointSignal) => pauseGate.checkpoint(checkpointSignal),
+        checkpoint: (checkpointSignal) => this.checkpointRun(runId, checkpointSignal, pauseGate),
         onEvent: (event) => this.emit(event),
       });
       for (const refillResult of refillResults) {
@@ -1046,28 +1192,20 @@ export class ContentRuntime {
     return stats;
   }
 
-  private computeStatusCounts(results: FieldExecutionResult[]): {
+  private computeStatusCounts(results: FieldExecutionResult[], issues: MappingIssue[] = []): {
     executed: number;
     verified: number;
     userOverridden: number;
     needsManual: number;
     cancelled: number;
   } {
-    return {
-      executed: results.filter((result) => result.attempts > 0).length,
-      verified: results.filter((result) => result.status === 'VERIFIED').length,
-      userOverridden: results.filter((result) => result.status === 'USER_OVERRIDDEN').length,
-      needsManual: results.filter(
-        (result) =>
-          result.status === 'NEEDS_MANUAL' || result.status === 'RETRYABLE' || result.status === 'CIRCUIT_BROKEN',
-      ).length,
-      cancelled: results.filter((result) => result.status === 'CANCELLED').length,
-    };
+    return executionCounts(results, issues);
   }
 
   private publishPill(summary: RunSummary): void {
     const failures = summary.fields.filter(
       (result) =>
+        this.isCurrentField(result.fieldKey) &&
         result.reason !== 'USER_SKIPPED' &&
         (result.status === 'NEEDS_MANUAL' || result.status === 'RETRYABLE' || result.status === 'CIRCUIT_BROKEN'),
     );
@@ -1077,6 +1215,7 @@ export class ContentRuntime {
       status: result.status,
       reason: result.reason ?? '',
       targetPreview: this.executableFor(result.fieldKey)?.expectedText ?? '',
+      maxLength: this.signatures.get(result.fieldKey)?.constraints?.maxLength,
     }));
     const failureKeys = new Set(fields.map((field) => field.fieldKey));
     const essayCapable = this.essayCapable();
@@ -1084,16 +1223,26 @@ export class ContentRuntime {
       .filter(
         (issue) =>
           issue.fieldKey !== undefined &&
+          this.isCurrentField(issue.fieldKey) &&
           !failureKeys.has(issue.fieldKey) &&
-          (issue.kind === 'UNMAPPED' || issue.kind === 'NO_DATA' || issue.kind === 'NO_OPTION'),
+          (issue.kind === 'UNMAPPED' || issue.kind === 'NO_DATA' || issue.kind === 'NO_OPTION' ||
+            issue.kind === 'AMBIGUOUS' ||
+            issue.reason === 'LLM_SENSITIVE_REQUIRES_CONFIRMATION' || issue.reason === 'DRAFT_REQUIRES_CONFIRMATION' ||
+            issue.reason === 'RESUME_ENTRY_REQUIRES_CONFIRMATION' || issue.reason === 'ROUTE_CONTEXT_MISMATCH' || issue.reason === 'SOURCE_MEMORY_NOT_SAVED'),
       )
       .map((issue) => ({
         fieldKey: issue.fieldKey as string,
         label: issue.label,
         status: 'NEEDS_MANUAL' as const,
-        reason: issue.reason,
+        reason: issue.reason === 'LLM_SENSITIVE_REQUIRES_CONFIRMATION' ? '模型建议使用个人资料，请确认字段来源后填写' :
+          issue.reason === 'SOURCE_MEMORY_NOT_SAVED' ? '字段已填写，但来源偏好未保存，请重试' :
+          issue.reason === 'RESUME_ENTRY_REQUIRES_CONFIRMATION' ? '简历中有多段经历，请选择此字段的来源' :
+          issue.reason === 'DRAFT_REQUIRES_CONFIRMATION' ? '请审核文本或确认字段来源后填写' :
+          issue.reason === 'ROUTE_CONTEXT_MISMATCH' ? '建议来源与当前字段的上下文不一致，请选择正确来源' :
+          issue.kind === 'AMBIGUOUS' ? '经历身份或字段来源存在歧义，请确认后选择来源' : issue.reason,
         targetPreview: '',
         requiresSource: true,
+        maxLength: this.signatures.get(issue.fieldKey as string)?.constraints?.maxLength,
         ...(essayCapable && this.controlKindFor(issue.fieldKey as string) === 'textarea' ? { essay: true } : {}),
       }));
     fields.push(...issueRows);
@@ -1103,7 +1252,7 @@ export class ContentRuntime {
       return;
     }
     if (this.pill === null) {
-      this.pill = mountQuickFillPill(this.buildPillActions());
+      this.pill = this.deps.mountPill(this.buildPillActions());
     }
     this.pill.setFields(fields);
   }
@@ -1142,19 +1291,15 @@ export class ContentRuntime {
       onFocusField: (fieldKey) => {
         this.focusField(fieldKey);
       },
-      onGenerateEssay: (fieldKey) => this.generateEssay(fieldKey),
-      onApplyEssay: (fieldKey, text) => {
-        void this.applyEssay(fieldKey, text);
-      },
+      onGenerateEssay: (fieldKey, projectionPath) => this.generateEssay(fieldKey, projectionPath),
+      onApplyEssay: (fieldKey, text) => this.applyEssay(fieldKey, text),
     };
   }
 
   private async loadJobContext(): Promise<ApplicationContext | undefined> {
     try {
-      const stored = await chrome.storage.session.get(ApplicationContextStore.STORAGE_KEY);
-      const store = new ApplicationContextStore();
-      store.loadFromJSON(stored[ApplicationContextStore.STORAGE_KEY]);
-      return store.get(location.host);
+      const response = await withAbort(sendToBackground<JobContextResponse>({ type: 'GET_JOB_CONTEXT' }), AbortSignal.timeout(3000));
+      return response?.ok ? response.context : undefined;
     } catch {
       return undefined;
     }
@@ -1168,14 +1313,22 @@ export class ContentRuntime {
     return compiled.normalized.projects.length > 0 || compiled.projections.introShort !== undefined;
   }
 
-  private async generateEssay(fieldKey: string): Promise<EssayDraft | undefined> {
+  private async generateEssay(fieldKey: string, projectionPath?: string): Promise<EssayDraft | undefined> {
     const compiled = this.lastCompiled;
-    if (compiled === null) {
+    if (compiled === null || !this.isCurrentField(fieldKey)) {
       return undefined;
     }
     let projection: EssayProjection | undefined;
     const firstProject = compiled.normalized.projects[0];
-    if (firstProject !== undefined) {
+    if (projectionPath !== undefined) {
+      if (!/^projections\.(?:introShort|projects\[\d+\]\.(?:title|one_liner|summary_150|responsibilities|outcomes|full_description))$/.test(projectionPath)) return undefined;
+      const resolved = resolveResumePath({ normalized: compiled.normalized, projections: compiled.projections }, projectionPath);
+      if (!resolved.found || typeof resolved.value !== 'string' || resolved.value.trim() === '') return undefined;
+      const index = /projects\[(\d+)\]/.exec(projectionPath)?.[1];
+      const project = index === undefined ? undefined : compiled.normalized.projects[Number(index)];
+      const slice = listResumeValuePaths(compiled).find((option) => option.path === projectionPath)?.label ?? '项目切面';
+      projection = { label: project ? `项目经历「${project.name}」 · ${slice}` : '简介摘要', text: resolved.value };
+    } else if (firstProject !== undefined) {
       const detail = [firstProject.role, firstProject.description]
         .filter((part): part is string => part !== undefined && part !== '')
         .join(' ');
@@ -1187,6 +1340,7 @@ export class ContentRuntime {
       return undefined;
     }
     const jd = await this.loadJobContext();
+    if (this.lastCompiled !== compiled || !this.isCurrentField(fieldKey)) return undefined;
     const label =
       this.lastPlan?.mappings.find((mapping) => mapping.fieldKey === fieldKey)?.signature.label ?? '';
     const draft = generateEssayDraft({
@@ -1198,62 +1352,57 @@ export class ContentRuntime {
     return { draft, source: `${projection.label}${jdSuffix}` };
   }
 
-  private async applyEssay(fieldKey: string, text: string): Promise<void> {
+  private async applyEssay(fieldKey: string, text: string): Promise<boolean> {
     const summary = this.lastSummary;
     if (summary === null || this.activeRun !== null || text.trim() === '') {
-      return;
+      return false;
     }
     const element = this.resolveElement(fieldKey);
     if (element === null) {
-      return;
+      return false;
     }
     const role = this.findContainerRole(element);
     const distilled =
       role === undefined
-        ? distillField(element)
-        : distillField(element, { sectionType: role.sectionType, instanceId: role.instanceId });
+        ? distillField(element, { ...this.fieldContext })
+        : distillField(element, { ...this.fieldContext, sectionType: role.sectionType, instanceId: role.instanceId });
     if (distilled === undefined) {
-      return;
+      return false;
     }
+    const formatted = formatForField(text, distilled);
+    if (!formatted.ok) return false;
     const executable: ExecutableField = {
       signature: { ...distilled, fieldKey },
       element,
-      expectedValue: text,
-      expectedText: text,
+      expectedValue: formatted.value,
+      expectedText: formatted.expectedText,
       targetPath: 'essay.draft',
     };
-    const controller = new AbortController();
-    const pauseGate = new PauseGate();
-    const results = await this.engine.executeRun([executable], {
-      runId: summary.runId,
-      signal: controller.signal,
-      checkpoint: (checkpointSignal) => pauseGate.checkpoint(checkpointSignal),
-      onEvent: (event) => this.emit(event),
+    let verified = false;
+    const completed = await this.runManualField(executable, async (applied) => {
+      this.finalizeRetriedResult(applied);
+      this.mergeResultIntoSummary(summary, applied);
+      if (applied.status === 'VERIFIED') {
+        verified = true;
+        summary.mappingIssues = summary.mappingIssues.filter((issue) => issue.fieldKey !== fieldKey);
+      }
+      this.refreshSummary(summary);
     });
-    const applied = results[0];
-    if (applied === undefined) {
-      return;
-    }
-    this.finalizeRetriedResult(applied);
-    this.mergeResultIntoSummary(summary, applied);
-    if (applied.status === 'VERIFIED') {
-      summary.mappingIssues = summary.mappingIssues.filter((issue) => issue.fieldKey !== fieldKey);
-    }
-    this.refreshSummary(summary);
+    return completed && verified;
   }
+
 
   private recordManualEdit(fieldKey: string): void {
     const result = this.lastSummary?.fields.find((candidate) => candidate.fieldKey === fieldKey);
     if (result === undefined) {
       return;
     }
-    this.userCorrections.append({
+    void this.corrections.record({
       host: location.host,
       label: result.label,
       controlKind: result.controlKind,
       kind: 'MANUAL_EDIT',
     });
-    void this.saveCorrections();
   }
 
   private mutatePillResult(fieldKey: string, mutate: (result: FieldExecutionResult) => void): void {
@@ -1273,42 +1422,36 @@ export class ContentRuntime {
   }
 
   private refreshSummary(summary: RunSummary): void {
-    summary.counts = { ...summary.counts, ...this.computeStatusCounts(summary.fields) };
+    summary.counts = { ...summary.counts, ...this.computeStatusCounts(summary.fields, summary.mappingIssues) };
+    summary.counts.mapped = Math.max(summary.counts.mapped, summary.fields.filter((field) => field.targetPath !== undefined).length);
     summary.finishedAt = Date.now();
-    this.emit({ type: 'RUN_FINISHED', runId: summary.runId, summary });
+    this.emit({ type: 'REPORT_UPDATED', runId: summary.runId, summary });
     this.publishPill(summary);
   }
 
   private executableFor(fieldKey: string): ExecutableField | undefined {
+    if (!this.isCurrentField(fieldKey)) return undefined;
     return this.lastPlan?.executable.find((executable) => executable.signature.fieldKey === fieldKey);
   }
 
   private controlKindFor(fieldKey: string): ControlKind | undefined {
+    if (!this.isCurrentField(fieldKey)) return undefined;
     return this.lastPlan?.mappings.find((mapping) => mapping.fieldKey === fieldKey)?.signature.controlKind;
   }
 
-  private async pillRetryField(fieldKey: string): Promise<void> {
+  private async pillRetryField(fieldKey: string): Promise<boolean> {
     const summary = this.lastSummary;
     const executable = this.executableFor(fieldKey);
     if (summary === null || executable === null || executable === undefined || this.activeRun !== null) {
-      return;
+      return false;
     }
-    const controller = new AbortController();
-    const pauseGate = new PauseGate();
-    const results = await this.engine.executeRun([executable], {
-      runId: summary.runId,
-      signal: controller.signal,
-      checkpoint: (checkpointSignal) => pauseGate.checkpoint(checkpointSignal),
-      onEvent: (event) => this.emit(event),
+    return this.runManualField(executable, async (retried) => {
+      this.finalizeRetriedResult(retried);
+      this.mergeResultIntoSummary(summary, retried);
+      this.refreshSummary(summary);
     });
-    const retried = results[0];
-    if (retried === undefined) {
-      return;
-    }
-    this.finalizeRetriedResult(retried);
-    this.mergeResultIntoSummary(summary, retried);
-    this.refreshSummary(summary);
   }
+
 
   private async pillRemapField(fieldKey: string, path: string): Promise<void> {
     const summary = this.lastSummary;
@@ -1323,8 +1466,8 @@ export class ContentRuntime {
     const role = this.findContainerRole(element);
     const distilled =
       role === undefined
-        ? distillField(element)
-        : distillField(element, { sectionType: role.sectionType, instanceId: role.instanceId });
+        ? distillField(element, { ...this.fieldContext })
+        : distillField(element, { ...this.fieldContext, sectionType: role.sectionType, instanceId: role.instanceId });
     if (distilled === undefined) {
       return;
     }
@@ -1351,48 +1494,69 @@ export class ContentRuntime {
         this.lastPlan.executable.push(executable);
       }
     }
-    const controller = new AbortController();
-    const pauseGate = new PauseGate();
-    const results = await this.engine.executeRun([executable], {
-      runId: summary.runId,
-      signal: controller.signal,
-      checkpoint: (checkpointSignal) => pauseGate.checkpoint(checkpointSignal),
-      onEvent: (event) => this.emit(event),
-    });
-    const retried = results[0];
-    if (retried === undefined) {
-      return;
-    }
-    this.finalizeRetriedResult(retried);
-    this.mergeResultIntoSummary(summary, retried);
-    if (retried.status === 'VERIFIED') {
-      this.mappingMemory.recordUserChoice(
-        {
+    await this.runManualField(executable, async (retried, run) => {
+      this.finalizeRetriedResult(retried);
+      this.mergeResultIntoSummary(summary, retried);
+      if (retried.status === 'VERIFIED') {
+        this.fingerprintCache.invalidate(fingerprintInputFor(location.host, executable.signature));
+        this.mappingMemory.recordUserChoice(this.memoryInputFor(executable.signature, compiled), path);
+        if (!await this.saveRouting()) {
+          throwIfAborted(run.controller.signal);
+          summary.mappingIssues = summary.mappingIssues.filter((issue) => issue.fieldKey !== fieldKey);
+          summary.mappingIssues.push({ fieldKey, label: distilled.label, kind: 'AMBIGUOUS', reason: 'SOURCE_MEMORY_NOT_SAVED' });
+          this.refreshSummary(summary);
+          throw new Error('SOURCE_MEMORY_NOT_SAVED');
+        }
+        throwIfAborted(run.controller.signal);
+        await this.corrections.record({
           host: location.host,
-          sectionType: distilled.sectionType,
-          normalizedLabel: distilled.descriptor.normalizedLabel,
+          label: distilled.descriptor.normalizedLabel,
           controlKind: distilled.controlKind,
-        },
-        path,
-      );
-      this.userCorrections.append({
-        host: location.host,
-        label: distilled.descriptor.normalizedLabel,
-        controlKind: distilled.controlKind,
-        kind: 'REMAP',
-        targetPath: path,
+          kind: 'REMAP',
+          targetPath: path,
+        });
+        summary.mappingIssues = summary.mappingIssues.filter(
+          (issue) =>
+            !(
+              issue.fieldKey === fieldKey &&
+              (issue.kind === 'UNMAPPED' || issue.kind === 'NO_DATA' || issue.kind === 'NO_OPTION' ||
+                issue.kind === 'AMBIGUOUS' ||
+                issue.reason === 'LLM_SENSITIVE_REQUIRES_CONFIRMATION' || issue.reason === 'DRAFT_REQUIRES_CONFIRMATION' ||
+                issue.reason === 'RESUME_ENTRY_REQUIRES_CONFIRMATION' || issue.reason === 'ROUTE_CONTEXT_MISMATCH' || issue.reason === 'SOURCE_MEMORY_NOT_SAVED')
+            ),
+        );
+        throwIfAborted(run.controller.signal);
+      }
+      this.refreshSummary(summary);
+    });
+  }
+
+
+  private async runManualField(executable: ExecutableField, onResult: (result: FieldExecutionResult, run: ActiveRun) => Promise<void>): Promise<boolean> {
+    const summary = this.lastSummary;
+    try {
+      await this.frameTasks.run('field', async (run) => {
+        await this.routingPersistence.load(run.runId, run.controller.signal);
+        const results = await this.engine.executeRun([executable], {
+          runId: run.runId, signal: run.controller.signal,
+          checkpoint: (signal) => this.checkpointRun(run.runId, signal, run.pauseGate),
+          onEvent: (event) => this.emit(event),
+        });
+        if (run.controller.signal.aborted) {
+          if (summary !== null && this.lastSummary === summary && this.activeRun === run && results[0] !== undefined) {
+            this.mergeResultIntoSummary(summary, results[0]);
+            this.refreshSummary(summary);
+          }
+          return;
+        }
+        if (results[0] !== undefined) await onResult(results[0], run);
       });
-      summary.mappingIssues = summary.mappingIssues.filter(
-        (issue) =>
-          !(
-            issue.fieldKey === fieldKey &&
-            (issue.kind === 'UNMAPPED' || issue.kind === 'NO_DATA' || issue.kind === 'NO_OPTION')
-          ),
-      );
-      await this.saveMemory();
-      await this.saveCorrections();
+      return true;
+    } catch {
+      // Cancellation is reported by the unified session; leave the existing
+      // manual issue available instead of publishing a stale success.
+      return false;
     }
-    this.refreshSummary(summary);
   }
 
   private finalizeRetriedResult(result: FieldExecutionResult): void {
@@ -1416,6 +1580,7 @@ export class ContentRuntime {
       summary.fields[index] = result;
     } else {
       summary.fields.push(result);
+      summary.counts.mapped += 1;
     }
   }
 
@@ -1466,7 +1631,7 @@ export class ContentRuntime {
     area.remove();
   }
 
-  private async collectLlmProposals(plan: ExecutionPlan): Promise<number> {
+  private async collectLlmProposals(plan: ExecutionPlan, signal: AbortSignal): Promise<number> {
     const refs: UnmappedFieldRef[] = [];
     for (const issue of plan.issues) {
       if (issue.kind !== 'UNMAPPED' || issue.fieldKey === undefined || this.llmProposals.has(issue.fieldKey)) {
@@ -1490,8 +1655,9 @@ export class ContentRuntime {
     this.llmInfo.requested += refs.length;
     let routed: Map<string, RoutedProposal>;
     try {
-      routed = await this.llmRouter.route(refs);
+      routed = await withAbort(this.llmRouter.route(refs), signal);
     } catch {
+      throwIfAborted(signal);
       this.llmInfo.failed = true;
       return 0;
     }
@@ -1505,16 +1671,13 @@ export class ContentRuntime {
   private rebuildPlan(compiled: CompiledResume, containerElements: Set<HTMLElement>): ExecutionPlan {
     const elements = scanFormElements(document);
     const flat = elements.filter((element) => !isInsideAny(element, containerElements));
-    const rebuilt = buildExecutionPlan(compiled, distillElements(flat), {
+    const rebuilt = buildExecutionPlan(compiled, distillElements(flat, { ...this.fieldContext }), {
       cache: this.fingerprintCache,
       memory: this.mappingMemory,
       host: location.host,
       ...(this.llmProposals.size > 0 ? { llmProposals: this.llmProposals } : {}),
     });
-    for (const [fieldKey, element] of rebuilt.elementByKey) {
-      this.elementByKey.set(fieldKey, element);
-      this.keyByElement.set(element, fieldKey);
-    }
+    this.rememberPlan(rebuilt);
     return rebuilt;
   }
 
@@ -1524,14 +1687,24 @@ export class ContentRuntime {
     );
   }
 
-  private refreshSnapshots(instanceInputs: ScopedInstanceInput[]): void {
+  private groupScopedSections(sections: ScannedSection[]): Map<SectionType, ScannedSection[]> {
+    const groups = new Map<SectionType, ScannedSection[]>();
+    for (const section of sections) {
+      const peers = groups.get(section.sectionType) ?? [];
+      peers.push(section);
+      groups.set(section.sectionType, peers);
+    }
+    return groups;
+  }
+
+  private refreshSnapshots(instanceInputs: ScopedInstanceInput[], instanceRegistry: FormInstanceRegistry): void {
     const now = Date.now();
     for (const input of instanceInputs) {
       if (input.reanchorStatus === 'AMBIGUOUS') {
         continue;
       }
       const observation = toObservation(input.sectionType, input.distilled);
-      this.instanceRegistry.upsert(input.instanceId, {
+      instanceRegistry.upsert(input.instanceId, {
         sectionType: input.sectionType,
         resumeEntryId: input.resumeEntryId,
         witness: extractWitness(input.sectionType, observation.fields),
@@ -1556,7 +1729,7 @@ export class ContentRuntime {
       startedAt,
       finishedAt: Date.now(),
       status,
-      counts: { scanned, mapped, ...this.computeStatusCounts(results) },
+      counts: { scanned, mapped, ...this.computeStatusCounts(results, issues) },
       fields: results,
       mappingIssues: issues,
     };
@@ -1570,11 +1743,14 @@ export class ContentRuntime {
   }
 
   private resolveElement(fieldKey: string): HTMLElement | null {
+    const signature = this.signatures.get(fieldKey);
+    if (signature && !this.isCurrentField(fieldKey)) return null;
     const cached = this.elementByKey.get(fieldKey);
-    if (cached !== undefined && cached.isConnected) {
+    if (cached !== undefined && cached.isConnected && (!signature || isFieldBindingValid(cached, signature,
+      this.formId, this.findContainerRole(cached), this.stepObserver.stepId()))) {
       return cached;
     }
-    const rescanned = distillElements(scanFormElements(document));
+    const rescanned = distillElements(scanFormElements(document), { ...this.fieldContext });
     for (const item of rescanned) {
       const identity = buildFieldIdentity(item.field.descriptor);
       if (identity.fieldKey === fieldKey) {
@@ -1588,7 +1764,7 @@ export class ContentRuntime {
 
   private resolveFieldKey(target: Element): string | undefined {
     const direct = this.keyByElement.get(target);
-    if (direct !== undefined) {
+    if (direct !== undefined && this.isCurrentField(direct) && this.resolveElement(direct) === target) {
       return direct;
     }
     const candidate = isFormElement(target) ? target : target.closest(FORM_CONTROL_SELECTOR);
@@ -1596,33 +1772,40 @@ export class ContentRuntime {
       return undefined;
     }
     const cached = this.keyByElement.get(candidate);
-    if (cached !== undefined) {
+    if (cached !== undefined && this.isCurrentField(cached) && this.resolveElement(cached) === candidate) {
       return cached;
     }
     const role = this.findContainerRole(candidate);
     const distilled =
       role === undefined
-        ? distillField(candidate)
-        : distillField(candidate, { sectionType: role.sectionType, instanceId: role.instanceId });
+        ? distillField(candidate, { ...this.fieldContext })
+        : distillField(candidate, { ...this.fieldContext, sectionType: role.sectionType, instanceId: role.instanceId });
     if (distilled === undefined) {
       return undefined;
     }
     const fieldKey = buildFieldIdentity(distilled.descriptor).fieldKey;
+    this.signatures.set(fieldKey, { ...distilled, fieldKey });
     this.elementByKey.set(fieldKey, candidate);
     this.keyByElement.set(candidate, fieldKey);
     return fieldKey;
   }
 
   private findContainerRole(element: Element): ContainerRole | undefined {
-    let node: Element | null = element.parentElement;
+    let node: Element | null = element;
     while (node !== null) {
       const role = this.containerRoles.get(node);
-      if (role !== undefined) {
+      if (role !== undefined && role.stepId === this.stepObserver.stepId()) {
         return role;
       }
       node = node.parentElement;
     }
     return undefined;
+  }
+
+  private memoryInputFor(signature: FieldSignature, compiled: CompiledResume): MappingMemoryInput {
+    const snapshot = signature.instanceId === undefined ? undefined : this.instancesFor(signature.descriptor.stepId).get(signature.sectionType, signature.instanceId);
+    const index = snapshot?.resumeEntryId === undefined ? -1 : entryIdsOf(compiled, signature.sectionType).indexOf(snapshot.resumeEntryId);
+    return { ...fingerprintInputFor(location.host, signature), ...(index >= 0 ? { boundEntryIndex: index } : {}) };
   }
 
   private handleUserEdit(fieldKey: string, event: Event, target: Element): void {

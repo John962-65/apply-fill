@@ -11,6 +11,7 @@
     "build": "pnpm -r build",
     "typecheck": "pnpm -r typecheck",
     "lint": "eslint .",
+    "lint:boundaries": "node scripts/check-boundaries.mjs",
     "test": "pnpm -r test",
     "test:e2e": "pnpm --filter @applyfill/testbed test:e2e"
   },

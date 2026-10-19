@@ -77,11 +77,15 @@ describe('FileUploadAgent', () => {
   it('中止信号与禁用控件直接拒绝', async () => {
     vi.stubGlobal('DataTransfer', FakeDataTransfer);
     const input = makeInput();
+    const onChange = vi.fn();
+    input.addEventListener('change', onChange);
     const controller = new AbortController();
     controller.abort();
     const agent = new FileUploadAgent();
     const aborted = await agent.upload(input, makeFile(), { signal: controller.signal, ackTimeoutMs: 300 });
     expect(aborted.detail).toBe('ABORTED');
+    expect(input.files?.length).toBe(0);
+    expect(onChange).not.toHaveBeenCalled();
 
     const disabled = makeInput();
     disabled.disabled = true;
@@ -96,5 +100,37 @@ describe('FileUploadAgent', () => {
     const result = await agent.upload(input, makeFile(), { ackTimeoutMs: 100 });
     expect(result.outcome).toBe('REJECTED');
     expect(result.detail).toBe('DATA_TRANSFER_UNAVAILABLE');
+  });
+
+  it('用户重新选择文件后不把旧文件名提示当作成功', async () => {
+    vi.stubGlobal('DataTransfer', FakeDataTransfer);
+    const input = makeInput();
+    input.addEventListener('change', () => {
+      input.files = [makeFile('user-choice.pdf')] as unknown as FileList;
+      input.parentElement?.insertAdjacentHTML('beforeend', '<span>已选择 resume.pdf</span>');
+    });
+    const result = await new FileUploadAgent().upload(input, makeFile());
+    expect(result.detail).toBe('FILE_REPLACED');
+    expect(input.files?.[0]?.name).toBe('user-choice.pdf');
+  });
+
+  it('页面原有的同名文件提示不能证明本次上传成功', async () => {
+    vi.stubGlobal('DataTransfer', FakeDataTransfer);
+    const input = makeInput();
+    input.parentElement?.insertAdjacentHTML('beforeend', '<div>历史附件：resume.pdf</div>');
+    const result = await new FileUploadAgent().upload(input, makeFile(), { ackTimeoutMs: 60, pollIntervalMs: 10 });
+    expect(result.outcome).toBe('INJECTED_UNCONFIRMED');
+  });
+
+  it('input 回调取消上传后不得继续派发 change', async () => {
+    vi.stubGlobal('DataTransfer', FakeDataTransfer);
+    const input = makeInput();
+    const controller = new AbortController();
+    const onChange = vi.fn();
+    input.addEventListener('input', () => controller.abort());
+    input.addEventListener('change', onChange);
+    const result = await new FileUploadAgent().upload(input, makeFile(), { signal: controller.signal });
+    expect(result.detail).toBe('ABORTED');
+    expect(onChange).not.toHaveBeenCalled();
   });
 });

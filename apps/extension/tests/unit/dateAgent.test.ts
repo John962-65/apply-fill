@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { DateAgent } from '@/actuator/DateAgent';
+import type { DateAgentConfig } from '@/actuator/DateAgent';
 import {
   classifyDateText,
   classifyOverlayView,
@@ -18,6 +19,7 @@ const FAST_DATE_CONFIG = {
   settleMs: 5,
   pollMs: 10,
   commitTimeoutMs: 300,
+  progressTimeoutMs: 100,
   budget: { maxActions: 120, maxElapsedMs: 8000, maxNoProgress: 2, maxRetries: 1 },
 };
 
@@ -25,6 +27,11 @@ interface CalendarOptions {
   openYear: number;
   openMonth: number;
   stuckPager?: boolean;
+  navigationDelayMs?: number;
+  wrongDirection?: boolean;
+  disabledDay?: number;
+  openDelayMs?: number;
+  replaceOverlayOnNavigation?: boolean;
 }
 
 interface CalendarFixture {
@@ -56,7 +63,7 @@ function setupCalendar(options: CalendarOptions): CalendarFixture {
     if (document.getElementById('date-popup') !== null) {
       return;
     }
-    const overlay = document.createElement('div');
+    let overlay = document.createElement('div');
     overlay.id = 'date-popup';
     overlay.setAttribute('role', 'dialog');
     document.body.append(overlay);
@@ -68,6 +75,22 @@ function setupCalendar(options: CalendarOptions): CalendarFixture {
       trigger.setAttribute('aria-expanded', 'false');
       overlay.remove();
     };
+    const navigate = (update: () => void) => {
+      const apply = () => {
+        if (!overlay.isConnected) return;
+        update();
+        if (options.replaceOverlayOnNavigation) {
+          const replacement = document.createElement('div'); replacement.id = overlay.id; replacement.setAttribute('role', 'dialog');
+          overlay.replaceWith(replacement); overlay = replacement;
+        }
+        render();
+        overlay.removeAttribute('aria-busy');
+      };
+      if (options.navigationDelayMs) {
+        overlay.setAttribute('aria-busy', 'true');
+        setTimeout(apply, options.navigationDelayMs);
+      } else apply();
+    };
     const render = () => {
       overlay.innerHTML = '';
       const header = document.createElement('button');
@@ -75,9 +98,7 @@ function setupCalendar(options: CalendarOptions): CalendarFixture {
       if (view === 'day') {
         header.textContent = `${viewYear}年${viewMonth}月`;
         header.addEventListener('click', () => {
-          view = 'year';
-          decadeStart = Math.floor(viewYear / 10) * 10;
-          render();
+          navigate(() => { view = 'year'; decadeStart = Math.floor(viewYear / 10) * 10; });
         });
       } else if (view === 'month') {
         header.textContent = `${viewYear}年`;
@@ -91,24 +112,20 @@ function setupCalendar(options: CalendarOptions): CalendarFixture {
         prev.textContent = '‹';
         prev.addEventListener('click', () => {
           pager += 1;
-          viewMonth -= 1;
-          if (viewMonth < 1) {
-            viewMonth = 12;
-            viewYear -= 1;
-          }
-          render();
+          navigate(() => {
+            viewMonth -= 1;
+            if (viewMonth < 1) { viewMonth = 12; viewYear -= 1; }
+          });
         });
         const next = document.createElement('button');
         next.setAttribute('aria-label', '下个月');
         next.textContent = '›';
         next.addEventListener('click', () => {
           pager += 1;
-          viewMonth += 1;
-          if (viewMonth > 12) {
-            viewMonth = 1;
-            viewYear += 1;
-          }
-          render();
+          navigate(() => {
+            viewMonth += 1;
+            if (viewMonth > 12) { viewMonth = 1; viewYear += 1; }
+          });
         });
         overlay.append(prev, next);
         const grid = document.createElement('div');
@@ -118,6 +135,7 @@ function setupCalendar(options: CalendarOptions): CalendarFixture {
           const cell = document.createElement('button');
           cell.setAttribute('data-day', String(day));
           cell.textContent = String(day);
+          if (day === options.disabledDay) { cell.disabled = true; cell.innerHTML = `<span>${day}</span>`; }
           cell.addEventListener('click', () => {
             clicks += 1;
             commit(`${viewYear}-${pad(viewMonth)}-${pad(day)}`);
@@ -132,20 +150,14 @@ function setupCalendar(options: CalendarOptions): CalendarFixture {
         prevDecade.textContent = '«';
         prevDecade.addEventListener('click', () => {
           pager += 1;
-          if (options.stuckPager !== true) {
-            decadeStart -= 10;
-          }
-          render();
+          navigate(() => { if (!options.stuckPager) decadeStart -= 10; });
         });
         const nextDecade = document.createElement('button');
         nextDecade.setAttribute('aria-label', '下十年');
         nextDecade.textContent = '»';
         nextDecade.addEventListener('click', () => {
           pager += 1;
-          if (options.stuckPager !== true) {
-            decadeStart += 10;
-          }
-          render();
+          navigate(() => { if (!options.stuckPager) decadeStart += options.wrongDirection ? -10 : 10; });
         });
         overlay.append(prevDecade, nextDecade);
         for (let year = decadeStart; year < decadeStart + 10; year += 1) {
@@ -153,9 +165,7 @@ function setupCalendar(options: CalendarOptions): CalendarFixture {
           cell.setAttribute('data-year', String(year));
           cell.textContent = String(year);
           cell.addEventListener('click', () => {
-            viewYear = year;
-            view = 'month';
-            render();
+            navigate(() => { viewYear = year; view = 'month'; });
           });
           overlay.append(cell);
         }
@@ -166,15 +176,16 @@ function setupCalendar(options: CalendarOptions): CalendarFixture {
           cell.setAttribute('data-month', String(month));
           cell.textContent = `${month}月`;
           cell.addEventListener('click', () => {
-            viewMonth = month;
-            view = 'day';
-            render();
+            navigate(() => { viewMonth = month; view = 'day'; });
           });
           overlay.append(cell);
         }
       }
     };
-    render();
+    if (options.openDelayMs) {
+      overlay.setAttribute('aria-busy', 'true');
+      setTimeout(() => { if (overlay.isConnected) { render(); overlay.removeAttribute('aria-busy'); } }, options.openDelayMs);
+    } else render();
   });
   return {
     trigger,
@@ -184,7 +195,7 @@ function setupCalendar(options: CalendarOptions): CalendarFixture {
   };
 }
 
-function makeAgent(): DateAgent {
+function makeAgent(config: Partial<DateAgentConfig> = {}): DateAgent {
   const tracker = new PortalTracker({ pollMs: 10, defaultTimeoutMs: 200 });
   const selectAgent = new SelectAgent(tracker, {
     popupTimeoutMs: 100,
@@ -193,7 +204,7 @@ function makeAgent(): DateAgent {
     commitPollMs: 5,
     commitTimeoutMs: 150,
   });
-  return new DateAgent(tracker, selectAgent, FAST_DATE_CONFIG);
+  return new DateAgent(tracker, selectAgent, { ...FAST_DATE_CONFIG, ...config });
 }
 
 describe('DateViewClassifier', () => {
@@ -245,6 +256,7 @@ describe('DateViewClassifier', () => {
     const months = Array.from({ length: 12 }, (_, index) => `<button>${index + 1}月</button>`).join('');
     expect(classifyOverlayView(build(`<div>${months}</div>`))).toBe('month-panel');
     expect(classifyOverlayView(build('<div role="listbox"><div>本科</div></div>'))).toBe('list');
+    expect(classifyOverlayView(build(`<div aria-hidden="true">${days}</div><div>${years}</div>`))).toBe('year-panel');
   });
 });
 
@@ -252,11 +264,13 @@ describe('DateAgent', () => {
   it('跨十年翻页：从 2014-06 导航到 2026-03-15 并提交', async () => {
     const fixture = setupCalendar({ openYear: 2014, openMonth: 6 });
     const agent = makeAgent();
-    const outcome = await agent.fill(fixture.trigger, '2026-03-15');
+    let progress = 0;
+    const outcome = await agent.fill(fixture.trigger, '2026-03-15', { onProgress: () => { progress += 1; } });
     expect(outcome.status).toBe('SELECTED');
     expect(fixture.committed()).toBe('2026-03-15');
     expect(fixture.dayClicks()).toBe(1);
     expect(fixture.pagerClicks()).toBeGreaterThan(0);
+    expect(progress).toBeGreaterThan(0);
   });
 
   it('同月直接选日：2026-03 面板点击 15', async () => {
@@ -267,12 +281,22 @@ describe('DateAgent', () => {
     expect(fixture.committed()).toBe('2026-03-15');
   });
 
-  it('月精度：无日值默认 1 号并允许月级提交', async () => {
+  it('月精度不能向日历编造 1 号，转人工且不点击日期', async () => {
     const fixture = setupCalendar({ openYear: 2022, openMonth: 6 });
     const agent = makeAgent();
     const outcome = await agent.fill(fixture.trigger, '2022-06');
-    expect(outcome.status).toBe('SELECTED');
-    expect(fixture.committed()).toBe('2022-06-01');
+    expect(outcome.status).toBe('NO_OPTION');
+    expect(outcome.reason).toBe('INSUFFICIENT_DATE_PRECISION');
+    expect(fixture.committed()).toBe('');
+    expect(fixture.dayClicks()).toBe(0);
+  });
+
+  it('禁用日期及其内嵌 span 不会被合成点击绕过限制', async () => {
+    const fixture = setupCalendar({ openYear: 2026, openMonth: 3, disabledDay: 15 });
+    const outcome = await makeAgent().fill(fixture.trigger, '2026-03-15');
+    expect(outcome.status).toBe('NO_OPTION');
+    expect(fixture.dayClicks()).toBe(0);
+    expect(fixture.committed()).toBe('');
   });
 
   it('翻页无进展两次 → NO_PROGRESS', async () => {
@@ -280,6 +304,56 @@ describe('DateAgent', () => {
     const agent = makeAgent();
     const outcome = await agent.fill(fixture.trigger, '2026-03-15');
     expect(outcome.status).toBe('NO_PROGRESS');
+    expect(fixture.dayClicks()).toBe(0);
+    expect(fixture.pagerClicks()).toBe(2);
+  });
+
+  it('慢异步年面板、十年翻页和月份切换按真实进展等待，不重复点击旧视图', async () => {
+    const fixture = setupCalendar({ openYear: 2014, openMonth: 6, navigationDelayMs: 220 });
+    const outcome = await makeAgent({ progressTimeoutMs: 600 }).fill(fixture.trigger, '2026-03-15');
+    expect(outcome.status).toBe('SELECTED');
+    expect(fixture.committed()).toBe('2026-03-15');
+    expect(fixture.pagerClicks()).toBe(1);
+    expect(fixture.dayClicks()).toBe(1);
+  });
+
+  it('慢月份翻页在 Header 真正推进前不会发出下一次点击', async () => {
+    const fixture = setupCalendar({ openYear: 2026, openMonth: 1, navigationDelayMs: 220 });
+    const outcome = await makeAgent({ progressTimeoutMs: 600 }).fill(fixture.trigger, '2026-03-15');
+    expect(outcome.status).toBe('SELECTED');
+    expect(fixture.committed()).toBe('2026-03-15');
+    expect(fixture.pagerClicks()).toBe(2);
+  });
+
+  it('面板有变化但离目标年份更远，不作为进展续租', async () => {
+    const fixture = setupCalendar({ openYear: 2014, openMonth: 6, wrongDirection: true });
+    let progress = 0;
+    const outcome = await makeAgent().fill(fixture.trigger, '2026-03-15', { onProgress: () => { progress += 1; } });
+    expect(outcome.status).toBe('NO_PROGRESS');
+    expect(fixture.pagerClicks()).toBe(2);
+    expect(progress).toBe(1); // Only opening the year panel made useful progress.
+    expect(fixture.dayClicks()).toBe(0);
+  });
+
+  it('取消能打断状态等待，迟到面板更新后不会继续选日', async () => {
+    const fixture = setupCalendar({ openYear: 2026, openMonth: 1, navigationDelayMs: 120 });
+    const controller = new AbortController();
+    const pending = makeAgent({ progressTimeoutMs: 600 }).fill(fixture.trigger, '2026-03-15', { signal: controller.signal });
+    setTimeout(() => controller.abort(), 30);
+    const outcome = await pending;
+    expect(outcome.status).toBe('ABORTED');
+    await new Promise((resolve) => setTimeout(resolve, 140));
+    expect(fixture.dayClicks()).toBe(0);
+    expect(fixture.pagerClicks()).toBe(1);
+    expect(fixture.committed()).toBe('');
+  });
+
+  it('单步等待被字段总预算限制，预算不足时不再重试点击', async () => {
+    const fixture = setupCalendar({ openYear: 2026, openMonth: 1, navigationDelayMs: 200 });
+    const outcome = await makeAgent({ progressTimeoutMs: 1800, budget: { ...FAST_DATE_CONFIG.budget, maxElapsedMs: 60 } })
+      .fill(fixture.trigger, '2026-03-15');
+    expect(outcome.status).toBe('TIMEOUT');
+    expect(fixture.pagerClicks()).toBe(1);
     expect(fixture.dayClicks()).toBe(0);
   });
 
@@ -362,6 +436,27 @@ describe('DateAgent', () => {
     expect(outcome.status).toBe('SELECTED');
     await new Promise((resolve) => setTimeout(resolve, 5));
     expect(checkbox.checked).toBe(true);
+  });
+});
+
+describe('DateAgent asynchronous overlay lifecycle', () => {
+  it('waits for the initial loading calendar instead of treating an empty dialog as a list', async () => {
+    const fixture = setupCalendar({ openYear: 2026, openMonth: 3, openDelayMs: 70 });
+    const result = await makeAgent({ progressTimeoutMs: 250 }).fill(fixture.trigger, '2026-03-15');
+    expect(result.status).toBe('SELECTED'); expect(fixture.committed()).toBe('2026-03-15');
+    expect(fixture.dayClicks()).toBe(1);
+  });
+  it('rebinds a uniquely related replacement overlay during year and month transitions', async () => {
+    const fixture = setupCalendar({ openYear: 2020, openMonth: 1, navigationDelayMs: 20, replaceOverlayOnNavigation: true });
+    const result = await makeAgent({ progressTimeoutMs: 250 }).fill(fixture.trigger, '2026-03-15');
+    expect(result.status).toBe('SELECTED'); expect(fixture.committed()).toBe('2026-03-15');
+  });
+  it('cancellation during initial loading never clicks a late day cell', async () => {
+    const fixture = setupCalendar({ openYear: 2026, openMonth: 3, openDelayMs: 100 });
+    const controller = new AbortController(); setTimeout(() => controller.abort(), 20);
+    const result = await makeAgent({ progressTimeoutMs: 250 }).fill(fixture.trigger, '2026-03-15', { signal: controller.signal });
+    expect(result.status).toBe('ABORTED'); await new Promise((resolve) => setTimeout(resolve, 120));
+    expect(fixture.dayClicks()).toBe(0); expect(fixture.committed()).toBe('');
   });
 });
 
@@ -498,10 +593,10 @@ describe('DateAgent range', () => {
     return { trigger, committed: () => trigger.getAttribute('data-committed') ?? '' };
   }
 
-  it('范围：起止月自动补齐首日与末日', async () => {
+  it('范围：有完整起止日期时按原始日期提交', async () => {
     const fixture = setupRange(2019, 6, false);
     const agent = makeAgent();
-    const outcome = await agent.fill(fixture.trigger, '2020-09 ~ 2022-06');
+    const outcome = await agent.fill(fixture.trigger, '2020-09-01 ~ 2022-06-30');
     expect(outcome.status).toBe('SELECTED');
     expect(fixture.committed()).toBe('2020-09-01 ~ 2022-06-30');
   });
@@ -509,9 +604,17 @@ describe('DateAgent range', () => {
   it('范围+至今：选择起始日后勾选至今', async () => {
     const fixture = setupRange(2020, 1, true);
     const agent = makeAgent();
-    const outcome = await agent.fill(fixture.trigger, '2020-09 ~ 至今');
+    const outcome = await agent.fill(fixture.trigger, '2020-09-01 ~ 至今');
     expect(outcome.status).toBe('SELECTED');
     expect(fixture.committed()).toBe('2020-09-01 ~ 至今');
+  });
+
+  it('范围：仅有年月时不编造起止日期', async () => {
+    const fixture = setupRange(2020, 1, false);
+    const outcome = await makeAgent().fill(fixture.trigger, '2020-09 ~ 2022-06');
+    expect(outcome.status).toBe('NO_OPTION');
+    expect(outcome.reason).toBe('INSUFFICIENT_DATE_PRECISION');
+    expect(fixture.committed()).toBe('');
   });
 });
 

@@ -1,5 +1,6 @@
 import { isPresentMarker, parseDateAtom, parseDateRange } from '@/shared/utils/date';
 import type { DateAtom } from '@/shared/contracts/resume';
+import { isElementVisible } from '@/perceptor';
 
 export type DateTextKind = 'present' | 'range' | 'atom' | 'none';
 
@@ -109,6 +110,7 @@ export function hasDateElementHints(element: HTMLElement): boolean {
 function collectCellTexts(overlay: HTMLElement): string[] {
   const texts: string[] = [];
   for (const element of overlay.querySelectorAll('button, td, li, [role="gridcell"], [role="option"], [role="menuitem"], div, span')) {
+    if (!(element instanceof HTMLElement) || !isElementVisible(element) || element.closest('[hidden], [aria-hidden="true"]')) continue;
     const text = (element.textContent ?? '').replace(/\s+/g, ' ').trim();
     if (text !== '' && text.length <= 8) {
       texts.push(text);

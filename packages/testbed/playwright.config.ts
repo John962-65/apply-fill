@@ -2,6 +2,7 @@ import { defineConfig } from '@playwright/test';
 
 export default defineConfig({
   testDir: './e2e',
+  outputDir: `./test-results/${process.env.APPLYFILL_E2E_BROWSER === 'edge' ? 'edge' : 'chrome'}`,
   timeout: 120_000,
   expect: { timeout: 15_000 },
   fullyParallel: false,

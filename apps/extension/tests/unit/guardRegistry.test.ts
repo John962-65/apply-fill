@@ -143,3 +143,18 @@ describe('GuardRegistry', () => {
     expect(retried.status).toBe('ACTIVE');
   });
 });
+describe('bounded lease renewal', () => {
+  it('确认进展后可以续租，但不能超过任务绝对截止时间', () => {
+    let now = 1000;
+    const registry = new GuardRegistry({ defaultTtlMs: 500, maxTtlMs: 1000 }, () => now);
+    const lease = registry.acquire({ fieldKey: 'field', runId: 'run', expectedValue: 'value', targetDomRevision: 5 });
+    now = 1400;
+    expect(registry.renew(lease, 1000, 3000)).toBe(true);
+    expect(lease.expiresAt).toBe(2400);
+    now = 2300;
+    expect(registry.renew(lease, 1000, 3000)).toBe(true);
+    expect(lease.expiresAt).toBe(3000);
+    now = 3001;
+    expect(() => registry.renew(lease, 1000, 9999)).toThrow('expired');
+  });
+});

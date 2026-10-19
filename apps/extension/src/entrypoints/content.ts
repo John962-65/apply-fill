@@ -1,4 +1,5 @@
 import { ContentRuntime } from '@/runtime/ContentRuntime';
+import { mountQuickFillPill } from '@/ui/QuickFillPill';
 
 export default defineContentScript({
   matches: ['http://localhost/*', 'http://127.0.0.1/*'],
@@ -10,7 +11,7 @@ export default defineContentScript({
       return;
     }
     globalObj.__applyfillInjected = true;
-    const runtime = new ContentRuntime();
+    const runtime = new ContentRuntime({ mountPill: mountQuickFillPill });
     runtime.start();
   },
 });

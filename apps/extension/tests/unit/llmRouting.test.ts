@@ -1,10 +1,14 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { LLMGateway } from '@/background/LLMGateway';
 import type { FetchLike } from '@/background/ModelProvider';
 import { ModelProvider } from '@/background/ModelProvider';
 import { extractJsonObject, validateLlmMappings } from '@/router/LLMResponseValidator';
 import { buildLlmRoutingPrompt } from '@/router/PromptBuilder';
+import { substituteIndex } from '@/router/FastRuleMatcher';
+import { resolveResumePath } from '@/router/RouteValidator';
+import { compileResume } from '@/resume/compiler';
+import { createSampleResumeFacts } from '@/shared/samples/sampleResume';
 import {
   DEFAULT_LLM_CONFIG,
   LLM_DISABLED_ERROR,
@@ -47,7 +51,7 @@ const sampleFields: LlmFieldRef[] = [
 describe('PromptBuilder', () => {
   it('提示词包含允许路径与字段元信息，不包含简历值', () => {
     const prompt = buildLlmRoutingPrompt(sampleFields);
-    expect(prompt.system).toContain('education{index}.school');
+    expect(prompt.system).toContain('education[{index}].school');
     expect(prompt.system).toContain('{index}');
     expect(prompt.user).toContain('fk_school');
     expect(prompt.user).toContain('毕业院校');
@@ -56,6 +60,15 @@ describe('PromptBuilder', () => {
 });
 
 describe('LLMResponseValidator', () => {
+  it('模型的数组路径模板经过校验与实例替换后确实能读取第二段经历', () => {
+    const validation = validateLlmMappings({ mappings: [
+      { fieldKey: 'school2', targetPath: 'education[{index}].school', confidence: 0.9 },
+    ] }, new Set(['school2']));
+    const proposal = validation.proposals[0]!;
+    const compiled = compileResume(createSampleResumeFacts());
+    const resolved = resolveResumePath(compiled, substituteIndex(proposal.targetPathTemplate, 1));
+    expect(resolved).toEqual({ found: true, value: compiled.normalized.education[1]?.school });
+  });
   it('容忍 Markdown 代码块并提取 JSON 对象', () => {
     const payload = extractJsonObject('```json\n{"mappings":[]}\n```');
     expect(payload).toEqual({ mappings: [] });
@@ -65,8 +78,8 @@ describe('LLMResponseValidator', () => {
     const result = validateLlmMappings(
       {
         mappings: [
-          { fieldKey: 'fk_school', targetPath: 'education{index}.school', confidence: 0.9 },
-          { fieldKey: 'fk_unknown', targetPath: 'education{index}.school', confidence: 0.9 },
+          { fieldKey: 'fk_school', targetPath: 'education[{index}].school', confidence: 0.9 },
+          { fieldKey: 'fk_unknown', targetPath: 'education[{index}].school', confidence: 0.9 },
           { fieldKey: 'fk_major', targetPath: 'hacked.path', confidence: 0.9 },
           { fieldKey: 'fk_major', targetPath: 'basic.name' },
         ],
@@ -74,7 +87,7 @@ describe('LLMResponseValidator', () => {
       new Set(['fk_school', 'fk_major']),
     );
     expect(result.proposals).toEqual([
-      { fieldKey: 'fk_school', targetPathTemplate: 'education{index}.school', confidence: 0.9 },
+      { fieldKey: 'fk_school', targetPathTemplate: 'education[{index}].school', confidence: 0.9 },
       { fieldKey: 'fk_major', targetPathTemplate: 'basic.name', confidence: 0.6 },
     ]);
     expect(result.rejected).toBe(2);
@@ -87,6 +100,17 @@ describe('LLMResponseValidator', () => {
 });
 
 describe('LLMGateway', () => {
+  it('取消运行立即中止仍在等待的模型请求，且不重试', async () => {
+    const { area } = makeStorage({ [LLM_CONFIG_STORAGE_KEY]: enabledConfig({ maxRetries: 2 }) });
+    const fetchFn = vi.fn<FetchLike>(() => new Promise(() => undefined));
+    const gateway = new LLMGateway({ fetchFn, storageArea: area });
+    const pending = gateway.routeFields(sampleFields, 'run_cancel');
+    await vi.waitFor(() => expect(fetchFn).toHaveBeenCalledTimes(1));
+    gateway.cancelRun('run_cancel');
+    const result = await pending;
+    expect(result.error).toBe('LLM_CANCELLED');
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+  });
   it('未启用时返回 LLM_DISABLED 且不发请求', async () => {
     const { area } = makeStorage({ [LLM_CONFIG_STORAGE_KEY]: { enabled: false } });
     let called = 0;
@@ -109,7 +133,7 @@ describe('LLMGateway', () => {
       return chatResponse(
         JSON.stringify({
           mappings: [
-            { fieldKey: 'fk_school', targetPath: 'education{index}.school', confidence: 0.85 },
+            { fieldKey: 'route_0', targetPath: 'education[{index}].school', confidence: 0.85 },
             { fieldKey: 'fk_evil', targetPath: 'basic.name', confidence: 0.9 },
           ],
         }),
@@ -119,14 +143,15 @@ describe('LLMGateway', () => {
     const result = await gateway.routeFields(sampleFields);
     expect(result.ok).toBe(true);
     expect(result.proposals).toEqual([
-      { fieldKey: 'fk_school', targetPathTemplate: 'education{index}.school', confidence: 0.85 },
+      { fieldKey: 'fk_school', targetPathTemplate: 'education[{index}].school', confidence: 0.85 },
     ]);
     expect(requests).toHaveLength(1);
     expect(requests[0]?.url).toBe('https://api.example.com/v1/chat/completions');
     const headers = requests[0]?.init.headers as Record<string, string>;
     expect(headers.Authorization).toBe('Bearer sk-test');
     const body = JSON.parse(String(requests[0]?.init.body)) as { messages: Array<{ content: string }> };
-    expect(body.messages[1]?.content).toContain('fk_school');
+    expect(body.messages[1]?.content).toContain('route_0');
+    expect(body.messages[1]?.content).not.toContain('fk_school');
     expect(state[LLM_CONFIG_STORAGE_KEY]).toBeDefined();
   });
 
@@ -266,5 +291,33 @@ describe('ModelProvider', () => {
     if (!result.ok) {
       expect(result.error).toContain('超时');
     }
+  });
+
+  it('HTTP 错误响应体不结束时，取消仍立即返回且不重试', async () => {
+    const response = new Response(new ReadableStream(), { status: 500 });
+    const fetchFn = vi.fn(async () => response);
+    const controller = new AbortController();
+    const pending = new ModelProvider(enabledConfig({ maxRetries: 2 }), fetchFn)
+      .complete({ system: 's', user: 'u' }, controller.signal);
+    await vi.waitFor(() => expect(response.bodyUsed).toBe(true));
+    controller.abort();
+    await expect(pending).resolves.toEqual({ ok: false, error: 'LLM_CANCELLED', retryable: false });
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+  });
+
+  it('重试退避期间的取消结束等待，不再发起下一次请求', async () => {
+    vi.useFakeTimers();
+    try {
+      const fetchFn = vi.fn(async () => jsonResponse({ error: 'busy' }, 503));
+      const controller = new AbortController();
+      const pending = new ModelProvider(enabledConfig({ maxRetries: 2 }), fetchFn)
+        .complete({ system: 's', user: 'u' }, controller.signal);
+      await vi.advanceTimersByTimeAsync(100);
+      expect(fetchFn).toHaveBeenCalledTimes(1);
+      controller.abort();
+      await expect(pending).resolves.toEqual({ ok: false, error: 'LLM_CANCELLED', retryable: false });
+      expect(fetchFn).toHaveBeenCalledTimes(1);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); }
   });
 });

@@ -1,41 +1,10 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import type { Root } from 'react-dom/client';
 
-import type { ResumePathOption } from '@/resume/compiler/paths';
-import type { FieldStatus } from '@/shared/contracts/field';
+import type { PillFieldView, QuickFillPillActions, QuickFillPillController, ResumePathOption } from '@/shared/contracts/ui';
 
-export interface PillFieldView {
-  fieldKey: string;
-  label: string;
-  status: FieldStatus;
-  reason: string;
-  targetPreview: string;
-  requiresSource?: boolean;
-  essay?: boolean;
-}
-
-export interface EssayDraft {
-  draft: string;
-  source: string;
-}
-
-export interface QuickFillPillActions {
-  onRetry(fieldKey: string): void;
-  onCopy(fieldKey: string): void;
-  onListAlternatives(fieldKey: string): Promise<ResumePathOption[]>;
-  onRemap(fieldKey: string, path: string): void;
-  onSkip(fieldKey: string): void;
-  onMarkChecked(fieldKey: string): void;
-  onFocusField(fieldKey: string): void;
-  onGenerateEssay(fieldKey: string): Promise<EssayDraft | undefined>;
-  onApplyEssay(fieldKey: string, text: string): void;
-}
-
-export interface QuickFillPillController {
-  setFields(fields: PillFieldView[]): void;
-  destroy(): void;
-}
+export type { EssayDraft, PillFieldView, QuickFillPillActions, QuickFillPillController } from '@/shared/contracts/ui';
 
 const STYLE_TEXT = `
 :host { all: initial; }
@@ -81,6 +50,10 @@ function PillApp(props: { actions: QuickFillPillActions; fields: PillFieldView[]
   const [essayFor, setEssayFor] = useState<string | undefined>(undefined);
   const [essaySource, setEssaySource] = useState('');
   const [essayText, setEssayText] = useState('');
+  const [essaySources, setEssaySources] = useState<ResumePathOption[]>([]);
+  const [essayPath, setEssayPath] = useState('');
+  const [essayBusy, setEssayBusy] = useState(false);
+  const essayRevision = useRef(0);
 
   useEffect(() => {
     if (fields.length > 0) {
@@ -152,12 +125,18 @@ function PillApp(props: { actions: QuickFillPillActions; fields: PillFieldView[]
                     type="button"
                     onClick={() => {
                       void (async () => {
-                        const result = await actions.onGenerateEssay(field.fieldKey);
-                        if (result !== undefined) {
+                        const revision = ++essayRevision.current; setEssayBusy(true);
+                        try {
+                        const sources = (await actions.onListAlternatives(field.fieldKey)).filter((option) => option.path.startsWith('projections.projects[') || option.path === 'projections.introShort');
+                        const path = sources.find((option) => option.path.endsWith('.full_description'))?.path ?? sources[0]?.path;
+                        setEssaySources(sources); setEssayPath(path ?? '');
+                        const result = await actions.onGenerateEssay(field.fieldKey, path);
+                        if (result !== undefined && revision === essayRevision.current) {
                           setEssayFor(field.fieldKey);
                           setEssaySource(result.source);
                           setEssayText(result.draft);
                         }
+                        } finally { if (revision === essayRevision.current) setEssayBusy(false); }
                       })();
                     }}
                     data-testid="pill-essay"
@@ -211,28 +190,44 @@ function PillApp(props: { actions: QuickFillPillActions; fields: PillFieldView[]
               </div>
               {essayFor === field.fieldKey ? (
                 <div className="pill-essay-preview" data-testid="pill-essay-preview">
+                  <label>选择经历和文本切面
+                    <select data-testid="pill-essay-projection" value={essayPath} onChange={(event) => {
+                      const path = event.target.value; const revision = ++essayRevision.current; setEssayPath(path); setEssayBusy(true);
+                      void actions.onGenerateEssay(field.fieldKey, path).then((result) => {
+                        if (result && revision === essayRevision.current) { setEssaySource(result.source); setEssayText(result.draft); }
+                      }).finally(() => { if (revision === essayRevision.current) setEssayBusy(false); });
+                    }}>
+                      {essaySources.map((option) => <option key={option.path} value={option.path}>{option.label}：{option.preview}</option>)}
+                    </select>
+                  </label>
                   <div className="pill-target" data-testid="pill-essay-source">
                     来源：{essaySource}
                   </div>
                   <textarea
                     data-testid="pill-essay-text"
                     rows={6}
+                    disabled={essayBusy}
+                    maxLength={field.maxLength}
                     value={essayText}
                     onChange={(event) => setEssayText(event.target.value)}
                   />
+                  <div>{essayText.length} 字{field.maxLength === undefined ? '' : ` / 上限 ${field.maxLength} 字`}</div>
                   <div className="pill-actions">
                     <button
                       type="button"
+                      disabled={essayBusy || (field.maxLength !== undefined && essayText.length > field.maxLength)}
                       onClick={() => {
-                        actions.onApplyEssay(field.fieldKey, essayText);
-                        setFeedback('草稿已写入页面，请核对后标记核对');
-                        setEssayFor(undefined);
+                        setEssayBusy(true);
+                        void actions.onApplyEssay(field.fieldKey, essayText).then((ok) => {
+                          setFeedback(ok ? '草稿已写入并验证，请核对' : '写入未通过验证，请检查文本长度和页面状态');
+                          if (ok) setEssayFor(undefined);
+                        }).finally(() => setEssayBusy(false));
                       }}
                       data-testid="pill-essay-apply"
                     >
                       写回页面
                     </button>
-                    <button type="button" onClick={() => setEssayFor(undefined)} data-testid="pill-essay-cancel">
+                    <button type="button" onClick={() => { essayRevision.current++; setEssayFor(undefined); setEssayBusy(false); }} data-testid="pill-essay-cancel">
                       取消
                     </button>
                   </div>

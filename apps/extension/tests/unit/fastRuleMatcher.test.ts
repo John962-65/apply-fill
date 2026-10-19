@@ -41,6 +41,16 @@ describe('FastRuleMatcher', () => {
     expect(matchRule('text', '昵称')).toBeUndefined();
   });
 
+  it('同名职位根据确认的经历区块路由，不把其他人的姓名当作申请人', () => {
+    expect(matchRule('text', '职位', undefined, 'project')?.targetPath).toBe('projects[{index}].role');
+    expect(matchRule('text', '职位', undefined, 'work')?.targetPath).toBe('work[{index}].role');
+    expect(matchRule('text', '职位', undefined, 'education')).toBeUndefined();
+    expect(matchRule('text', '姓名', undefined, 'work')).toBeUndefined();
+    expect(matchRule('text', '姓名', undefined, 'basic', '紧急联系人')).toBeUndefined();
+    expect(matchRule('tel', '手机号码', undefined, 'basic', '推荐人')).toBeUndefined();
+    expect(matchRule('text', '姓名', undefined, 'basic', '申请人信息')?.targetPath).toBe('basic.name');
+  });
+
   it('normalizeForMatch 处理提示词和标点', () => {
     expect(normalizeForMatch('请输入姓名 *')).toBe('姓名');
     expect(normalizeForMatch('  期望月薪（税前） ')).toBe('期望月薪');

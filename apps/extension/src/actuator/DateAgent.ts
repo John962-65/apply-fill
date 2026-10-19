@@ -1,5 +1,5 @@
 import type { PortalTracker } from '@/perceptor';
-import { isElementVisible, readComboboxCommitted } from '@/perceptor';
+import { findVisibleOverlays, isElementVisible, isOverlayRelatedToTrigger, readComboboxCommitted } from '@/perceptor';
 import type { DateAtom } from '@/shared/contracts/resume';
 import { classifyExecutionError, throwIfAborted } from '@/shared/errors';
 import { dateAtomEquals, lastDayOfMonth, parseDateAtom, toISODate } from '@/shared/utils/date';
@@ -18,6 +18,7 @@ export interface DateAgentConfig {
   settleMs: number;
   pollMs: number;
   commitTimeoutMs: number;
+  progressTimeoutMs: number;
 }
 
 export const DEFAULT_DATE_AGENT_CONFIG: DateAgentConfig = {
@@ -26,6 +27,7 @@ export const DEFAULT_DATE_AGENT_CONFIG: DateAgentConfig = {
   settleMs: 80,
   pollMs: 60,
   commitTimeoutMs: 1200,
+  progressTimeoutMs: 1800,
 };
 
 export interface DateFillResult {
@@ -36,6 +38,8 @@ export interface DateFillResult {
 }
 
 export interface DateFillOptions {
+  assertActive?: () => void;
+  onProgress?: () => void;
   signal?: AbortSignal;
 }
 
@@ -50,6 +54,8 @@ interface YearMonth {
 }
 
 interface FillContext {
+  assertActive?: () => void;
+  onProgress?: () => void;
   trigger: HTMLElement;
   overlay: HTMLElement;
   budget: BudgetTracker;
@@ -99,18 +105,16 @@ export class DateAgent {
     if (classification.kind === 'none') {
       return result('NOT_DATE');
     }
-    if (classification.kind === 'present') {
-      return this.fillPresent(trigger, signal, actions);
-    }
-    if (!hasDateElementHints(trigger)) {
+    if (classification.kind !== 'present' && !hasDateElementHints(trigger)) {
       return result('NOT_DATE');
     }
     try {
       throwIfAborted(signal);
+      if (classification.kind === 'present') return await this.fillPresent(trigger, signal, actions, options.assertActive);
       const expanded = trigger.getAttribute('aria-expanded') === 'true';
       const before = expanded ? [] : this.tracker.snapshot(trigger.ownerDocument);
       if (!expanded) {
-        dispatchClickSequence(trigger);
+        dispatchClickSequence(trigger, signal, options.assertActive);
         budget.recordAction();
         actions += 1;
       }
@@ -121,7 +125,15 @@ export class DateAgent {
       if (overlay === null) {
         return result('NO_POPUP', 'date popup did not appear');
       }
-      const context: FillContext = { trigger, overlay, budget, signal, actions };
+      const context: FillContext = { trigger, overlay, budget, signal, actions, assertActive: options.assertActive, onProgress: options.onProgress };
+      const ready = await this.waitForState(context, () => {
+        if (!this.isOverlayAlive(context.overlay) || this.isBusy(context.overlay)) return false;
+        if (classification.kind === 'range') return this.collectDayGrids(context.overlay).length >= 2;
+        if (classifyOverlayView(context.overlay) !== 'list') return true;
+        return [...context.overlay.querySelectorAll<HTMLElement>('button, li, option, [role="option"]')]
+          .some((cell) => this.isUsableCell(cell, context.overlay) && classifyDateText(cell.textContent ?? '').kind !== 'none');
+      });
+      if (!ready) return this.finish(context, 'TIMEOUT', 'DATE_VIEW_NOT_READY');
       if (classification.kind === 'range') {
         return await this.fillRange(context, classification.start, classification.end);
       }
@@ -143,7 +155,7 @@ export class DateAgent {
     }
   }
 
-  private fillPresent(trigger: HTMLElement, signal: AbortSignal | undefined, actions: number): DateFillResult {
+  private async fillPresent(trigger: HTMLElement, signal: AbortSignal | undefined, actions: number, assertActive?: () => void): Promise<DateFillResult> {
     let scope: HTMLElement | null = trigger;
     let depth = 0;
     while (scope !== null && depth < 3) {
@@ -153,9 +165,9 @@ export class DateAgent {
           return { status: 'ABORTED', reason: 'aborted', actions };
         }
         if (control instanceof HTMLInputElement && control.type === 'checkbox') {
-          void setChecked(control, true, signal).catch(() => undefined);
+          await setChecked(control, true, signal, assertActive);
         } else {
-          dispatchClickSequence(control);
+          dispatchClickSequence(control, signal, assertActive);
         }
         return { status: 'SELECTED', actions: actions + 1 };
       }
@@ -170,6 +182,7 @@ export class DateAgent {
     let bestScore = -1;
     for (const element of scope.querySelectorAll(`${CELL_SELECTOR}, label, input[type="checkbox"]`)) {
       const html = element as HTMLElement;
+      if (!this.isUsableCell(html, scope)) continue;
       const text = (html.textContent ?? '').replace(/\s+/g, ' ').trim();
       const ariaLabel = html.getAttribute('aria-label') ?? '';
       const matchesText = text.length <= 12 && /至今|现在|present/i.test(text);
@@ -209,6 +222,7 @@ export class DateAgent {
     if (view === 'list') {
       const delegated = await this.selectAgent.select(context.trigger, expectedText, {
         ...(context.signal !== undefined ? { signal: context.signal } : {}),
+        assertActive: context.assertActive,
       });
       return {
         status: delegated.status,
@@ -224,8 +238,14 @@ export class DateAgent {
       if (context.budget.exceeded() || context.actions >= this.config.budget.maxActions) {
         return this.finish(context, 'TIMEOUT', 'BUDGET');
       }
+      if (!this.isOverlayAlive(context.overlay)) {
+        return await this.waitForDateCommit(context, atom)
+          ? this.finish(context, 'SELECTED', undefined, context.matchedText)
+          : this.finish(context, 'TIMEOUT', 'COMMIT_TIMEOUT');
+      }
       view = classifyOverlayView(context.overlay);
       if (view === 'day-grid') {
+        if (atom.precision !== 'day') return this.finish(context, 'NO_OPTION', 'INSUFFICIENT_DATE_PRECISION');
         const headerMonth = this.readGridMonth(context.overlay);
         if (headerMonth === undefined) {
           return this.finish(context, 'NO_OPTION', 'day grid header unreadable');
@@ -236,9 +256,7 @@ export class DateAgent {
             return this.finish(context, 'NO_OPTION', 'no year header');
           }
           const progress = await this.navStep(context, yearHeader);
-          if (progress === 'NO_PROGRESS') {
-            return this.finish(context, 'NO_PROGRESS', 'year header did not respond');
-          }
+          if (progress !== 'OK') return this.finish(context, progress, 'year header did not respond');
           continue;
         }
         const navigated = await this.navigateGridTo(context, () => context.overlay, target, headerMonth);
@@ -264,14 +282,15 @@ export class DateAgent {
       if (view === 'year-panel') {
         const picked = await this.pickYear(context, target.year);
         if (picked !== 'OK') {
-          return this.finish(context, picked === 'NO_PROGRESS' ? 'NO_PROGRESS' : 'NO_OPTION', 'year not selectable');
+          return this.finish(context, picked, 'year not selectable');
         }
         continue;
       }
       if (view === 'month-panel') {
+        if (atom.month === undefined) return this.finish(context, 'NO_OPTION', 'INSUFFICIENT_DATE_PRECISION');
         const picked = await this.pickMonth(context, target.month);
         if (picked !== 'OK') {
-          return this.finish(context, 'NO_OPTION', 'month not selectable');
+          return this.finish(context, picked, 'month not selectable');
         }
         continue;
       }
@@ -292,8 +311,13 @@ export class DateAgent {
     if (grids.length < 2) {
       return this.finish(context, 'FAILED', 'range popup does not expose two panels');
     }
+    if (startAtom.precision !== 'day' || (endAtom !== undefined && endAtom.precision !== 'day')) {
+      return this.finish(context, 'NO_OPTION', 'INSUFFICIENT_DATE_PRECISION');
+    }
     const start = withDefaults(startAtom);
     const startDay = start.day ?? 1;
+    const oldEnd = this.locateGridScope(context.overlay, 1);
+    const endSignature = oldEnd ? this.panelSignature(oldEnd) : '';
     const first = await this.fillGrid(context, 0, start, startDay);
     if (first !== 'OK') {
       return this.finish(
@@ -302,7 +326,18 @@ export class DateAgent {
         'start segment failed',
       );
     }
-    await delay(this.config.settleMs, context.signal);
+    const startAccepted = await this.waitForState(context, () => {
+      if (this.isBusy(context.overlay)) return false;
+      const text = this.committedTextOf(context);
+      if (text && this.extractDates(text).some((date) => dateAtomEquals(date, startAtom))) return true;
+      const firstScope = this.locateGridScope(context.overlay, 0);
+      const selected = firstScope?.querySelectorAll<HTMLElement>('[aria-selected="true"], [aria-pressed="true"], .selected, .is-selected, .ant-picker-cell-range-start, .start-date');
+      if (selected && [...selected].some((cell) => Number(cell.getAttribute('data-day') ?? cell.textContent?.trim()) === startDay)) return true;
+      const currentEnd = this.locateGridScope(context.overlay, 1);
+      return currentEnd !== null && this.panelSignature(currentEnd) !== endSignature;
+    });
+    if (!startAccepted || !await this.waitForQuietPanels(context)) return this.finish(context, 'NO_PROGRESS', 'RANGE_START_NOT_CONFIRMED');
+    context.onProgress?.();
     if (endAtom === undefined) {
       const presentControl = this.findPresentControl(context.overlay);
       if (presentControl === null) {
@@ -363,7 +398,7 @@ export class DateAgent {
 
   private locateGridScope(overlay: HTMLElement, index: number): HTMLElement | null {
     const grids = this.collectDayGrids(overlay);
-    const grid = grids[index] ?? grids[0];
+    const grid = grids[index];
     if (grid === undefined) {
       return null;
     }
@@ -398,38 +433,45 @@ export class DateAgent {
       if (nav === null) {
         return 'NO_OPTION';
       }
-      const beforeSignature = this.panelSignature(scope);
       await this.clickCell(context, { element: nav, text: '' });
+      const changed = await this.waitForState(context, () => {
+        const updated = locate();
+        const header = updated === null ? undefined : this.readGridMonth(updated);
+        return updated !== null && !this.isBusy(updated) && classifyOverlayView(updated) === 'day-grid' &&
+          header !== undefined && (header.year !== cursor.year || header.month !== cursor.month);
+      });
+      if (!changed && context.budget.exceeded()) return 'TIMEOUT';
       const refreshed = locate();
       const header = refreshed === null ? undefined : this.readGridMonth(refreshed);
-      const afterSignature = refreshed === null ? undefined : this.panelSignature(refreshed);
-      if (header === undefined || afterSignature === beforeSignature) {
+      const distance = (month: YearMonth) => Math.abs((target.year - month.year) * 12 + target.month - month.month);
+      if (!changed || header === undefined || distance(header) >= distance(cursor)) {
         noProgress += 1;
+        if (changed && header) cursor = header;
         if (noProgress >= this.config.budget.maxNoProgress) {
           return 'NO_PROGRESS';
         }
         continue;
       }
       noProgress = 0;
+      context.onProgress?.();
       cursor = header;
     }
     return 'TIMEOUT';
   }
 
-  private async pickYear(context: FillContext, year: number): Promise<'OK' | 'NO_PROGRESS' | 'NO_OPTION'> {
+  private async pickYear(context: FillContext, year: number): Promise<'OK' | 'NO_PROGRESS' | 'NO_OPTION' | 'TIMEOUT'> {
     let noProgress = 0;
     for (let step = 0; step < 12; step += 1) {
       if (context.signal?.aborted === true) {
         return 'NO_OPTION';
       }
       if (context.budget.exceeded() || context.actions >= this.config.budget.maxActions) {
-        return 'NO_PROGRESS';
+        return 'TIMEOUT';
       }
       const cells = this.collectCells(context.overlay, YEAR_TEXT_PATTERN);
       const hit = cells.find((cell) => Number.parseInt(cell.text, 10) === year);
       if (hit !== undefined) {
-        await this.clickCell(context, hit);
-        return 'OK';
+        return this.selectPanelCell(context, hit, 'year-panel');
       }
       const years = cells
         .map((cell) => Number.parseInt(cell.text, 10))
@@ -445,20 +487,25 @@ export class DateAgent {
       }
       const beforeSignature = this.panelSignature(context.overlay);
       await this.clickCell(context, { element: nav, text: '' });
-      const afterSignature = this.panelSignature(context.overlay);
-      if (afterSignature === beforeSignature) {
+      const changed = await this.waitForState(context, () => !this.isBusy(context.overlay) &&
+        classifyOverlayView(context.overlay) === 'year-panel' && this.panelSignature(context.overlay) !== beforeSignature);
+      if (!changed && context.budget.exceeded()) return 'TIMEOUT';
+      const updatedYears = this.collectCells(context.overlay, YEAR_TEXT_PATTERN).map((cell) => Number(cell.text));
+      const distance = (values: number[]) => Math.max(Math.min(...values) - year, year - Math.max(...values), 0);
+      if (!changed || updatedYears.length === 0 || distance(updatedYears) >= distance(years)) {
         noProgress += 1;
         if (noProgress >= this.config.budget.maxNoProgress) {
           return 'NO_PROGRESS';
         }
       } else {
         noProgress = 0;
+        context.onProgress?.();
       }
     }
     return 'NO_PROGRESS';
   }
 
-  private async pickMonth(context: FillContext, month: number): Promise<'OK' | 'NO_OPTION'> {
+  private async pickMonth(context: FillContext, month: number): Promise<'OK' | 'NO_OPTION' | 'NO_PROGRESS' | 'TIMEOUT'> {
     const cells = this.collectCells(context.overlay, MONTH_TEXT_PATTERN);
     const hit = cells.find((cell) => {
       const match = MONTH_TEXT_PATTERN.exec(cell.text);
@@ -467,40 +514,82 @@ export class DateAgent {
     if (hit === undefined) {
       return 'NO_OPTION';
     }
-    await this.clickCell(context, hit);
-    return 'OK';
+    return this.selectPanelCell(context, hit, 'month-panel');
   }
 
   private async clickCell(context: FillContext, cell: CellCandidate): Promise<void> {
+    throwIfAborted(context.signal);
+    context.assertActive?.();
+    if (!cell.element.isConnected || !context.overlay.contains(cell.element) || !this.isUsableCell(cell.element, context.overlay)) throw new Error('DATE_CELL_CHANGED');
     cell.element.scrollIntoView?.({ block: 'nearest' });
-    dispatchClickSequence(cell.element);
+    dispatchClickSequence(cell.element, context.signal, context.assertActive);
     context.budget.recordAction();
     context.actions += 1;
-    try {
-      await delay(this.config.settleMs, context.signal);
-    } catch {
-      return;
+  }
+
+  private async navStep(context: FillContext, element: HTMLElement): Promise<'OK' | 'NO_PROGRESS' | 'TIMEOUT'> {
+    return this.selectPanelCell(context, { element, text: '' }, classifyOverlayView(context.overlay));
+  }
+
+  private async selectPanelCell(context: FillContext, cell: CellCandidate, previousView: DateOverlayView): Promise<'OK' | 'NO_PROGRESS' | 'TIMEOUT'> {
+    for (let attempt = 0; attempt < this.config.budget.maxNoProgress; attempt += 1) {
+      if (context.budget.exceeded() || context.actions >= this.config.budget.maxActions) return 'TIMEOUT';
+      if (!cell.element.isConnected) return 'NO_PROGRESS';
+      await this.clickCell(context, cell);
+      if (await this.waitForState(context, () => !this.isOverlayAlive(context.overlay) ||
+        (!this.isBusy(context.overlay) && classifyOverlayView(context.overlay) !== previousView && classifyOverlayView(context.overlay) !== 'list'))) {
+        context.onProgress?.();
+        return 'OK';
+      }
+      if (context.budget.exceeded()) return 'TIMEOUT';
+    }
+    return 'NO_PROGRESS';
+  }
+
+  private isBusy(scope: HTMLElement): boolean {
+    return scope.closest('[aria-busy="true"]') !== null ||
+      [...scope.querySelectorAll<HTMLElement>('[aria-busy="true"], [role="progressbar"]')].some(isElementVisible);
+  }
+
+  private async waitForState(context: FillContext, ready: () => boolean): Promise<boolean> {
+    const deadline = Date.now() + Math.min(this.config.progressTimeoutMs,
+      Math.max(0, this.config.budget.maxElapsedMs - context.budget.elapsedMs()));
+    while (true) {
+      throwIfAborted(context.signal);
+      context.assertActive?.();
+      if (context.budget.exceeded()) return false;
+      this.refreshOverlay(context);
+      if (ready()) return true;
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return false;
+      await delay(Math.min(this.config.pollMs, remaining), context.signal);
     }
   }
 
-  private async navStep(context: FillContext, element: HTMLElement): Promise<'OK' | 'NO_PROGRESS'> {
-    const beforeSignature = this.panelSignature(context.overlay);
-    dispatchClickSequence(element);
-    context.budget.recordAction();
-    context.actions += 1;
-    try {
-      await delay(this.config.settleMs, context.signal);
-    } catch {
-      return 'NO_PROGRESS';
-    }
-    const afterSignature = this.panelSignature(context.overlay);
-    return afterSignature !== beforeSignature ? 'OK' : 'NO_PROGRESS';
+  private refreshOverlay(context: FillContext): void {
+    if (this.isOverlayAlive(context.overlay) || context.trigger.getAttribute('aria-expanded') !== 'true') return;
+    const candidates = findVisibleOverlays(context.trigger.ownerDocument);
+    const ids = `${context.trigger.getAttribute('aria-controls') ?? ''} ${context.trigger.getAttribute('aria-owns') ?? ''}`.split(/\s+/).filter(Boolean);
+    const explicit = candidates.filter((overlay) => ids.includes(overlay.id));
+    const related = explicit.length ? explicit : candidates.filter((overlay) => isOverlayRelatedToTrigger(overlay, context.trigger));
+    const roots = related.filter((overlay) => !related.some((other) => other !== overlay && other.contains(overlay)));
+    if (roots.length === 1) context.overlay = roots[0]!;
+  }
+
+  private async waitForQuietPanels(context: FillContext): Promise<boolean> {
+    let previous = ''; let since = Date.now();
+    return this.waitForState(context, () => {
+      const signature = this.collectDayGrids(context.overlay).map((grid) => this.panelSignature(this.panelScope(grid, context.overlay))).join('|');
+      if (this.isBusy(context.overlay) || signature !== previous) { previous = signature; since = Date.now(); return false; }
+      return signature !== '' && Date.now() - since >= this.config.settleMs;
+    });
   }
 
   private collectCells(overlay: HTMLElement, pattern: RegExp): CellCandidate[] {
     const cells: CellCandidate[] = [];
     for (const element of overlay.querySelectorAll(CELL_SELECTOR)) {
       const html = element as HTMLElement;
+      if (!this.isUsableCell(html, overlay)) continue;
       const text = (html.textContent ?? '').replace(/\s+/g, ' ').trim();
       if (text === '' || text.length > 6) {
         continue;
@@ -515,12 +604,12 @@ export class DateAgent {
   private findDayCell(scope: HTMLElement, day: number): CellCandidate | null {
     const escaped = String(day);
     const preferred = scope.querySelector(`[data-day="${escaped}"]`);
-    if (preferred instanceof HTMLElement && !OUTSIDE_MONTH_PATTERN.test(preferred.className)) {
+    if (preferred instanceof HTMLElement && this.isUsableCell(preferred, scope)) {
       return { element: preferred, text: escaped };
     }
     for (const element of scope.querySelectorAll(CELL_SELECTOR)) {
       const html = element as HTMLElement;
-      if (OUTSIDE_MONTH_PATTERN.test(html.className)) {
+      if (!this.isUsableCell(html, scope)) {
         continue;
       }
       const text = (html.textContent ?? '').trim();
@@ -535,6 +624,7 @@ export class DateAgent {
   private findYearHeader(overlay: HTMLElement): HTMLElement | null {
     for (const element of overlay.querySelectorAll('button, span, div, strong, a')) {
       const html = element as HTMLElement;
+      if (!this.isUsableCell(html, overlay)) continue;
       const text = (html.textContent ?? '').replace(/\s+/g, ' ').trim();
       const match = HEADER_YEAR_PATTERN.exec(text);
       if (match !== null && match[1] !== undefined) {
@@ -568,6 +658,7 @@ export class DateAgent {
     const candidates = scope.querySelectorAll('button, [role="button"]');
     for (const element of candidates) {
       const html = element as HTMLElement;
+      if (!this.isUsableCell(html, scope)) continue;
       const aria = html.getAttribute('aria-label') ?? '';
       const title = html.getAttribute('title') ?? '';
       const text = (html.textContent ?? '').trim();
@@ -597,6 +688,7 @@ export class DateAgent {
     const candidates = overlay.querySelectorAll('button, [role="button"]');
     for (const element of candidates) {
       const html = element as HTMLElement;
+      if (!this.isUsableCell(html, overlay)) continue;
       const aria = html.getAttribute('aria-label') ?? '';
       const title = html.getAttribute('title') ?? '';
       for (const label of labels) {
@@ -616,6 +708,18 @@ export class DateAgent {
       }
     }
     return null;
+  }
+
+  private isUsableCell(element: HTMLElement, scope: HTMLElement): boolean {
+    if (!isElementVisible(element) || element.closest('[disabled], [aria-disabled="true"], [hidden], [aria-hidden="true"]')) return false;
+    if (element instanceof HTMLLabelElement && element.control?.matches(':disabled, [aria-disabled="true"]')) return false;
+    let current: HTMLElement | null = element;
+    while (current) {
+      if (OUTSIDE_MONTH_PATTERN.test(current.className)) return false;
+      if (current === scope) break;
+      current = current.parentElement;
+    }
+    return true;
   }
 
   private collectDayGrids(overlay: HTMLElement): HTMLElement[] {
@@ -674,9 +778,6 @@ export class DateAgent {
         context.matchedText = text;
         return true;
       }
-      if (text !== undefined && !this.isOverlayAlive(context.overlay)) {
-        return false;
-      }
       try {
         await delay(this.config.pollMs, context.signal);
       } catch {
@@ -733,9 +834,6 @@ export class DateAgent {
               return true;
             }
           }
-        }
-        if (!this.isOverlayAlive(context.overlay)) {
-          return false;
         }
       }
       try {
@@ -808,6 +906,7 @@ export class DateAgent {
     reason?: string,
     matchedText?: string,
   ): DateFillResult {
+    if (context.signal?.aborted) return { status: 'ABORTED', reason: 'aborted', actions: context.actions };
     const value: DateFillResult = { status, actions: context.actions };
     if (reason !== undefined) value.reason = reason;
     if (matchedText !== undefined) value.matchedText = matchedText;
@@ -817,7 +916,7 @@ export class DateAgent {
 
 export function nativeDateValue(expectedText: string): string | undefined {
   const atom = parseDateAtom(expectedText);
-  if (atom === undefined || 'present' in atom) {
+  if (atom === undefined || 'present' in atom || atom.precision !== 'day') {
     return undefined;
   }
   return toISODate(atom);

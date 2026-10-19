@@ -3,11 +3,12 @@ import type { ExecutableField, FieldExecutionResult, FieldStatus } from '@/share
 import type { RunEvent } from '@/shared/contracts/run';
 import { ApplyFillError, classifyExecutionError, throwIfAborted } from '@/shared/errors';
 import type { GuardRegistry } from '@/guard/GuardRegistry';
+import { withAbort } from '@/shared/utils/timing';
 
 import { CascaderWalker } from './CascaderWalker';
 import type { DateAgent } from './DateAgent';
 import { nativeDateValue } from './DateAgent';
-import { BudgetTracker, DEFAULT_FIELD_BUDGET, SEARCH_SELECT_FIELD_BUDGET } from './ExecutionBudget';
+import { BudgetTracker, DATE_PICKER_FIELD_BUDGET, DEFAULT_FIELD_BUDGET, SEARCH_SELECT_FIELD_BUDGET } from './ExecutionBudget';
 import type { ExecutionBudget } from './ExecutionBudget';
 import { findSelectOption, selectRadioByText, setChecked, setSelectValue, setTextValue } from './Primitives';
 import type { SelectAgent, SelectOutcomeStatus } from './SelectAgent';
@@ -20,6 +21,8 @@ export interface FieldEngineDeps {
   selectAgent?: SelectAgent;
   cascaderWalker?: CascaderWalker;
   dateAgent?: DateAgent;
+  getDomRevision?(): number;
+  isIdentityValid?(element: HTMLElement, field: ExecutableField): boolean;
 }
 
 export interface ExecuteRunOptions {
@@ -107,13 +110,14 @@ export class FieldExecutionEngine {
   ): Promise<FieldExecutionResult> {
     const budgetConfig =
       options.budget ??
-      (field.signature.controlKind === 'combobox' ? SEARCH_SELECT_FIELD_BUDGET : DEFAULT_FIELD_BUDGET);
+      (field.signature.controlKind === 'date' || (field.signature.controlKind === 'combobox' && this.deps.dateAgent?.elementHinted(field.element))
+        ? DATE_PICKER_FIELD_BUDGET : field.signature.controlKind === 'combobox' ? SEARCH_SELECT_FIELD_BUDGET : DEFAULT_FIELD_BUDGET);
     const budget = new BudgetTracker(budgetConfig);
     let attempts = 0;
     let last: FieldExecutionResult | undefined;
     while (attempts <= budget.maxRetries() && !budget.exceeded()) {
       attempts += 1;
-      last = await this.executeField(field, options, attempts);
+      last = await this.executeField(field, options, attempts, Math.max(0, budgetConfig.maxElapsedMs - budget.elapsedMs()));
       if (last.status === 'VERIFIED') {
         return last;
       }
@@ -137,6 +141,7 @@ export class FieldExecutionEngine {
     field: ExecutableField,
     options: ExecuteRunOptions,
     attempts: number,
+    remainingMs: number,
   ): Promise<FieldExecutionResult> {
     const fieldKey = field.signature.fieldKey;
     let lease;
@@ -145,7 +150,7 @@ export class FieldExecutionEngine {
         fieldKey,
         runId: options.runId,
         expectedValue: field.expectedValue,
-        targetDomRevision: 0,
+        targetDomRevision: this.deps.getDomRevision?.() ?? 0,
         ...(LONG_ACTION_KINDS.has(field.signature.controlKind) ? { ttlMs: MAX_ACTION_LEASE_MS } : {}),
       });
     } catch (error) {
@@ -159,6 +164,14 @@ export class FieldExecutionEngine {
     const fieldController = new AbortController();
     this.fieldControllers.set(fieldKey, fieldController);
     const combined = AbortSignal.any([options.signal, fieldController.signal]);
+    const expire = () => {
+      if (this.registry.activeLeaseFor(fieldKey)?.txId !== lease.txId) return;
+      this.registry.revokeActive(fieldKey, 'EXPIRED');
+      fieldController.abort('LEASE_EXPIRED');
+    };
+    const absoluteDeadline = lease.acquiredAt + remainingMs;
+    lease.expiresAt = Math.min(lease.expiresAt, absoluteDeadline);
+    let expiryTimer = setTimeout(expire, Math.max(0, lease.expiresAt - Date.now()));
 
     try {
       this.registry.assertActive(lease);
@@ -169,14 +182,33 @@ export class FieldExecutionEngine {
         throw new ApplyFillError('field element could not be resolved', 'IDENTITY_LOST');
       }
 
-      this.registry.assertActive(lease);
-      await this.executeAction(element, field, combined);
+      const assertActive = (): void => {
+        this.registry.assertActive(lease);
+        throwIfAborted(combined);
+        const revision = this.deps.getDomRevision?.() ?? lease.targetDomRevision;
+        if (!element.isConnected || this.deps.resolveElement(fieldKey) !== element || this.deps.isIdentityValid?.(element, field) === false) {
+          this.registry.revokeActive(fieldKey, 'REVOKED');
+          fieldController.abort('IDENTITY_LOST');
+          throw new ApplyFillError('field identity changed during the transaction', 'IDENTITY_LOST');
+        }
+        // DOM changes caused by this control or another field are permitted
+        // only after proving that this transaction still owns the same node.
+        lease.targetDomRevision = revision;
+      };
+      const onProgress = (): void => {
+        assertActive();
+        if (this.registry.renew(lease, MAX_ACTION_LEASE_MS, absoluteDeadline)) {
+          clearTimeout(expiryTimer);
+          expiryTimer = setTimeout(expire, Math.max(0, lease.expiresAt - Date.now()));
+        }
+      };
+      assertActive();
+      await withAbort(this.executeAction(element, field, combined, assertActive, onProgress), combined);
       (field as { element: HTMLElement }).element = element;
 
-      this.registry.assertActive(lease);
-      throwIfAborted(combined);
+      assertActive();
 
-      const commit = await this.deps.verifyField({
+      const commit = await withAbort(this.deps.verifyField({
         fieldKey,
         controlKind: field.signature.controlKind,
         signature: field.signature,
@@ -184,9 +216,9 @@ export class FieldExecutionEngine {
         expectedValue: field.expectedValue,
         expectedText: field.expectedText,
         signal: combined,
-      });
+      }), combined);
 
-      this.registry.assertActive(lease);
+      assertActive();
 
       if (commit.status === 'CONFIRMED') {
         this.registry.markVerified(lease);
@@ -210,11 +242,12 @@ export class FieldExecutionEngine {
       if (options.signal.aborted) {
         return this.baseResult(field, 'CANCELLED', attempts, 'RUN_CANCELLED');
       }
+      if (fieldController.signal.reason === 'IDENTITY_LOST') return this.baseResult(field, 'NEEDS_MANUAL', attempts, 'IDENTITY_LOST');
+      if (lease.status === 'EXPIRED' || kind === 'LEASE_EXPIRED') {
+        return this.baseResult(field, 'RETRYABLE', attempts, 'LEASE_EXPIRED');
+      }
       if (kind === 'ABORTED' || kind === 'LEASE_REVOKED') {
         return this.baseResult(field, 'USER_OVERRIDDEN', attempts, 'USER_INTERRUPTED');
-      }
-      if (kind === 'LEASE_EXPIRED') {
-        return this.baseResult(field, 'RETRYABLE', attempts, 'LEASE_EXPIRED');
       }
       if (kind === 'PROTECTED') {
         return this.baseResult(field, 'USER_OVERRIDDEN', attempts, 'USER_PROTECTED');
@@ -225,7 +258,8 @@ export class FieldExecutionEngine {
       const message = error instanceof Error ? error.message : String(error);
       return this.baseResult(field, 'NEEDS_MANUAL', attempts, `${kind}: ${message}`);
     } finally {
-      this.fieldControllers.delete(fieldKey);
+      clearTimeout(expiryTimer);
+      if (this.fieldControllers.get(fieldKey) === fieldController) this.fieldControllers.delete(fieldKey);
       this.registry.release(lease);
     }
   }
@@ -234,22 +268,26 @@ export class FieldExecutionEngine {
     element: HTMLElement,
     field: ExecutableField,
     signal: AbortSignal,
+    assertActive: () => void,
+    onProgress: () => void,
   ): Promise<void> {
     const controlKind = field.signature.controlKind;
     if (controlKind === 'combobox') {
       const expectedText = field.expectedText ?? String(field.expectedValue);
-      await this.executeCombobox(element, expectedText, signal);
+      await this.executeCombobox(element, expectedText, signal, assertActive, onProgress);
       return;
     }
     if (controlKind === 'date') {
-      if (element instanceof HTMLInputElement && element.type === 'date') {
+      if (element instanceof HTMLInputElement && (element.type === 'date' || element.type === 'month')) {
         const expectedText = field.expectedText ?? String(field.expectedValue);
-        await setTextValue(element, nativeDateValue(expectedText) ?? expectedText, signal);
+        const nativeValue = element.type === 'month' ? /^\d{4}-\d{2}$/.test(expectedText) ? expectedText : undefined : nativeDateValue(expectedText);
+        if (nativeValue === undefined) throw new ApplyFillError('INSUFFICIENT_DATE_PRECISION', 'ACTUATOR_ERROR');
+        await setTextValue(element, nativeValue, signal, assertActive);
         return;
       }
       if (this.deps.dateAgent !== undefined) {
         const expectedText = field.expectedText ?? String(field.expectedValue);
-        const outcome = await this.deps.dateAgent.fill(element, expectedText, { signal });
+        const outcome = await this.deps.dateAgent.fill(element, expectedText, { signal, assertActive, onProgress });
         if (outcome.status === 'SELECTED') {
           return;
         }
@@ -268,33 +306,33 @@ export class FieldExecutionEngine {
       if (findSelectOption(select, expectedText) === undefined) {
         throw new ApplyFillError(`no select option matches "${expectedText}"`, 'ACTUATOR_ERROR');
       }
-      await setSelectValue(select, expectedText, signal);
+      await setSelectValue(select, expectedText, signal, assertActive);
       return;
     }
     if (controlKind === 'checkbox') {
-      await setChecked(element as HTMLInputElement, Boolean(field.expectedValue), signal);
+      await setChecked(element as HTMLInputElement, Boolean(field.expectedValue), signal, assertActive);
       return;
     }
     if (controlKind === 'radio') {
       const expectedText = field.expectedText ?? String(field.expectedValue);
-      await selectRadioByText(element as HTMLInputElement, expectedText, signal);
+      await selectRadioByText(element as HTMLInputElement, expectedText, signal, assertActive);
       return;
     }
     if (TEXT_LIKE_KINDS.has(controlKind)) {
       const expectedText = field.expectedText ?? String(field.expectedValue);
-      await setTextValue(element as HTMLInputElement | HTMLTextAreaElement, expectedText, signal);
+      await setTextValue(element as HTMLInputElement | HTMLTextAreaElement, expectedText, signal, assertActive);
       return;
     }
     throw new ApplyFillError(`unsupported control kind ${controlKind}`, 'ACTUATOR_ERROR');
   }
 
-  private async executeCombobox(element: HTMLElement, expectedText: string, signal: AbortSignal): Promise<void> {
+  private async executeCombobox(element: HTMLElement, expectedText: string, signal: AbortSignal, assertActive: () => void, onProgress: () => void): Promise<void> {
     if (this.deps.dateAgent !== undefined) {
       const kind = this.deps.dateAgent.textKind(expectedText);
       if (kind !== 'none') {
         const hinted = kind === 'present' || this.deps.dateAgent.elementHinted(element);
         if (hinted) {
-          const outcome = await this.deps.dateAgent.fill(element, expectedText, { signal });
+          const outcome = await this.deps.dateAgent.fill(element, expectedText, { signal, assertActive, onProgress });
           if (outcome.status === 'SELECTED') {
             return;
           }
@@ -309,7 +347,7 @@ export class FieldExecutionEngine {
     }
     const levels = CascaderWalker.splitLevels(expectedText);
     if (levels.length >= 2 && this.deps.cascaderWalker !== undefined) {
-      const outcome = await this.deps.cascaderWalker.walk(element, expectedText, { signal });
+      const outcome = await this.deps.cascaderWalker.walk(element, expectedText, { signal, assertActive });
       if (outcome.status === 'SELECTED') {
         return;
       }
@@ -321,7 +359,7 @@ export class FieldExecutionEngine {
     if (this.deps.selectAgent === undefined) {
       throw new ApplyFillError('no select agent available for combobox', 'ACTUATOR_ERROR');
     }
-    const outcome = await this.deps.selectAgent.select(element, expectedText, { signal });
+    const outcome = await this.deps.selectAgent.select(element, expectedText, { signal, assertActive });
     if (outcome.status === 'SELECTED') {
       return;
     }
@@ -339,6 +377,9 @@ export class FieldExecutionEngine {
   ): FieldExecutionResult {
     const result: FieldExecutionResult = {
       fieldKey: field.signature.fieldKey,
+      stepId: field.signature.descriptor.stepId,
+      sectionType: field.signature.sectionType,
+      ...(field.signature.instanceId ? { instanceId: field.signature.instanceId } : {}),
       label: field.signature.label,
       controlKind: field.signature.controlKind,
       status,

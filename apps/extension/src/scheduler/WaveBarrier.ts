@@ -23,7 +23,8 @@ export class WaveBarrier {
   private readonly root: ParentNode;
   private readonly config: WaveBarrierConfig;
 
-  constructor(root: ParentNode = document, config: WaveBarrierConfig = DEFAULT_WAVE_BARRIER_CONFIG) {
+  constructor(root: ParentNode = document, config: WaveBarrierConfig = DEFAULT_WAVE_BARRIER_CONFIG,
+    private readonly resolveFieldKey?: (element: HTMLElement) => string | undefined) {
     this.root = root;
     this.config = config;
   }
@@ -33,7 +34,7 @@ export class WaveBarrier {
     const elements = scanFormElements(this.root);
     const distilled = distillElements(elements);
     for (const item of distilled) {
-      const fieldKey = buildFieldIdentity(item.field.descriptor).fieldKey;
+      const fieldKey = this.resolveFieldKey?.(item.element) ?? buildFieldIdentity(item.field.descriptor).fieldKey;
       const entry: FieldSnapshotEntry = {
         fieldKey,
         label: item.field.label,

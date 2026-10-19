@@ -1,4 +1,5 @@
-import { ApplyFillError, throwIfAborted } from '@/shared/errors';
+import { ApplyFillError } from '@/shared/errors';
+import { assertActionAllowed } from '@/shared/utils/action';
 import { normalizeLabel } from '@/shared/utils/text';
 
 function nativeValueSetter(
@@ -33,11 +34,14 @@ export function setNativeInputValue(element: HTMLInputElement | HTMLTextAreaElem
 function dispatchInputEvents(
   element: HTMLElement,
   options: { input?: boolean; change?: boolean } = { input: true, change: true },
+  check: () => void = () => undefined,
 ): void {
   if (options.input === true) {
+    check();
     element.dispatchEvent(new Event('input', { bubbles: true }));
   }
   if (options.change === true) {
+    check();
     element.dispatchEvent(new Event('change', { bubbles: true }));
   }
 }
@@ -46,12 +50,14 @@ export async function setTextValue(
   element: HTMLInputElement | HTMLTextAreaElement,
   value: string,
   signal?: AbortSignal,
+  assertActive?: () => void,
 ): Promise<void> {
-  throwIfAborted(signal);
+  assertActionAllowed({ signal, assertActive });
   element.focus();
+  assertActionAllowed({ signal, assertActive });
   setNativeInputValue(element, value);
-  dispatchInputEvents(element);
-  throwIfAborted(signal);
+  dispatchInputEvents(element, undefined, () => assertActionAllowed({ signal, assertActive }));
+  assertActionAllowed({ signal, assertActive });
 }
 
 export function findSelectOption(select: HTMLSelectElement, expectedText: string): HTMLOptionElement | undefined {
@@ -76,8 +82,9 @@ export async function setSelectValue(
   select: HTMLSelectElement,
   expectedText: string,
   signal?: AbortSignal,
+  assertActive?: () => void,
 ): Promise<void> {
-  throwIfAborted(signal);
+  assertActionAllowed({ signal, assertActive });
   const option = findSelectOption(select, expectedText);
   if (option === undefined) {
     throw new ApplyFillError(`no select option matches "${expectedText}"`, 'ACTUATOR_ERROR');
@@ -91,20 +98,22 @@ export async function setSelectValue(
   if (select.selectedIndex !== option.index) {
     select.selectedIndex = option.index;
   }
-  dispatchInputEvents(select);
-  throwIfAborted(signal);
+  dispatchInputEvents(select, undefined, () => assertActionAllowed({ signal, assertActive }));
+  assertActionAllowed({ signal, assertActive });
 }
 
 export async function setChecked(
   element: HTMLInputElement,
   checked: boolean,
   signal?: AbortSignal,
+  assertActive?: () => void,
 ): Promise<void> {
-  throwIfAborted(signal);
+  assertActionAllowed({ signal, assertActive });
   if (element.checked === checked) {
     return;
   }
   element.click();
+  assertActionAllowed({ signal, assertActive });
   if (element.checked !== checked) {
     const setter = nativeValueSetter(element, 'checked');
     if (setter !== undefined) {
@@ -112,9 +121,9 @@ export async function setChecked(
     } else {
       element.checked = checked;
     }
-    dispatchInputEvents(element);
+    dispatchInputEvents(element, undefined, () => assertActionAllowed({ signal, assertActive }));
   }
-  throwIfAborted(signal);
+  assertActionAllowed({ signal, assertActive });
 }
 
 export function radioOptionText(radio: HTMLInputElement): string {
@@ -151,8 +160,9 @@ export async function selectRadioByText(
   representative: HTMLInputElement,
   expectedText: string,
   signal?: AbortSignal,
+  assertActive?: () => void,
 ): Promise<void> {
-  throwIfAborted(signal);
+  assertActionAllowed({ signal, assertActive });
   const scope = representative.form ?? representative.ownerDocument;
   const group = representative.name === ''
     ? [representative]
@@ -162,18 +172,19 @@ export async function selectRadioByText(
     throw new ApplyFillError(`no radio option matches "${expectedText}"`, 'ACTUATOR_ERROR');
   }
   target.click();
-  throwIfAborted(signal);
+  assertActionAllowed({ signal, assertActive });
 }
 
-export function dispatchClickSequence(element: HTMLElement): void {
+export function dispatchClickSequence(element: HTMLElement, signal?: AbortSignal, assertActive?: () => void): void {
   const init: MouseEventInit = { bubbles: true, cancelable: true, composed: true, button: 0 };
   for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+    assertActionAllowed({ signal, assertActive });
     element.dispatchEvent(new MouseEvent(type, init));
   }
 }
 
-export async function clickSequence(element: HTMLElement, signal?: AbortSignal): Promise<void> {
-  throwIfAborted(signal);
-  dispatchClickSequence(element);
-  throwIfAborted(signal);
+export async function clickSequence(element: HTMLElement, signal?: AbortSignal, assertActive?: () => void): Promise<void> {
+  assertActionAllowed({ signal, assertActive });
+  dispatchClickSequence(element, signal, assertActive);
+  assertActionAllowed({ signal, assertActive });
 }

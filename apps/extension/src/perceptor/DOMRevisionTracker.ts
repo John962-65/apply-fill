@@ -1,3 +1,6 @@
+import { throwIfAborted } from '@/shared/errors';
+import { delay } from '@/shared/utils/timing';
+
 export interface DOMRevisionTrackerConfig {
   quietMs: number;
   pollMs: number;
@@ -43,28 +46,22 @@ export class DOMRevisionTracker {
   }
 
   get revision(): number {
+    if ((this.observer?.takeRecords().length ?? 0) > 0) {
+      this.revisionValue += 1;
+      this.lastMutationAt = this.now();
+    }
     return this.revisionValue;
   }
 
-  waitFor(predicate: () => boolean, timeoutMs: number): Promise<boolean> {
-    if (predicate()) {
-      return Promise.resolve(true);
+  async waitFor(predicate: () => boolean, timeoutMs: number, signal?: AbortSignal): Promise<boolean> {
+    const deadline = this.now() + timeoutMs;
+    while (true) {
+      throwIfAborted(signal);
+      if (predicate()) return true;
+      const remaining = deadline - this.now();
+      if (remaining <= 0) return false;
+      await delay(Math.min(this.config.pollMs, remaining), signal);
     }
-    return new Promise<boolean>((resolve) => {
-      const startedAt = this.now();
-      const tick = (): void => {
-        if (predicate()) {
-          clearInterval(timer);
-          resolve(true);
-          return;
-        }
-        if (this.now() - startedAt >= timeoutMs) {
-          clearInterval(timer);
-          resolve(false);
-        }
-      };
-      const timer = setInterval(tick, this.config.pollMs);
-    });
   }
 
   async waitForRevisionAfter(startRevision: number, timeoutMs: number): Promise<boolean> {

@@ -1,5 +1,7 @@
-import type { ControlKind } from '@/shared/contracts/field';
+import type { ControlKind, SectionType } from '@/shared/contracts/field';
 import { normalizeLabel } from '@/shared/utils/text';
+
+import { collectionForSection, entryPathInfo, isOtherPersonContext } from './RouteContext';
 
 export interface RouteRule {
   id: string;
@@ -7,6 +9,7 @@ export interface RouteRule {
   targetPath: string;
   controlKinds?: ControlKind[];
   valueKind?: 'string' | 'number' | 'boolean';
+  sectionTypes?: SectionType[];
 }
 
 export const INDEX_TOKEN = '{index}';
@@ -16,6 +19,17 @@ export function substituteIndex(targetPath: string, index: number): string {
 }
 
 export const DEFAULT_RULES: RouteRule[] = [
+  { id: 'education.gpa', patterns: ['GPA', '绩点', '平均绩点', '平均学分绩点'], targetPath: 'education[{index}].gpa', controlKinds: ['number', 'text'] },
+  { id: 'basic.awards', patterns: ['获奖情况', '所获奖项', '奖项', '荣誉奖励'], targetPath: 'basic.awards', controlKinds: ['text', 'textarea'] },
+  { id: 'basic.additionalInfo', patterns: ['补充信息', '其他补充信息'], targetPath: 'basic.additionalInfo', controlKinds: ['text', 'textarea'] },
+  { id: 'project.scopedRole', patterns: ['职位', '岗位', '职位名称', '岗位名称', '职务'], targetPath: 'projects[{index}].role', sectionTypes: ['project'], controlKinds: ['text', 'select', 'combobox'] },
+  ...(['education', 'work', 'project'] as const).flatMap((sectionType): RouteRule[] => {
+    const root = sectionType === 'project' ? 'projects' : sectionType;
+    return [
+      { id: `${sectionType}.scopedStartDate`, patterns: ['开始时间', '开始日期', '起始时间', '起始日期', '起始年月', '开始年月', ...(sectionType === 'work' ? ['入职时间', '入职日期'] : [])], targetPath: `${root}[{index}].startDate`, sectionTypes: [sectionType] },
+      { id: `${sectionType}.scopedEndDate`, patterns: ['结束时间', '结束日期', '截止时间', '结束年月', ...(sectionType === 'work' ? ['离职时间', '离职日期'] : [])], targetPath: `${root}[{index}].endDate`, sectionTypes: [sectionType] },
+    ];
+  }),
   { id: 'basic.name', patterns: ['姓名', '名字', '真实姓名', '申请人姓名'], targetPath: 'basic.name' },
   {
     id: 'basic.phone',
@@ -82,13 +96,13 @@ export const DEFAULT_RULES: RouteRule[] = [
     id: 'education.graduationYear',
     patterns: ['毕业年份', '毕业时间', '毕业年月', '毕业日期'],
     targetPath: 'education[{index}].endDate',
-    controlKinds: ['combobox', 'select', 'text'],
+    controlKinds: ['combobox', 'select', 'text', 'date'],
   },
   {
     id: 'education.startDate',
     patterns: ['入学时间', '入学年份', '入学日期'],
     targetPath: 'education[{index}].startDate',
-    controlKinds: ['combobox', 'select', 'text'],
+    controlKinds: ['combobox', 'select', 'text', 'date'],
   },
   {
     id: 'education.dateRange',
@@ -182,9 +196,15 @@ export function matchRule(
   controlKind: ControlKind,
   normalizedLabel: string,
   rules: RouteRule[] = DEFAULT_RULES,
+  sectionType?: SectionType,
+  groupLabel?: string,
 ): RouteRule | undefined {
   const label = normalizeForMatch(normalizedLabel);
   for (const rule of rules) {
+    const collection = sectionType === undefined ? undefined : collectionForSection(sectionType);
+    if (collection !== undefined && entryPathInfo(rule.targetPath)?.collection !== collection) continue;
+    if (rule.targetPath.startsWith('basic.') && isOtherPersonContext(label, groupLabel)) continue;
+    if (rule.sectionTypes !== undefined && (sectionType === undefined || !rule.sectionTypes.includes(sectionType))) continue;
     if (rule.controlKinds !== undefined && !rule.controlKinds.includes(controlKind)) {
       continue;
     }

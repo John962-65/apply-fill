@@ -79,8 +79,8 @@ export function daterangeResumeFacts(): ResumeFactsShape {
     school: fact('示例大学'),
     degree: fact('本科'),
     major: fact('计算机科学与技术'),
-    startDate: fact('2020-09'),
-    endDate: fact('2022-06'),
+    startDate: fact('2020-09-01'),
+    endDate: fact('2022-06-30'),
   };
   return facts;
 }
@@ -92,7 +92,7 @@ export function daterangePresentResumeFacts(): ResumeFactsShape {
     school: fact('示例大学'),
     degree: fact('本科'),
     major: fact('计算机科学与技术'),
-    startDate: fact('2020-09'),
+    startDate: fact('2020-09-01'),
     endDate: fact('至今'),
   };
   return facts;

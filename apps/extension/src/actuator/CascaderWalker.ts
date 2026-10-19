@@ -31,6 +31,7 @@ export const DEFAULT_CASCADER_WALKER_CONFIG: CascaderWalkerConfig = {
 };
 
 export interface CascaderWalkOptions {
+  assertActive?: () => void;
   signal?: AbortSignal;
   now?: () => number;
 }
@@ -106,7 +107,7 @@ export class CascaderWalker {
       throwIfAborted(signal);
       const before = this.tracker.snapshot(trigger.ownerDocument);
       if (trigger.getAttribute('aria-expanded') !== 'true') {
-        dispatchClickSequence(trigger);
+        dispatchClickSequence(trigger, signal, options.assertActive);
         record();
       }
       const found = await this.tracker.waitForOverlay(trigger, before, {
@@ -140,8 +141,10 @@ export class CascaderWalker {
         if (match.status !== 'MATCH' || match.element === undefined) {
           return outcome('NO_OPTION', `no option matches "${levelTarget}"`);
         }
+        throwIfAborted(signal);
+        options.assertActive?.();
         match.element.scrollIntoView?.({ block: 'nearest' });
-        dispatchClickSequence(match.element);
+        dispatchClickSequence(match.element, signal, options.assertActive);
         record();
         try {
           await delay(this.config.columnSettleMs, signal);

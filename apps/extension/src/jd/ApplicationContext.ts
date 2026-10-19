@@ -1,11 +1,6 @@
 import type { JobContextCandidate } from './JDSniffer';
-
-export interface ApplicationContext extends JobContextCandidate {
-  host: string;
-  url: string;
-  capturedAt: number;
-  expiresAt: number;
-}
+import type { ApplicationContext } from '@/shared/contracts/context';
+export type { ApplicationContext } from '@/shared/contracts/context';
 
 export interface ApplicationContextSerialized {
   entries: Array<[string, ApplicationContext]>;

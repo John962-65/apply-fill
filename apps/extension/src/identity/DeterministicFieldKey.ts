@@ -2,7 +2,7 @@ import type { DeterministicFieldDescriptor } from '@/shared/contracts/field';
 import { fnv1a64Hex } from '@/shared/utils/hash';
 import { normalizeLabel } from '@/shared/utils/text';
 
-export const KEY_SCHEMA_VERSION = 1;
+export const KEY_SCHEMA_VERSION = 2;
 
 export function canonicalizeDescriptor(descriptor: DeterministicFieldDescriptor): string {
   const stable: Record<string, string> = {
@@ -17,6 +17,8 @@ export function canonicalizeDescriptor(descriptor: DeterministicFieldDescriptor)
   };
   const fieldName = descriptor.disambiguator?.fieldName;
   const stableAttribute = descriptor.disambiguator?.stableAttribute;
+  const groupLabel = descriptor.disambiguator?.groupLabel;
+  if (groupLabel !== undefined && groupLabel !== '') stable.groupLabel = normalizeLabel(groupLabel);
   if (fieldName !== undefined && fieldName !== '') {
     stable.fieldName = fieldName;
   }
@@ -29,7 +31,7 @@ export function canonicalizeDescriptor(descriptor: DeterministicFieldDescriptor)
   }
   return Object.keys(stable)
     .sort()
-    .map((key) => `${key}=${stable[key] ?? ''}`)
+    .map((key) => `${key}=${encodeURIComponent(stable[key] ?? '')}`)
     .join('&');
 }
 

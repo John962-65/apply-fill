@@ -55,7 +55,7 @@ export function generateEssayDraft(input: EssayInput): string {
 
   const requirement = firstClause(input.jd?.requirements);
   if (requirement !== undefined) {
-    parts.push(`我注意到岗位要求中提到“${requirement}”，这与我的上述经历直接相关，可以快速上手并持续贡献。`);
+    parts.push(`我注意到岗位要求中提到“${requirement}”。`);
   }
 
   parts.push('期待有机会进一步交流，谢谢！');

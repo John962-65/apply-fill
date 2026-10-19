@@ -1,4 +1,5 @@
 import type { LlmProviderConfig } from '@/shared/contracts/llm';
+import { delay, withAbort } from '@/shared/utils/timing';
 
 export type FetchLike = (input: string, init: RequestInit) => Promise<Response>;
 
@@ -12,10 +13,6 @@ export type ModelCompletionResult =
   | { ok: false; error: string; retryable: boolean };
 
 const RETRY_DELAY_MS = 500;
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 function sanitize(message: string, apiKey: string): string {
   const trimmed = message.replace(/\s+/g, ' ').trim().slice(0, 240);
@@ -37,7 +34,7 @@ export class ModelProvider {
     this.fetchFn = fetchFn;
   }
 
-  async complete(request: ModelCompletionRequest): Promise<ModelCompletionResult> {
+  async complete(request: ModelCompletionRequest, signal?: AbortSignal): Promise<ModelCompletionResult> {
     const base = this.config.baseUrl.replace(/\/+$/, '');
     if (base === '' || this.config.model === '') {
       return { ok: false, error: '模型服务未配置', retryable: false };
@@ -55,41 +52,44 @@ export class ModelProvider {
     let lastError = '';
     let lastRetryable = false;
     for (let attempt = 0; attempt <= this.config.maxRetries; attempt += 1) {
+      if (signal?.aborted) return { ok: false, error: 'LLM_CANCELLED', retryable: false };
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), this.config.timeoutMs);
+      const requestSignal = signal ? AbortSignal.any([controller.signal, signal]) : controller.signal;
       try {
-        const response = await this.fetchFn(url, {
+        const response = await withAbort(this.fetchFn(url, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             ...(this.config.apiKey !== '' ? { Authorization: `Bearer ${this.config.apiKey}` } : {}),
           },
           body,
-          signal: controller.signal,
-        });
+          signal: requestSignal,
+        }), requestSignal);
         if (!response.ok) {
-          const text = await response.text().catch(() => '');
+          const text = await withAbort(response.text().catch(() => ''), requestSignal);
           lastError = `HTTP ${response.status}${text !== '' ? ` ${sanitize(text, this.config.apiKey)}` : ''}`;
           lastRetryable = response.status === 429 || response.status >= 500;
           if (lastRetryable && attempt < this.config.maxRetries) {
-            await delay(RETRY_DELAY_MS * (attempt + 1));
+            await delay(RETRY_DELAY_MS * (attempt + 1), signal).catch(() => undefined);
             continue;
           }
           return { ok: false, error: lastError, retryable: lastRetryable };
         }
-        const data = (await response.json()) as { choices?: Array<{ message?: { content?: unknown } }> };
+        const data = (await withAbort(response.json(), requestSignal)) as { choices?: Array<{ message?: { content?: unknown } }> };
         const content = data.choices?.[0]?.message?.content;
         if (typeof content !== 'string' || content.trim() === '') {
           lastError = '模型返回内容为空';
           lastRetryable = false;
           if (attempt < this.config.maxRetries) {
-            await delay(RETRY_DELAY_MS * (attempt + 1));
+            await delay(RETRY_DELAY_MS * (attempt + 1), signal).catch(() => undefined);
             continue;
           }
           return { ok: false, error: lastError, retryable: lastRetryable };
         }
         return { ok: true, content };
       } catch (error) {
+        if (signal?.aborted) return { ok: false, error: 'LLM_CANCELLED', retryable: false };
         const errorName =
           typeof error === 'object' && error !== null && 'name' in error
             ? String((error as { name: unknown }).name)
@@ -99,12 +99,12 @@ export class ModelProvider {
             ? String((error as { message: unknown }).message)
             : '';
         lastError =
-          errorName === 'AbortError'
+          controller.signal.aborted || errorName === 'AbortError'
             ? `请求超时（${this.config.timeoutMs}ms）`
             : sanitize(errorMessage !== '' ? errorMessage : '网络请求失败', this.config.apiKey);
         lastRetryable = true;
         if (attempt < this.config.maxRetries) {
-          await delay(RETRY_DELAY_MS * (attempt + 1));
+          await delay(RETRY_DELAY_MS * (attempt + 1), signal).catch(() => undefined);
           continue;
         }
         return { ok: false, error: lastError, retryable: lastRetryable };

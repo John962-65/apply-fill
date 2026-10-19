@@ -7,6 +7,8 @@ export { formatDateAtom };
 
 export interface FormatTarget {
   controlKind: ControlKind;
+  label?: string;
+  inputType?: string;
   options?: string[];
   constraints?: FieldConstraints;
 }
@@ -125,16 +127,38 @@ export function formatForField(rawValue: unknown, field: FormatTarget): FormatRe
   }
 
   if (kind === 'number') {
-    if (typeof rawValue === 'number' && Number.isFinite(rawValue)) {
-      return { ok: true, value: rawValue, expectedText: String(rawValue) };
+    let source = rawValue;
+    if (typeof source === 'string' && /gpa|绩点/i.test(field.label ?? '')) {
+      const match = /^\s*(\d+(?:\.\d+)?)\s*\/\s*(\d+(?:\.\d+)?)\s*$/.exec(source);
+      if (match) {
+        const scale = Number(match[2]);
+        const requestedScale = /满分\s*(\d+(?:\.\d+)?)|(\d+(?:\.\d+)?)\s*分制/i.exec(field.label ?? '');
+        const maximum = requestedScale?.[1] ?? requestedScale?.[2] ?? field.constraints?.max;
+        if (maximum !== undefined && Number(maximum) !== scale) return { ok: false, reason: 'GPA_SCALE_MISMATCH' };
+        source = match[1];
+      }
     }
-    if (typeof rawValue === 'string' && rawValue.trim() !== '' && Number.isFinite(Number(rawValue))) {
-      return { ok: true, value: Number(rawValue), expectedText: String(rawValue).trim() };
+    if ((typeof source !== 'number' && typeof source !== 'string') || (typeof source === 'string' && source.trim() === '') || !Number.isFinite(Number(source))) return { ok: false, reason: 'EXPECTED_NUMERIC_VALUE' };
+    const value = Number(source); const min = field.constraints?.min; const max = field.constraints?.max;
+    if ((min !== undefined && Number.isFinite(Number(min)) && value < Number(min)) ||
+      (max !== undefined && Number.isFinite(Number(max)) && value > Number(max))) return { ok: false, reason: 'NUMERIC_OUT_OF_RANGE' };
+    const step = field.constraints?.step;
+    if (step !== undefined && step !== 'any' && Number.isFinite(Number(step)) && Number(step) > 0) {
+      const units = (value - (min === undefined ? 0 : Number(min))) / Number(step);
+      if (Math.abs(units - Math.round(units)) > 1e-8) return { ok: false, reason: 'NUMERIC_STEP_MISMATCH' };
     }
-    return { ok: false, reason: 'EXPECTED_NUMERIC_VALUE' };
+    return { ok: true, value, expectedText: String(source).trim() };
   }
 
   if (isDateAtom(rawValue)) {
+    if (field.inputType === 'date' && rawValue.precision !== 'day') {
+      return { ok: false, reason: 'INSUFFICIENT_DATE_PRECISION' };
+    }
+    if (field.inputType === 'month') {
+      if (rawValue.month === undefined) return { ok: false, reason: 'INSUFFICIENT_DATE_PRECISION' };
+      const text = formatDateAtom({ ...rawValue, precision: 'month' });
+      return { ok: true, value: text, expectedText: text };
+    }
     const text = formatDateAtom(rawValue);
     return { ok: true, value: text, expectedText: text };
   }

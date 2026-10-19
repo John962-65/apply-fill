@@ -100,9 +100,15 @@ export class GuardRegistry {
     if (lease.status !== 'ACTIVE') {
       throw new ApplyFillError(`lease ${lease.txId} is ${lease.status}`, 'LEASE_REVOKED');
     }
+    const guard = this.getGuard(lease.fieldKey);
+    if (this.activeLeases.get(lease.fieldKey)?.txId !== lease.txId || guard.activeTxId !== lease.txId ||
+      guard.lockState === 'user-protected' || guard.lastAgentWriteVersion !== lease.guardVersion) {
+      throw new ApplyFillError(`lease ${lease.txId} no longer owns the field`, 'LEASE_REVOKED');
+    }
   }
 
   markVerified(lease: WriteTransactionLease): void {
+    this.assertActive(lease);
     const guard = this.getGuard(lease.fieldKey);
     guard.lastVerifiedValue = lease.expectedValue;
     guard.lastAgentWriteVersion += 1;
@@ -112,6 +118,14 @@ export class GuardRegistry {
     guard.updatedAt = this.now();
     lease.status = 'COMMITTED';
     this.dropActiveLease(lease.fieldKey, lease.txId);
+  }
+
+  renew(lease: WriteTransactionLease, ttlMs: number, absoluteDeadline: number): boolean {
+    this.assertActive(lease);
+    const expiresAt = Math.min(this.now() + Math.min(ttlMs, this.config.maxTtlMs), absoluteDeadline);
+    if (expiresAt <= lease.expiresAt) return false;
+    lease.expiresAt = expiresAt;
+    return true;
   }
 
   release(lease: WriteTransactionLease): void {

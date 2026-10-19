@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { FrameRegistry } from '@/background/FrameRegistry';
 import { TabCoordinator } from '@/background/TabCoordinator';
@@ -69,6 +69,30 @@ describe('FrameRegistry', () => {
 });
 
 describe('TabCoordinator', () => {
+  it('单字段、上传和整页填写共享全局许可，旧文档不能释放新任务', async () => {
+    const finished = vi.fn();
+    const coordinator = new TabCoordinator({ registry: new FrameRegistry(), probe: { getAllFrames: async () => [] },
+      sendToFrame: async () => ({ ok: true }), onFrameTaskFinished: finished });
+    const lease = { tabId: 1, frameId: 0, documentId: 'doc', runId: 'task_one', kind: 'field' as const };
+    await coordinator.acquireFrameTask(lease);
+    await expect(coordinator.run(1)).rejects.toThrow('RUN_IN_PROGRESS');
+    await expect(coordinator.acquireFrameTask({ ...lease, tabId: 2, kind: 'upload' })).rejects.toThrow('RUN_IN_PROGRESS');
+    expect(await coordinator.releaseFrameTask({ ...lease, documentId: 'old' }, 'COMPLETED')).toBe(false);
+    expect((await coordinator.cancel(1)).ok).toBe(true);
+    expect(await coordinator.releaseFrameTask(lease, 'COMPLETED')).toBe(true);
+    expect(finished).toHaveBeenCalledWith(lease, 'CANCELLED', undefined, expect.objectContaining({ assertCurrent: expect.any(Function) }));
+    expect((await coordinator.run(2)).status).toBe('FAILED');
+  });
+
+  it('未释放的单字段任务达到总预算后主动取消并清理许可', async () => {
+    const finished = vi.fn();
+    const coordinator = new TabCoordinator({ registry: new FrameRegistry(), probe: { getAllFrames: async () => [] },
+      sendToFrame: async () => ({ ok: true }), frameTimeoutMs: 20, onFrameTaskFinished: finished });
+    const lease = { tabId: 1, frameId: 0, runId: 'task_timeout', kind: 'upload' as const };
+    await coordinator.acquireFrameTask(lease);
+    await vi.waitFor(() => expect(finished).toHaveBeenCalledWith(lease, 'FAILED', undefined, expect.objectContaining({ assertCurrent: expect.any(Function) })));
+    expect((await coordinator.run(1)).status).toBe('FAILED');
+  });
   function makeCoordinator(options: {
     frames: FrameDescriptor[];
     probeError?: boolean;
@@ -172,7 +196,7 @@ describe('TabCoordinator', () => {
     expect(failed.frames).toEqual([]);
   });
 
-  it('cancel 广播到注册表全部帧（按 frameId 排序），无注册帧时退化为主帧', async () => {
+  it('无活动任务时不发送无 nonce 的取消，避免误伤稍后启动的任务', async () => {
     const { coordinator, calls, registry } = makeCoordinator({
       frames: [],
       respond: async (_frameId, message) => (message.type === 'CANCEL_RUN' ? { ok: true } : { ok: false }),
@@ -180,13 +204,12 @@ describe('TabCoordinator', () => {
     registry.register({ tabId: 9, frameId: 6, documentId: 'doc_b', url: 'http://child.test', title: '' });
     registry.register({ tabId: 9, frameId: 0, documentId: 'doc_a', url: 'http://main.test', title: '' });
     const outcome = await coordinator.cancel(9);
-    expect(calls).toEqual([0, 6]);
-    expect(outcome.ok).toBe(true);
-    expect(outcome.delivered).toBe(2);
+    expect(calls).toEqual([]);
+    expect(outcome).toEqual({ ok: false, delivered: 0 });
 
     const bare = makeCoordinator({ frames: [], respond: async () => ({ ok: false }) });
     const none = await bare.coordinator.cancel(1);
-    expect(bare.calls).toEqual([0]);
+    expect(bare.calls).toEqual([]);
     expect(none.ok).toBe(false);
   });
 
@@ -206,5 +229,100 @@ describe('TabCoordinator', () => {
     const summary = await coordinator.run(5);
     expect(calls).toEqual([0]);
     expect(summary.frames?.[0]?.documentId).toBe('doc_0');
+  });
+
+  it('取消当前帧后不启动尚未执行的子帧', async () => {
+    let complete: ((value: unknown) => void) | undefined;
+    let runId = '';
+    const starts: number[] = [];
+    const { coordinator } = makeCoordinator({
+      frames: [{ frameId: 0, documentId: 'main' }, { frameId: 2, documentId: 'child' }],
+      respond: async (frameId, message) => {
+        if (message.type === 'RUN_AUTOFILL_FRAME') {
+          runId = message.runId ?? '';
+          starts.push(frameId);
+          return new Promise((resolve) => { complete = resolve; });
+        }
+        return { ok: true };
+      },
+    });
+    const pending = coordinator.run(1);
+    await vi.waitFor(() => expect(starts).toEqual([0]));
+    expect(coordinator.isRunAuthorized(1, runId, 0, 'main')).toBe(true);
+    expect(coordinator.isRunAuthorized(1, runId, 0, 'old-document')).toBe(false);
+    expect(coordinator.isRunAuthorized(1, runId, 2, 'child')).toBe(false);
+    expect((await coordinator.cancel(1)).ok).toBe(true);
+    expect(coordinator.isRunAuthorized(1, runId, 0, 'main')).toBe(false);
+    // Even an old frame incorrectly reporting success cannot restart the loop.
+    complete?.({ ok: true, summary: frameSummary('old', [fieldOf('姓名', 'VERIFIED')]) });
+    const summary = await pending;
+    expect(summary.status).toBe('CANCELLED');
+    expect(starts).toEqual([0]);
+    expect(summary.frames?.[1]?.status).toBe('CANCELLED');
+  });
+
+  it('同一标签页并发启动只产生一个执行链，任务结束后释放许可', async () => {
+    let complete: ((value: unknown) => void) | undefined;
+    const { coordinator, calls } = makeCoordinator({
+      frames: [{ frameId: 0 }],
+      respond: async () => new Promise((resolve) => { complete = resolve; }),
+    });
+    const pending = coordinator.run(1);
+    await vi.waitFor(() => expect(calls).toEqual([0]));
+    await expect(coordinator.run(1)).rejects.toThrow('RUN_IN_PROGRESS');
+    complete?.({ ok: true, summary: frameSummary('main', []) });
+    await pending;
+    const second = coordinator.run(1);
+    await vi.waitFor(() => expect(calls).toEqual([0, 0]));
+    complete?.({ ok: true, summary: frameSummary('main2', []) });
+    await second;
+  });
+
+  it('帧超时主动取消原文档且不启动后续帧', async () => {
+    const calls: Array<{ frameId: number; type: string; documentId?: string }> = [];
+    const coordinator = new TabCoordinator({
+      registry: new FrameRegistry(),
+      probe: { getAllFrames: async () => [{ frameId: 0, documentId: 'old-doc' }, { frameId: 2 }] },
+      frameTimeoutMs: 20,
+      sendToFrame: async (_tabId, frameId, message, documentId) => {
+        calls.push({ frameId, type: message.type, documentId });
+        if (message.type === 'RUN_AUTOFILL_FRAME') return new Promise(() => undefined);
+        return { ok: true };
+      },
+    });
+    const summary = await coordinator.run(1);
+    expect(summary.status).toBe('FAILED');
+    expect(calls).toEqual([
+      { frameId: 0, type: 'RUN_AUTOFILL_FRAME', documentId: 'old-doc' },
+      { frameId: 0, type: 'CANCEL_RUN', documentId: 'old-doc' },
+    ]);
+  });
+
+  it('只在字段所属帧接受重试时报告成功', async () => {
+    const { coordinator } = makeCoordinator({ frames: [], respond: async () => ({ ok: false }) });
+    expect((await coordinator.retryField(1, 'unknown')).ok).toBe(false);
+  });
+
+  it('暂停覆盖跨帧调度，在恢复前不启动下一个帧', async () => {
+    let complete: ((value: unknown) => void) | undefined;
+    const starts: number[] = [];
+    const { coordinator } = makeCoordinator({
+      frames: [{ frameId: 0 }, { frameId: 2 }],
+      respond: async (frameId, message) => {
+        if (message.type !== 'RUN_AUTOFILL_FRAME') return { ok: true };
+        starts.push(frameId);
+        if (frameId === 0) return new Promise((resolve) => { complete = resolve; });
+        return { ok: true, summary: frameSummary('child', []) };
+      },
+    });
+    const pending = coordinator.run(1);
+    await vi.waitFor(() => expect(starts).toEqual([0]));
+    await coordinator.setPaused(1, true);
+    complete?.({ ok: true, summary: frameSummary('main', []) });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(starts).toEqual([0]);
+    await coordinator.setPaused(1, false);
+    expect((await pending).status).toBe('COMPLETED');
+    expect(starts).toEqual([0, 2]);
   });
 });

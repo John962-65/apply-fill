@@ -3,7 +3,7 @@ import { expect, test } from '@playwright/test';
 import { resumeFacts } from './fixtures/resumeFacts';
 import { importFacts, launchExtensionContext, openWorkbench, TESTBED_URL } from './helpers/extension';
 
-test('真实招聘网站标签页同步绑定与授权后自动填写', async () => {
+test('本地模拟招聘域名：标签页绑定、网站权限与注入后填写', async () => {
   const session = await launchExtensionContext({
     extraArgs: [
       '--host-resolver-rules=MAP mock-recruitment.test 127.0.0.1',

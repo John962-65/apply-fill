@@ -116,6 +116,13 @@ describe('RuntimeDependencyRegistry', () => {
 });
 
 describe('WaveBarrier', () => {
+  it('使用运行时提供的步骤字段键，依赖变化不落入默认表单命名空间', () => {
+    document.body.innerHTML = '<label>姓名<input name="name" /></label>';
+    let step = 'one'; const barrier = new WaveBarrier(document, FAST_BARRIER, () => `runtime_${step}_name`);
+    const before = barrier.snapshotFields(); expect([...before.keys()]).toEqual(['runtime_one_name']);
+    step = 'two'; const after = barrier.snapshotFields();
+    expect(WaveBarrier.diff(before, after, false)).toMatchObject({ added: ['runtime_two_name'], removed: ['runtime_one_name'] });
+  });
   it('无变更时 quiet 且 diff 为空', async () => {
     document.body.innerHTML = '<label for="a">姓名</label><input id="a" value="张三" />';
     const barrier = new WaveBarrier(document, FAST_BARRIER);

@@ -5,6 +5,8 @@ import type { MappingMemory } from '@/memory/MappingMemory';
 import type { DistilledElement } from '@/perceptor';
 import type { FingerprintCache, FingerprintInput, ResumeRouteSource } from '@/router';
 import { matchRule, normalizeForMatch, resolveResumePath, substituteIndex } from '@/router';
+import { fingerprintInputFor } from '@/router/FingerprintCache';
+import { entryPathInfo, isOtherPersonContext, isRouteContextValid } from '@/router/RouteContext';
 import type { CompiledResume } from '@/shared/contracts/resume';
 import type { FieldMapping, FieldSignature, MappingIssue, SectionType } from '@/shared/contracts/field';
 import type { ReanchorStatus } from '@/shared/contracts/reanchor';
@@ -60,7 +62,7 @@ function buildSignature(distilled: DistilledElement): FieldSignature {
   };
 }
 
-function mapField(ctx: MappingContext, item: DistilledElement, indexForPath: number): void {
+function mapField(ctx: MappingContext, item: DistilledElement, indexForPath: number, bound = false): void {
   const signature = buildSignature(item);
   ctx.elementByKey.set(signature.fieldKey, item.element);
 
@@ -89,13 +91,15 @@ function mapField(ctx: MappingContext, item: DistilledElement, indexForPath: num
     return;
   }
 
-  const fingerprintInput: FingerprintInput = {
-    host: ctx.host,
-    sectionType: signature.sectionType,
-    normalizedLabel: signature.descriptor.normalizedLabel,
-    controlKind: signature.controlKind,
-  };
-  const cacheHit = ctx.cache?.get(fingerprintInput);
+  const fingerprintInput = fingerprintInputFor(ctx.host, signature);
+  const matchedRule = matchRule(signature.controlKind, normalizeForMatch(signature.descriptor.normalizedLabel), undefined,
+    signature.sectionType, signature.descriptor.disambiguator?.groupLabel);
+  let cacheHit = ctx.cache?.get(fingerprintInput);
+  if (cacheHit && (!isRouteContextValid(cacheHit.targetPathTemplate, signature.sectionType, indexForPath) ||
+    isOtherPersonContext(signature.label, signature.descriptor.disambiguator?.groupLabel))) {
+    ctx.cache?.invalidate(fingerprintInput);
+    cacheHit = undefined;
+  }
 
   let template: string | undefined;
   let source: FieldMapping['source'] = 'rule';
@@ -105,11 +109,12 @@ function mapField(ctx: MappingContext, item: DistilledElement, indexForPath: num
     template = cacheHit.targetPathTemplate;
     source = 'cache';
     confidence = 0.9;
-  } else {
-    const memoryHit = ctx.memory?.lookup(fingerprintInput);
+  }
+  if (template === undefined) {
+    const memoryHit = ctx.memory?.lookup({ ...fingerprintInput, ...(bound ? { boundEntryIndex: indexForPath } : {}) });
     if (memoryHit !== undefined) {
       const memoryPath = substituteIndex(memoryHit.targetPath, indexForPath);
-      if (resolveResumePath(ctx.routeSource, memoryPath).found) {
+      if (isRouteContextValid(memoryHit.targetPath, signature.sectionType, indexForPath) && resolveResumePath(ctx.routeSource, memoryPath).found) {
         template = memoryHit.targetPath;
         source = 'memory';
         confidence = memoryHit.source === 'user' ? 0.92 : 0.88;
@@ -118,9 +123,8 @@ function mapField(ctx: MappingContext, item: DistilledElement, indexForPath: num
   }
 
   if (template === undefined) {
-    const matched = matchRule(signature.controlKind, normalizeForMatch(signature.descriptor.normalizedLabel));
-    if (matched !== undefined) {
-      template = matched.targetPath;
+    if (matchedRule !== undefined) {
+      template = matchedRule.targetPath;
       source = 'rule';
       confidence = 0.95;
     } else {
@@ -146,7 +150,38 @@ function mapField(ctx: MappingContext, item: DistilledElement, indexForPath: num
     return;
   }
 
+  if (template === 'projects[{index}].description') {
+    const limit = signature.constraints?.maxLength;
+    if (limit !== undefined && limit <= 150 && limit > 0) {
+      template = limit <= 50 ? 'projections.projects[{index}].one_liner' : 'projections.projects[{index}].summary_150';
+    }
+  }
+
   const targetPath = substituteIndex(template, indexForPath);
+  if (!isRouteContextValid(template, signature.sectionType, indexForPath) ||
+    (source === 'llm' && isOtherPersonContext(signature.label, signature.descriptor.disambiguator?.groupLabel))) {
+    ctx.mappings.push({ fieldKey: signature.fieldKey, signature, targetPath, source, confidence, status: 'AMBIGUOUS', reason: 'ROUTE_CONTEXT_MISMATCH' });
+    ctx.issues.push({ fieldKey: signature.fieldKey, label: signature.label, kind: 'AMBIGUOUS', reason: 'ROUTE_CONTEXT_MISMATCH' });
+    return;
+  }
+  const entry = entryPathInfo(template);
+  if (!bound && entry && ctx.routeSource.normalized[entry.collection].length > 1) {
+    const reason = 'RESUME_ENTRY_REQUIRES_CONFIRMATION';
+    ctx.mappings.push({ fieldKey: signature.fieldKey, signature, targetPath, source, confidence, status: 'AMBIGUOUS', reason });
+    ctx.issues.push({ fieldKey: signature.fieldKey, label: signature.label, kind: 'AMBIGUOUS', reason });
+    return;
+  }
+  if (signature.sectionType === 'essay' || (matchedRule === undefined && (signature.controlKind === 'textarea' ||
+    targetPath === 'basic.intro' || targetPath === 'projections.introShort'))) {
+    ctx.mappings.push({ fieldKey: signature.fieldKey, signature, targetPath, source, confidence, status: 'AMBIGUOUS', reason: 'DRAFT_REQUIRES_CONFIRMATION' });
+    ctx.issues.push({ fieldKey: signature.fieldKey, label: signature.label, kind: 'AMBIGUOUS', reason: 'DRAFT_REQUIRES_CONFIRMATION' });
+    return;
+  }
+  if (source === 'llm' && /^(?:basic\.(?:name|phone|email|birthDate|location|city|idExplanation)|preferences\.expectedSalary)$/.test(targetPath)) {
+    ctx.mappings.push({ fieldKey: signature.fieldKey, signature, targetPath, source, confidence, status: 'AMBIGUOUS', reason: 'LLM_SENSITIVE_REQUIRES_CONFIRMATION' });
+    ctx.issues.push({ fieldKey: signature.fieldKey, label: signature.label, kind: 'AMBIGUOUS', reason: 'LLM_SENSITIVE_REQUIRES_CONFIRMATION' });
+    return;
+  }
   const resolved = resolveResumePath(ctx.routeSource, targetPath);
   if (!resolved.found) {
     ctx.issues.push({ label: signature.label, kind: 'NO_DATA', reason: 'RESUME_VALUE_MISSING', fieldKey: signature.fieldKey });
@@ -265,7 +300,7 @@ export function buildExecutionPlan(
       continue;
     }
     for (const item of instance.distilled) {
-      mapField(ctx, item, indexForPath);
+      mapField(ctx, item, indexForPath, true);
     }
   }
 

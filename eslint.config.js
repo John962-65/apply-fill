@@ -5,7 +5,7 @@ import tseslint from 'typescript-eslint';
 
 const SRC = './apps/extension/src';
 
-const zone = (target, from, message) => ({ target, from, message });
+const zone = (target, from, message) => ({ target, from: from.includes('{') ? `${from}/**/*` : from, message });
 
 const boundaryZones = [
   zone(

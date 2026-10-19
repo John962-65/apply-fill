@@ -4,6 +4,7 @@ import ReactDOM from 'react-dom/client';
 function Uploader() {
   const inputId = useId();
   const [fileName, setFileName] = useState('');
+  const delayMs = Number(new URLSearchParams(location.search).get('ackDelay') ?? 0);
 
   return (
     <div style={{ maxWidth: 560 }}>
@@ -19,7 +20,9 @@ function Uploader() {
             style={{ position: 'absolute', width: 1, height: 1, opacity: 0 }}
             onChange={(event) => {
               const file = event.target.files?.[0];
-              setFileName(file === undefined ? '' : file.name);
+              const name = file === undefined ? '' : file.name;
+              if (delayMs > 0) window.setTimeout(() => setFileName(name), delayMs);
+              else setFileName(name);
             }}
             data-testid="upload-input"
           />

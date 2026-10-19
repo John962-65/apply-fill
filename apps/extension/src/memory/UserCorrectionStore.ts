@@ -1,14 +1,5 @@
-import type { ControlKind } from '@/shared/contracts/field';
-
-export interface UserCorrectionRecord {
-  id: string;
-  host: string;
-  label: string;
-  controlKind: ControlKind;
-  kind: 'REMAP' | 'MANUAL_EDIT';
-  targetPath?: string;
-  createdAt: number;
-}
+import type { UserCorrectionRecord } from '@/shared/contracts/context';
+export type { UserCorrectionRecord } from '@/shared/contracts/context';
 
 export interface UserCorrectionSerialized {
   records: UserCorrectionRecord[];

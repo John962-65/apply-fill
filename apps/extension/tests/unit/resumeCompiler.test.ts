@@ -26,6 +26,14 @@ describe('parseDateAtom', () => {
     expect(parseDateAtom('')).toBeUndefined();
     expect(parseDateAtom('去年')).toBeUndefined();
   });
+
+  it('拒绝不存在的日期与尾随内容，并保留中文日期精度', () => {
+    for (const invalid of ['2024-13', '2024-00', '2023-02-29', '2024-02-30', '2020-01-00', '2020junk']) {
+      expect(parseDateAtom(invalid)).toBeUndefined();
+    }
+    expect(parseDateAtom('2024年2月29日')).toEqual({ year: 2024, month: 2, day: 29, precision: 'day' });
+    expect(parseDateAtom('2026年')).toEqual({ year: 2026, precision: 'year' });
+  });
 });
 
 describe('compileResume', () => {
@@ -68,6 +76,22 @@ describe('compileResume', () => {
     delete facts.projects;
     const compiled = compileResume(facts);
     expect(compiled.normalized.projects).toEqual([]);
+  });
+
+  it('项目切面从事实派生且保留来源，不编造缺失成果', () => {
+    const facts = createSampleResumeFacts();
+    facts.projects![0]!.description!.value = '真实项目描述。'.repeat(50);
+    const before = JSON.stringify(facts);
+    const compiled = compileResume(facts);
+    const projection = compiled.projections.projects?.[0];
+    expect(projection?.resumeEntryId).toBe(facts.projects?.[0]?.id);
+    expect(projection?.title).toBe(facts.projects?.[0]?.name.value);
+    expect(projection?.one_liner.length).toBe(50);
+    expect(projection?.summary_150.length).toBe(150);
+    expect(projection?.full_description).toBe(facts.projects?.[0]?.description?.value);
+    expect(projection?.outcomes).toBe('');
+    expect(projection?.sourceFactPaths).toContain('projects[0].description');
+    expect(JSON.stringify(facts)).toBe(before);
   });
 
   it('buildProjections 生成截断的短简介', () => {

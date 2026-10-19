@@ -35,6 +35,7 @@ function normalizeEducationEntry(facts: EducationFacts): EducationEntry {
     degree: facts.degree.value,
   };
   const major = requireFactValue(facts.major);
+  if (facts.gpa !== undefined) entry.gpa = facts.gpa.value;
   if (major !== undefined) {
     entry.major = major;
   }
@@ -100,6 +101,12 @@ function normalizeProjectEntry(facts: ProjectFacts): ProjectEntry {
   };
   const role = requireFactValue(facts.role);
   const description = requireFactValue(facts.description);
+  const responsibilities = requireFactValue(facts.responsibilities);
+  const outcomes = requireFactValue(facts.outcomes);
+  const keywords = requireFactValue(facts.keywords);
+  if (responsibilities !== undefined) entry.responsibilities = responsibilities;
+  if (outcomes !== undefined) entry.outcomes = outcomes;
+  if (keywords !== undefined) entry.keywords = [...keywords];
   if (role !== undefined) {
     entry.role = role;
   }
@@ -136,6 +143,8 @@ export function normalizeResume(facts: ResumeFactsDocument): NormalizedResume {
   if (postalCode !== undefined) basic.postalCode = postalCode;
   if (idType !== undefined) basic.idType = idType;
   if (idExplanation !== undefined) basic.idExplanation = idExplanation;
+  if (facts.basic.awards !== undefined) basic.awards = facts.basic.awards.value;
+  if (facts.basic.additionalInfo !== undefined) basic.additionalInfo = facts.basic.additionalInfo.value;
   if (birthRaw !== undefined) {
     const parsed = parseDateAtom(birthRaw);
     if (parsed !== undefined && !('present' in parsed)) {

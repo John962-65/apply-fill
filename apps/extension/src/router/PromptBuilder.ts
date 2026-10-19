@@ -1,6 +1,7 @@
 import type { LlmFieldRef } from '@/shared/contracts/llm';
 
 import { LLM_TARGET_PATHS } from './LlmPaths';
+import { sanitizeRoutingLabel } from './MetadataPrivacy';
 
 export interface LlmRoutingPrompt {
   system: string;
@@ -27,7 +28,7 @@ export function buildLlmRoutingPrompt(fields: LlmFieldRef[]): LlmRoutingPrompt {
   const payload = {
     fields: fields.map((field) => ({
       fieldKey: field.fieldKey,
-      label: field.label,
+      label: sanitizeRoutingLabel(field.label),
       controlKind: field.controlKind,
       sectionType: field.sectionType,
       ...(field.instanceIndex !== undefined ? { instanceIndex: field.instanceIndex } : {}),

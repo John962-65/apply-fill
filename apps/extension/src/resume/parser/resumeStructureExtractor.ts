@@ -20,7 +20,7 @@ export interface ParsedResume {
   stats: ResumeParseStats;
 }
 
-type SectionKind = 'education' | 'work' | 'projects' | 'skills';
+type SectionKind = 'education' | 'work' | 'projects' | 'skills' | 'awards' | 'additional';
 
 interface SectionDef {
   kind: SectionKind;
@@ -28,6 +28,8 @@ interface SectionDef {
 }
 
 const SECTION_DEFS: SectionDef[] = [
+  { kind: 'awards', match: /^(奖项|获奖情况|荣誉奖励|所获奖项|awards|honors)$/i },
+  { kind: 'additional', match: /^(补充信息|其他信息|additionalinformation)$/i },
   { kind: 'education', match: /^(教育经历|教育背景|学习经历|教育|education)$/i },
   {
     kind: 'work',
@@ -217,7 +219,8 @@ function parseEducationDrafts(drafts: EntryDraft[], now: number, uncertain: stri
     const match = DATE_RANGE_PATTERN.exec(combined);
     const dates = formatMonthRange(match);
     const majorLabeled = /专业[:：]\s*([^\s|｜，,;；]+)/.exec(combined)?.[1];
-    const major = majorLabeled ?? pickSegment(remainingSegments(combined, [school, match?.[0], degree]), 30);
+    const gpaMatch = /(?:GPA|平均绩点|绩点)\s*[:：]?\s*(\d+(?:\.\d+)?(?:\s*\/\s*\d+(?:\.\d+)?)?)/i.exec(combined);
+    const major = majorLabeled ?? pickSegment(remainingSegments(combined, [school, match?.[0], degree, gpaMatch?.[0]]), 30);
     const entry: ResumeFactsDocument['education'][number] = {
       id: `resume.education.${index}`,
       school: makeFact(school, now),
@@ -226,6 +229,8 @@ function parseEducationDrafts(drafts: EntryDraft[], now: number, uncertain: stri
     if (major !== undefined) {
       entry.major = makeFact(major, now);
     }
+    const gpa = gpaMatch?.[1];
+    if (gpa !== undefined) entry.gpa = makeFact(gpa, now);
     if (dates.startDate !== undefined) {
       entry.startDate = makeFact(dates.startDate, now);
     }
@@ -485,33 +490,41 @@ export function extractResumeFacts(text: string, now: number = Date.now()): Pars
   }
 
   const basic = extractBasics(basicLines, now, stats);
-  let education: ResumeFactsDocument['education'] = [];
-  let work: WorkFacts[] = [];
-  let projects: NonNullable<ResumeFactsDocument['projects']> = [];
-  let skills: SkillFacts[] = [];
+  const education: ResumeFactsDocument['education'] = [];
+  const work: WorkFacts[] = [];
+  const projects: NonNullable<ResumeFactsDocument['projects']> = [];
+  const skills: SkillFacts[] = [];
 
   for (const section of sectionRanges) {
     const contentLines = section.lines.filter((line) => normalizeLine(line) !== '');
     if (section.kind === 'education') {
-      education = parseEducationDrafts(
+      const parsed = parseEducationDrafts(
         entryDraftsOf(contentLines, (line) => SCHOOL_PATTERN.test(line)),
         now,
         stats.uncertain,
       );
+      education.push(...parsed.map((entry, index) => ({ ...entry, id: `resume.education.${education.length + index + 1}` })));
     } else if (section.kind === 'work') {
-      work = parseWorkDrafts(
+      const parsed = parseWorkDrafts(
         entryDraftsOf(contentLines, (line) => COMPANY_PATTERN.test(line)),
         now,
         stats.uncertain,
       );
+      work.push(...parsed.map((entry, index) => ({ ...entry, id: `resume.work.${work.length + index + 1}` })));
     } else if (section.kind === 'projects') {
-      projects = parseProjectDrafts(
+      const parsed = parseProjectDrafts(
         entryDraftsOf(contentLines, (line) => PROJECT_PATTERN.test(line)),
         now,
         stats.uncertain,
       );
+      projects.push(...parsed.map((entry, index) => ({ ...entry, id: `resume.project.${projects.length + index + 1}` })));
+    } else if (section.kind === 'awards' || section.kind === 'additional') {
+      const key = section.kind === 'awards' ? 'awards' : 'additionalInfo';
+      basic[key] = makeFact([basic[key]?.value, ...contentLines.map(stripBullet)].filter(Boolean).join('\n'), now);
+      stats.basic.push(section.kind === 'awards' ? '奖项' : '补充信息');
     } else {
-      skills = parseSkillLines(contentLines, now);
+      const parsed = parseSkillLines(contentLines, now);
+      skills.push(...parsed.map((entry, index) => ({ ...entry, id: `resume.skill.${skills.length + index + 1}` })));
     }
   }
 

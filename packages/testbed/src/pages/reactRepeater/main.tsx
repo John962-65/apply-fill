@@ -18,6 +18,8 @@ interface ProjectItem {
 const DEGREE_OPTIONS = ['', '大专', '本科', '硕士', '博士'];
 
 function RepeaterPage() {
+  const roleVariant = new URLSearchParams(window.location.search).get('role');
+  const roleLabel = roleVariant === 'unknown' ? '责任范围' : roleVariant === 'generic' ? '职位' : '担任角色';
   const [education, setEducation] = useState<EducationItem[]>([{ uid: 1, school: '', degree: '', major: '' }]);
   const [projects, setProjects] = useState<ProjectItem[]>([{ uid: 1, name: '', role: '', desc: '' }]);
   const [projectsKey, setProjectsKey] = useState(0);
@@ -120,7 +122,7 @@ function RepeaterPage() {
                 />
               </div>
               <div>
-                <label htmlFor={`project-role-${item.uid}`}>担任角色</label>
+                <label htmlFor={`project-role-${item.uid}`}>{roleLabel}</label>
                 <input
                   id={`project-role-${item.uid}`}
                   name="projectRole"

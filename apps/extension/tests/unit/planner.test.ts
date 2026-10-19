@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
 import { MappingMemory } from '@/memory/MappingMemory';
+import { buildFieldIdentity } from '@/identity';
+import { FingerprintCache, fingerprintInputFor } from '@/router/FingerprintCache';
 import { distillElements } from '@/perceptor/FieldDistiller';
 import { scanFormElements } from '@/perceptor/FormScanner';
 import { compileResume } from '@/resume/compiler/compile';
@@ -46,7 +48,7 @@ describe('buildExecutionPlan', () => {
     const plan = planForCurrentDom();
 
     expect(plan.mappings).toHaveLength(7);
-    expect(plan.executable).toHaveLength(4);
+    expect(plan.executable).toHaveLength(3);
 
     const name = mappingByLabel(plan.mappings, '姓名');
     expect(name.status).toBe('MAPPED');
@@ -58,8 +60,8 @@ describe('buildExecutionPlan', () => {
     expect(phone.expectedValue).toBe('13800001111');
 
     const degree = mappingByLabel(plan.mappings, '学历');
-    expect(degree.status).toBe('MAPPED');
-    expect(degree.expectedText).toBe('本科');
+    expect(degree.status).toBe('AMBIGUOUS');
+    expect(degree.reason).toBe('RESUME_ENTRY_REQUIRES_CONFIRMATION');
 
     const salary = mappingByLabel(plan.mappings, '期望薪资（千元）');
     expect(salary.status).toBe('MAPPED');
@@ -102,16 +104,51 @@ describe('buildExecutionPlan', () => {
 
   it('可执行项携带目标路径与期望文本', () => {
     setupForm();
-    const plan = planForCurrentDom();
+    const facts = createSampleResumeFacts();
+    facts.education = facts.education.slice(0, 1);
+    const plan = planForCurrentDom(facts);
     const degree = mustFind(plan.executable, (field) => field.targetPath === 'education[0].degree');
     expect(degree.expectedText).toBe('本科');
     expect(degree.element.id).toBe('p-degree');
     const name = mustFind(plan.executable, (field) => field.targetPath === 'basic.name');
     expect(name.expectedValue).toBe('张三');
   });
+
+  it.each(['rule', 'cache', 'llm'] as const)('未绑定经历字段的 %s 路径不默选多段经历中的第一段', (source) => {
+    document.body.innerHTML = '<label>学校名称<input name="school" /></label>';
+    const distilled = distillElements(scanFormElements(document));
+    const field = distilled[0]!.field;
+    const fieldKey = buildFieldIdentity(field.descriptor).fieldKey;
+    const cache = new FingerprintCache();
+    if (source === 'cache') cache.record(fingerprintInputFor('jobs.test', { ...field, fieldKey }), 'education[{index}].school');
+    // The unknown label ensures the model proposal is used instead of a rule.
+    if (source === 'llm') field.descriptor.normalizedLabel = field.label = '待确认来源';
+    const proposalKey = buildFieldIdentity(field.descriptor).fieldKey;
+    const plan = buildExecutionPlan(compileResume(createSampleResumeFacts()), distilled, { cache, host: 'jobs.test',
+      ...(source === 'llm' ? { llmProposals: new Map([[proposalKey, { targetPathTemplate: 'education[0].school', confidence: 0.99 }]]) } : {}) });
+    expect(plan.executable).toHaveLength(0);
+    expect(plan.cacheCandidates).toHaveLength(0);
+    expect(plan.mappings[0]).toMatchObject({ source, status: 'AMBIGUOUS', reason: 'RESUME_ENTRY_REQUIRES_CONFIRMATION' });
+  });
+
+  it('未绑定的项目切面同样需要选择经历来源', () => {
+    document.body.innerHTML = '<label>项目名称<input name="project" /></label>';
+    const distilled = distillElements(scanFormElements(document));
+    const field = distilled[0]!.field;
+    field.descriptor.normalizedLabel = field.label = '待确认来源';
+    const fieldKey = buildFieldIdentity(field.descriptor).fieldKey;
+    const plan = buildExecutionPlan(compileResume(createSampleResumeFacts()), distilled, {
+      llmProposals: new Map([[fieldKey, { targetPathTemplate: 'projections.projects[{index}].one_liner', confidence: 0.99 }]]) });
+    expect(plan.executable).toHaveLength(0);
+    expect(plan.mappings[0]?.reason).toBe('RESUME_ENTRY_REQUIRES_CONFIRMATION');
+  });
 });
 
 describe('buildExecutionPlan 记忆映射', () => {
+  function memoryInput(label: string) {
+    const { field } = mustFind(distillElements(scanFormElements(document)), (item) => item.field.label === label);
+    return fingerprintInputFor('job.example.com', { ...field, fieldKey: buildFieldIdentity(field.descriptor).fieldKey });
+  }
   function planWithMemory(memory: MappingMemory, host = 'job.example.com') {
     const distilled = distillElements(scanFormElements(document));
     const compiled = compileResume(createSampleResumeFacts(), 42);
@@ -126,7 +163,7 @@ describe('buildExecutionPlan 记忆映射', () => {
       </form>`;
     const memory = new MappingMemory();
     memory.recordUserChoice(
-      { host: 'job.example.com', sectionType: 'basic', normalizedLabel: '紧急联系人', controlKind: 'text' },
+      memoryInput('紧急联系人'),
       'basic.name',
     );
     const plan = planWithMemory(memory);
@@ -146,9 +183,10 @@ describe('buildExecutionPlan 记忆映射', () => {
       </form>`;
     const memory = new MappingMemory();
     memory.recordVerified(
-      { host: 'job.example.com', sectionType: 'basic', normalizedLabel: '姓名', controlKind: 'text' },
-      'basic.unknownField',
+      memoryInput('姓名'),
+      'basic.postalCode',
     );
+    expect(memory.size).toBe(1);
     const plan = planWithMemory(memory);
     const mapping = mappingByLabel(plan.mappings, '姓名');
     expect(mapping.source).toBe('rule');
@@ -162,11 +200,62 @@ describe('buildExecutionPlan 记忆映射', () => {
       </form>`;
     const memory = new MappingMemory();
     memory.recordUserChoice(
-      { host: 'job.example.com', sectionType: 'basic', normalizedLabel: '紧急联系人', controlKind: 'text' },
+      memoryInput('紧急联系人'),
       'basic.name',
     );
     const plan = planWithMemory(memory, 'other.example.com');
     expect(mappingByLabel(plan.mappings, '紧急联系人').status).toBe('UNMAPPED');
     expect(mustFind(plan.issues, (issue) => issue.label === '紧急联系人').kind).toBe('UNMAPPED');
+  });
+});
+
+describe('其他人信息和文本审核边界', () => {
+  it('申请人和紧急联系人同名字段按语义组区分，不自动复制申请人的资料', () => {
+    document.body.innerHTML = `<fieldset><legend>申请人信息</legend><label>姓名<input name="name" /></label></fieldset>
+      <fieldset><legend>紧急联系人</legend><label>姓名<input name="name" /></label><label>手机号码<input type="tel" name="phone" /></label></fieldset>`;
+    const distilled = distillElements(scanFormElements(document));
+    const cache = new FingerprintCache();
+    const other = distilled[1]!.field;
+    cache.record(fingerprintInputFor('jobs.test', { ...other, fieldKey: buildFieldIdentity(other.descriptor).fieldKey }), 'basic.name');
+    const plan = buildExecutionPlan(compileResume(createSampleResumeFacts()), distilled, { cache, host: 'jobs.test' });
+    expect(plan.executable).toHaveLength(1);
+    expect(plan.mappings.map((item) => item.status)).toEqual(['MAPPED', 'UNMAPPED', 'UNMAPPED']);
+    expect(new Set(plan.mappings.map((item) => item.fieldKey)).size).toBe(3);
+    expect(cache.size).toBe(0);
+  });
+
+  it('其他人信息中的模型指针也不能自动套用申请人性别等非敏感资料', () => {
+    document.body.innerHTML = '<fieldset><legend>紧急联系人</legend><label>性别<select><option>男</option><option>女</option></select></label></fieldset>';
+    const distilled = distillElements(scanFormElements(document));
+    const fieldKey = buildFieldIdentity(distilled[0]!.field.descriptor).fieldKey;
+    const plan = buildExecutionPlan(compileResume(createSampleResumeFacts()), distilled, {
+      llmProposals: new Map([[fieldKey, { targetPathTemplate: 'basic.gender', confidence: 0.99 }]]) });
+    expect(plan.executable).toHaveLength(0);
+    expect(plan.mappings[0]?.reason).toBe('ROUTE_CONTEXT_MISMATCH');
+  });
+
+  it.each(['llm', 'memory', 'cache'] as const)('未知 textarea 的 %s 简介映射必须审核', (source) => {
+    document.body.innerHTML = '<label>谈谈你的优势<textarea name="answer"></textarea></label>';
+    const distilled = distillElements(scanFormElements(document));
+    const field = distilled[0]!.field;
+    const fieldKey = buildFieldIdentity(field.descriptor).fieldKey;
+    const fingerprint = fingerprintInputFor('jobs.test', { ...field, fieldKey });
+    const cache = new FingerprintCache();
+    const memory = new MappingMemory();
+    if (source === 'cache') cache.record(fingerprint, 'basic.intro');
+    if (source === 'memory') memory.recordUserChoice(fingerprint, 'basic.intro');
+    const plan = buildExecutionPlan(compileResume(createSampleResumeFacts()), distilled, { cache, memory, host: 'jobs.test',
+      ...(source === 'llm' ? { llmProposals: new Map([[fieldKey, { targetPathTemplate: 'basic.intro', confidence: 0.99 }]]) } : {}) });
+    expect(plan.executable).toHaveLength(0);
+    expect(plan.mappings[0]?.source).toBe(source);
+    expect(plan.mappings[0]?.reason).toBe('DRAFT_REQUIRES_CONFIRMATION');
+    expect(plan.cacheCandidates).toHaveLength(0);
+  });
+
+  it('已识别主观题区块的个人简介规则也必须先审核', () => {
+    document.body.innerHTML = '<section><h2>主观题</h2><label>个人简介<textarea name="answer"></textarea></label></section>';
+    const plan = planForCurrentDom();
+    expect(plan.executable).toHaveLength(0);
+    expect(plan.mappings[0]?.reason).toBe('DRAFT_REQUIRES_CONFIRMATION');
   });
 });
