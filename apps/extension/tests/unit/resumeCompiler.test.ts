@@ -86,9 +86,11 @@ describe('compileResume', () => {
     const projection = compiled.projections.projects?.[0];
     expect(projection?.resumeEntryId).toBe(facts.projects?.[0]?.id);
     expect(projection?.title).toBe(facts.projects?.[0]?.name.value);
-    expect(projection?.one_liner.length).toBe(50);
-    expect(projection?.summary_150.length).toBe(150);
-    expect(projection?.full_description).toBe(facts.projects?.[0]?.description?.value);
+    expect(projection?.one_liner).toContain('真实项目描述');
+    expect(projection?.one_liner.length).toBeLessThanOrEqual(50);
+    expect(projection?.summary_150).toContain('真实项目描述');
+    expect(projection?.full_description).toContain('项目背景：真实项目描述');
+    expect(projection?.full_description).toContain('职责：前端负责人');
     expect(projection?.outcomes).toBe('');
     expect(projection?.sourceFactPaths).toContain('projects[0].description');
     expect(JSON.stringify(facts)).toBe(before);

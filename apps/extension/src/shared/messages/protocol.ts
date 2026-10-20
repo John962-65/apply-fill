@@ -1,4 +1,5 @@
 import type { LlmFieldRef, LlmProviderConfig } from '../contracts/llm';
+import type { ResumeAiConfig, ResumeAiConfigView, ResumeAiExtractionResponse } from '../contracts/resumeAi';
 import type { ResumeFactsDocument } from '../contracts/resume';
 import type { RunEvent, RunSummary, SessionRunState } from '../contracts/run';
 import type { CacheMutation, MemoryMutation } from '../contracts/routing';
@@ -23,6 +24,7 @@ export type BackgroundMessage =
   | { type: 'GET_COMPILED_RESUME'; runId?: string }
   | { type: 'GET_RESUME_STATUS' }
   | { type: 'IMPORT_RESUME'; facts: ResumeFactsDocument; label?: string }
+  | { type: 'SAVE_RESUME_REVIEW'; facts: ResumeFactsDocument }
   | { type: 'CLEAR_RESUME' }
   | { type: 'LIST_RESUME_VERSIONS' }
   | { type: 'ACTIVATE_RESUME_VERSION'; id: string }
@@ -57,7 +59,10 @@ export type BackgroundMessage =
   | { type: 'GET_LLM_CONFIG' }
   | { type: 'SET_LLM_CONFIG'; config: Partial<LlmProviderConfig> }
   | { type: 'LLM_TEST_CONNECTION' }
-  | { type: 'LLM_ROUTE_FIELDS'; fields: LlmFieldRef[]; runId?: string };
+  | { type: 'LLM_ROUTE_FIELDS'; fields: LlmFieldRef[]; runId?: string }
+  | { type: 'GET_RESUME_AI_CONFIG' }
+  | { type: 'SET_RESUME_AI_CONFIG'; config: Partial<ResumeAiConfig> }
+  | { type: 'RESUME_EXTRACT_TEXT'; text: string; pageCount?: number; layout?: 'single-column' | 'two-column' | 'table' | 'mixed' };
 
 export interface AttachmentInfo {
   name: string;
@@ -90,6 +95,15 @@ export interface SimpleAck {
   url?: string;
   title?: string;
 }
+
+export interface ResumeAiConfigResponse {
+  ok: boolean;
+  config?: ResumeAiConfigView;
+  message?: string;
+  error?: string;
+}
+
+export type ResumeExtractionMessageResponse = ResumeAiExtractionResponse;
 
 export interface ResumeStatusInfo {
   hasResume: boolean;
@@ -159,6 +173,7 @@ const BACKGROUND_MESSAGE_TYPES = new Set<string>([
   'GET_COMPILED_RESUME',
   'GET_RESUME_STATUS',
   'IMPORT_RESUME',
+  'SAVE_RESUME_REVIEW',
   'CLEAR_RESUME',
   'LIST_RESUME_VERSIONS', 'ACTIVATE_RESUME_VERSION', 'DELETE_RESUME_VERSION',
   'RUN_EVENT',
@@ -180,6 +195,9 @@ const BACKGROUND_MESSAGE_TYPES = new Set<string>([
   'SET_LLM_CONFIG',
   'LLM_TEST_CONNECTION',
   'LLM_ROUTE_FIELDS',
+  'GET_RESUME_AI_CONFIG',
+  'SET_RESUME_AI_CONFIG',
+  'RESUME_EXTRACT_TEXT',
 ]);
 
 function hasKnownType(value: unknown, known: Set<string>): boolean {

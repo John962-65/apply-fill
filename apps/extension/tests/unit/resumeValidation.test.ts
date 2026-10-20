@@ -18,7 +18,7 @@ describe('resume import validation', () => {
     expect(() => validateResumeFacts(facts)).toThrow('日期无效');
     facts.basic.birthDate!.value = '2024-02-29';
     const input = JSON.parse(JSON.stringify(facts));
-    input.basic.phone.verified = 'yes';
+    input.basic.phone.reviewStatus = 'maybe';
     expect(() => validateResumeFacts(input)).toThrow('basic.phone');
   });
 

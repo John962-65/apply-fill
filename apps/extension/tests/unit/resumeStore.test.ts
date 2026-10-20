@@ -37,7 +37,7 @@ describe('resumeStore', () => {
 
   it('recompiles older stored exports from their original facts when the compiler changes', async () => {
     await clearCompiledResume();
-    const facts = createSampleResumeFacts(); facts.education[0]!.gpa = { value: '3.6/4.0', source: 'user', verified: true, updatedAt: 1 };
+    const facts = createSampleResumeFacts(); facts.education[0]!.gpa = { value: '3.6/4.0', source: 'user', verified: true, reviewStatus: 'confirmed', updatedAt: 1 };
     const old = compileResume(facts, 42); delete old.compilerVersion; delete old.normalized.education[0]!.gpa;
     await new Promise<void>((resolve, reject) => {
       const request = indexedDB.open('applyfill', 1);
@@ -48,6 +48,30 @@ describe('resumeStore', () => {
       request.onerror = () => reject(request.error);
     });
     expect((await loadCompiledResume())?.normalized.education[0]?.gpa).toBe('3.6/4.0');
+    await clearCompiledResume();
+  });
+
+  it('legacy verified facts migrate to pending and never auto-fill without review', async () => {
+    await clearCompiledResume();
+    const facts = createSampleResumeFacts() as unknown as Record<string, unknown>;
+    facts.schemaVersion = 1;
+    const education = facts.education as Array<Record<string, unknown>>;
+    education[0]!.gpa = { value: '3.6/4.0', source: 'user', verified: true, updatedAt: 1 };
+    delete (education[0]!.gpa as Record<string, unknown>).reviewStatus;
+    const old = { ...compileResume(createSampleResumeFacts(), 42), facts, schemaVersion: 1, compilerVersion: 1 };
+    await new Promise<void>((resolve, reject) => {
+      const request = indexedDB.open('applyfill', 1);
+      request.onsuccess = () => {
+        const db = request.result; const tx = db.transaction('resumes', 'readwrite'); tx.objectStore('resumes').put(old, 'current');
+        tx.oncomplete = () => { db.close(); resolve(); }; tx.onerror = () => reject(tx.error);
+      };
+      request.onerror = () => reject(request.error);
+    });
+    const loaded = await loadCompiledResume();
+    expect(loaded?.normalized.education[0]?.gpa).toBeUndefined();
+    const gpa = loaded?.facts.education[0]?.gpa;
+    expect(gpa?.reviewStatus).toBe('pending');
+    expect(gpa?.verified).toBe(false);
     await clearCompiledResume();
   });
 

@@ -2,6 +2,7 @@ interface Fact<T> {
   value: T;
   source: 'user';
   verified: boolean;
+  reviewStatus: 'confirmed';
   updatedAt: number;
 }
 
@@ -34,12 +35,13 @@ const fact = <T>(value: T): Fact<T> => ({
   value,
   source: 'user',
   verified: true,
+  reviewStatus: 'confirmed' as const,
   updatedAt: 1750000000000,
 });
 
 function base(): ResumeFactsShape {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     updatedAt: 1750000000000,
     basic: {
       name: fact('张三'),

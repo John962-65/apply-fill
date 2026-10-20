@@ -6,6 +6,7 @@ export function sampleFact<T>(value: T): ResumeFact<T> {
     value,
     source: 'user',
     verified: true,
+    reviewStatus: 'confirmed',
     updatedAt: Date.now(),
   };
 }

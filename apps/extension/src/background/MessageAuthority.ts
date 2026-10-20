@@ -6,7 +6,7 @@ type CallerPolicy = 'internal' | 'extension' | 'document' | 'run' | 'task-owner'
 export const MESSAGE_POLICIES: Record<BackgroundMessage['type'], CallerPolicy> = {
   PING: 'internal', FRAME_HELLO: 'document',
   GET_COMPILED_RESUME: 'extension-or-run', GET_ATTACHMENT: 'extension-or-run',
-  GET_RESUME_STATUS: 'extension', IMPORT_RESUME: 'extension', CLEAR_RESUME: 'extension',
+  GET_RESUME_STATUS: 'extension', IMPORT_RESUME: 'extension', SAVE_RESUME_REVIEW: 'extension', CLEAR_RESUME: 'extension',
   LIST_RESUME_VERSIONS: 'extension', ACTIVATE_RESUME_VERSION: 'extension', DELETE_RESUME_VERSION: 'extension',
   GET_ACTIVE_TAB_INFO: 'extension', RUN_COORDINATED: 'extension-or-document', RUN_CANCEL: 'extension',
   CHECK_RUN_AUTH: 'run', LOAD_ROUTING: 'run', FLUSH_ROUTING: 'run',
@@ -18,6 +18,7 @@ export const MESSAGE_POLICIES: Record<BackgroundMessage['type'], CallerPolicy> =
   UPLOAD_ATTACHMENT: 'extension', INJECT_CONTENT_SCRIPT: 'extension', BIND_TARGET_TAB: 'extension',
   CHECK_TAB_PERMISSION: 'extension', AUTHORIZE_TAB: 'extension',
   GET_LLM_CONFIG: 'extension', SET_LLM_CONFIG: 'extension', LLM_TEST_CONNECTION: 'extension', LLM_ROUTE_FIELDS: 'run',
+  GET_RESUME_AI_CONFIG: 'extension', SET_RESUME_AI_CONFIG: 'extension', RESUME_EXTRACT_TEXT: 'extension',
 };
 
 export function isExtensionPage(sender: chrome.runtime.MessageSender): boolean {

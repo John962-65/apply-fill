@@ -59,7 +59,7 @@ test('PDF 简历：本地解析出结构化预览，确认后写入三层知识�
     });
 
     await workbench.getByTestId('parse-attachment').click();
-    await expect(workbench.getByTestId('parse-notice')).toContainText('已提取', { timeout: 20000 });
+    await expect(workbench.getByTestId('parse-notice')).toContainText('提取', { timeout: 20000 });
     await expect(workbench.getByTestId('parse-preview')).toBeVisible();
 
     const stats = workbench.getByTestId('parse-stats');
@@ -74,14 +74,28 @@ test('PDF 简历：本地解析出结构化预览，确认后写入三层知识�
     expect(preview).toContain('13800001111');
     expect(preview).toContain('ACME Technology Co.');
 
+    await workbench.getByTestId('review-confirm-basic.name').click();
+    await workbench.getByTestId('review-confirm-group-education-0').click();
+    await workbench.getByTestId('review-confirm-group-work-0').click();
+    await workbench.getByTestId('review-confirm-group-projects-0').click();
+    await workbench.getByTestId('review-confirm-group-skills-0').click();
     await workbench.getByTestId('parse-confirm').click();
-    await expect(workbench.getByTestId('parse-notice')).toContainText('已确认导入', { timeout: 15000 });
+    await expect(workbench.getByTestId('parse-notice')).toContainText('待审核草稿', { timeout: 15000 });
     await expect(workbench.locator('body')).toContainText('已导入：ZhangSan');
 
+    const partiallyNormalized = workbench.locator('pre');
+    await expect(partiallyNormalized).toContainText('"school": "Example University"');
+    await expect(partiallyNormalized).toContainText('"company": "ACME Technology Co."');
+    await expect(partiallyNormalized).not.toContainText('TypeScript');
+
+    await workbench.getByTestId('review-confirm-group-skills-1').click();
+    await workbench.getByTestId('review-confirm-group-skills-2').click();
+    await workbench.getByTestId('review-confirm-group-skills-3').click();
+    await workbench.getByTestId('review-save').click();
+    await expect(workbench.getByTestId('review-panel')).toContainText('已确认', { timeout: 15000 });
+
     const normalized = workbench.locator('pre');
-    await expect(normalized).toContainText('"school": "Example University"');
-    await expect(normalized).toContainText('"company": "ACME Technology Co."');
-    await expect(normalized).toContainText('"skills"');
+    await expect(normalized).toContainText('TypeScript');
   } finally {
     await session.close();
   }

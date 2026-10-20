@@ -1,5 +1,7 @@
 import type { LlmFieldRef, LlmProviderConfig } from '@/shared/contracts/llm';
 import { toLlmConfigView } from '@/shared/contracts/llm';
+import type { ResumeAiConfig } from '@/shared/contracts/resumeAi';
+import { toResumeAiConfigView } from '@/shared/contracts/resumeAi';
 import type { RunEvent, RunSummary } from '@/shared/contracts/run';
 import type {
   ActiveTabInfo,
@@ -14,15 +16,17 @@ import type {
 } from '@/shared/messages/protocol';
 import type { PanelCommandResponse } from '@/shared/messages/protocol';
 import { compileResume } from '@/resume/compiler';
+import { validateResumeDraft } from '@/resume/schema/validate';
 import { validateResumeFacts } from '@/resume/schema/validate';
 import { loadAttachment } from '@/resume/storage/attachmentStore';
-import { activateResumeVersion, clearCompiledResume, deleteResumeVersion, listResumeVersions, loadCompiledResume, saveCompiledResume } from '@/resume/storage/resumeStore';
+import { activateResumeVersion, clearCompiledResume, deleteResumeVersion, listResumeVersions, loadCompiledResume, saveCompiledResume, updateActiveCompiledResume } from '@/resume/storage/resumeStore';
 import { hostPermissionPattern } from '@/shared/utils';
 import { encodeBytes } from '@/shared/utils/binary';
 import { isRunEvent, isRunSummary } from '@/shared/messages/validateRun';
 
 import { FrameRegistry } from './FrameRegistry';
 import { LLMGateway } from './LLMGateway';
+import { ResumeExtractionService } from './ResumeExtractionService';
 import { MessageRouter } from './MessageRouter';
 import { createMessageAuthority, isExtensionPage } from './MessageAuthority';
 import { SessionStore } from './SessionStore';
@@ -636,6 +640,15 @@ export function installBackgroundRuntime(): void {
     return { ok: true, compiledAt: compiled.compiledAt };
   }));
 
+  router.register('SAVE_RESUME_REVIEW', async (message) => mutateResume(async () => {
+    const facts = validateResumeDraft((message as { facts?: unknown }).facts);
+    const compiled = compileResume(facts);
+    const current = await loadCompiledResume();
+    if (current === null) await saveCompiledResume(compiled, '审核草稿');
+    else await updateActiveCompiledResume(compiled);
+    return { ok: true, compiledAt: compiled.compiledAt, fillability: compiled.fillability };
+  }));
+
   router.register('CLEAR_RESUME', async () => mutateResume(async () => {
     await clearCompiledResume();
     return { ok: true };
@@ -750,6 +763,7 @@ export function installBackgroundRuntime(): void {
   });
 
   const llmGateway = new LLMGateway();
+  const resumeExtractionService = new ResumeExtractionService();
 
   router.register('GET_LLM_CONFIG', async () => {
     const config = await llmGateway.loadConfig();
@@ -769,6 +783,39 @@ export function installBackgroundRuntime(): void {
   router.register('LLM_TEST_CONNECTION', async (_message, sender) => {
     if (!isExtensionPage(sender)) return { ok: false, error: 'TRUSTED_CONTEXT_REQUIRED' };
     return llmGateway.testConnection();
+  });
+
+  router.register('GET_RESUME_AI_CONFIG', async () => {
+    const config = await resumeExtractionService.loadConfig();
+    return { ok: true, config: toResumeAiConfigView(config) };
+  });
+
+  router.register('SET_RESUME_AI_CONFIG', async (message, sender) => {
+    if (!isExtensionPage(sender)) return { ok: false, error: 'TRUSTED_CONTEXT_REQUIRED' };
+    const patch = (message as { config?: unknown }).config;
+    if (patch === null || typeof patch !== 'object') {
+      return { ok: false, message: '配置格式无效' };
+    }
+    const saved = await resumeExtractionService.saveConfig(patch as Partial<ResumeAiConfig>);
+    return { ok: true, config: toResumeAiConfigView(saved) };
+  });
+
+  router.register('RESUME_EXTRACT_TEXT', async (message, sender) => {
+    if (!isExtensionPage(sender)) return { ok: false, error: 'TRUSTED_CONTEXT_REQUIRED' };
+    const text = (message as { text?: unknown }).text;
+    if (typeof text !== 'string') return { ok: false, error: 'NO_RESUME_TEXT' };
+    const result = await resumeExtractionService.extract(text);
+    if (result.ok && result.facts !== undefined) {
+      const pageCount = (message as { pageCount?: unknown }).pageCount;
+      const layout = (message as { layout?: unknown }).layout;
+      result.facts.extraction = {
+        ...(result.facts.extraction ?? { engine: 'llm' }),
+        engine: 'llm',
+        ...(typeof pageCount === 'number' && Number.isInteger(pageCount) && pageCount > 0 ? { pageCount } : {}),
+        ...(layout === 'single-column' || layout === 'two-column' || layout === 'table' || layout === 'mixed' ? { layout } : {}),
+      };
+    }
+    return result;
   });
 
   router.register('LLM_ROUTE_FIELDS', async (message, sender) => {

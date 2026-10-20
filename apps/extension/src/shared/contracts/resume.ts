@@ -1,13 +1,37 @@
-export const RESUME_SCHEMA_VERSION = 1;
-export const RESUME_COMPILER_VERSION = 2;
+export const RESUME_SCHEMA_VERSION = 2;
+export const RESUME_COMPILER_VERSION = 3;
 
 export type FactSource = 'user' | 'resume-import' | 'verified-document';
+export type FactReviewStatus = 'pending' | 'confirmed' | 'rejected';
+export type ResumeExtractionEngine = 'rule' | 'llm';
+
+export interface FactEvidence {
+  text: string;
+  page?: number;
+  section?: string;
+  line?: number;
+  blockId?: string;
+  startOffset?: number;
+  endOffset?: number;
+}
 
 export interface ResumeFact<T> {
   value: T;
   source: FactSource;
+  /** Legacy mirror. New code must use reviewStatus; true only after field-level confirmation. */
   verified: boolean;
+  reviewStatus?: FactReviewStatus;
+  confidence?: number;
+  evidence?: FactEvidence[];
   updatedAt: number;
+}
+
+export interface ResumeExtractionMeta {
+  engine: ResumeExtractionEngine;
+  textHash?: string;
+  pageCount?: number;
+  layout?: 'single-column' | 'two-column' | 'table' | 'mixed';
+  warnings?: string[];
 }
 
 export interface BasicFacts {
@@ -79,6 +103,40 @@ export interface ResumeFactsDocument {
   skills?: SkillFacts[];
   preferences: PreferenceFacts;
   updatedAt: number;
+  extraction?: ResumeExtractionMeta;
+  review?: {
+    updatedAt: number;
+    lastPath?: string;
+  };
+}
+
+export type FillabilityReason =
+  | 'PATH_NOT_FOUND'
+  | 'FACT_NOT_CONFIRMED'
+  | 'FACT_REJECTED'
+  | 'EMPTY_VALUE'
+  | 'TYPE_MISMATCH'
+  | 'DATE_PRECISION_INSUFFICIENT'
+  | 'DERIVED_TEXT_INVALID'
+  | 'REQUIRED_FACT_MISSING';
+
+export interface FieldFillability {
+  path: string;
+  fillable: boolean;
+  reason?: FillabilityReason;
+  value?: unknown;
+  factPaths: string[];
+}
+
+export interface FillabilityReport {
+  ok: boolean;
+  compilerVersion: number;
+  checkedAt: number;
+  confirmedFields: number;
+  pendingFields: number;
+  rejectedFields: number;
+  fields: FieldFillability[];
+  issues: Array<{ path: string; reason: FillabilityReason; detail?: string }>;
 }
 
 export interface DateAtom {
@@ -163,6 +221,12 @@ export interface Projections {
   projects?: ProjectProjection[];
 }
 
+export interface ProjectDerivation {
+  field: 'background' | 'responsibilities' | 'technicalMethods' | 'outcomes';
+  text: string;
+  factPath: string;
+}
+
 export interface ProjectProjection {
   resumeEntryId: string;
   title: string;
@@ -171,8 +235,15 @@ export interface ProjectProjection {
   responsibilities: string;
   outcomes: string;
   full_description: string;
+  background?: string;
+  technicalMethods?: string;
   keywords: string[];
   sourceFactPaths: string[];
+  derivations?: ProjectDerivation[];
+  consistency?: {
+    ok: boolean;
+    issues: string[];
+  };
 }
 
 export interface CompiledResume {
@@ -181,6 +252,7 @@ export interface CompiledResume {
   facts: ResumeFactsDocument;
   normalized: NormalizedResume;
   projections: Projections;
+  fillability?: FillabilityReport;
   compiledAt: number;
 }
 

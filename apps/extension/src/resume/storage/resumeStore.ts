@@ -1,6 +1,7 @@
 import type { CompiledResume, ResumeVersionInfo } from '@/shared/contracts/resume';
-import { RESUME_COMPILER_VERSION } from '@/shared/contracts/resume';
+import { RESUME_COMPILER_VERSION, RESUME_SCHEMA_VERSION } from '@/shared/contracts/resume';
 import { validateResumeFacts } from '../schema/validate';
+import { migrateResumeFacts } from '../review/facts';
 import { createId } from '@/shared/utils/id';
 import { compileResume } from '../compiler/compile';
 
@@ -75,10 +76,38 @@ export function saveCompiledResume(document: CompiledResume, label?: string): Pr
   }).then(() => undefined);
 }
 
+function upgradeStored(value: CompiledResume): CompiledResume {
+  if (value.compilerVersion === RESUME_COMPILER_VERSION && value.schemaVersion === RESUME_SCHEMA_VERSION &&
+    value.facts.schemaVersion === RESUME_SCHEMA_VERSION && value.fillability !== undefined) {
+    return value;
+  }
+  return compileResume(validateResumeFacts(migrateResumeFacts(value.facts)));
+}
+
 export function loadCompiledResume(): Promise<CompiledResume | null> {
   return withStore<CompiledResume | undefined>('readonly', (store) => store.get(CURRENT_KEY)).then(
-    (value) => value === undefined ? null : value.compilerVersion !== RESUME_COMPILER_VERSION ? compileResume(validateResumeFacts(value.facts)) : value,
+    (value) => value === undefined ? null : upgradeStored(value),
   );
+}
+
+export function updateActiveCompiledResume(document: CompiledResume): Promise<void> {
+  return withStore('readwrite', (store) => {
+    const request = store.get(ACTIVE_KEY);
+    request.onsuccess = () => {
+      const activeId = request.result;
+      store.put(document, CURRENT_KEY);
+      if (typeof activeId === 'string') {
+        const versionRequest = store.get(`${VERSION_PREFIX}${activeId}`);
+        versionRequest.onsuccess = () => {
+          const version = versionRequest.result as ResumeVersion | undefined;
+          if (version !== undefined && isVersion(version)) {
+            store.put({ ...version, document }, `${VERSION_PREFIX}${activeId}`);
+          }
+        };
+      }
+    };
+    return request;
+  }).then(() => undefined);
 }
 
 export function clearCompiledResume(): Promise<void> {

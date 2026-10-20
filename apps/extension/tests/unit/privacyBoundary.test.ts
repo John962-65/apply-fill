@@ -5,7 +5,10 @@ import { describe, expect, it } from 'vitest';
 
 const SRC_DIR = path.resolve(process.cwd(), 'src');
 
-const ALLOWED_FETCH_FILES = new Set([path.join('background', 'ModelProvider.ts')]);
+const ALLOWED_FETCH_FILES = new Set([
+  path.join('background', 'ModelProvider.ts'),
+  path.join('resume', 'extraction', 'resumeExtractionAgent.ts'),
+]);
 
 const FORBIDDEN_PATTERNS: Array<{ name: string; pattern: RegExp; allowlistedFile?: boolean }> = [
   { name: 'fetch', pattern: /\bfetch\s*\(/, allowlistedFile: true },
@@ -29,7 +32,7 @@ function collectSourceFiles(dir: string): string[] {
 }
 
 describe('本地隐私边界', () => {
-  it('网络出口 API 仅允许出现在 background/ModelProvider.ts（用户主动开启的 LLM 通道）', () => {
+  it('网络出口 API 仅允许出现在用户主动开启的模型通道', () => {
     const violations: string[] = [];
     for (const file of collectSourceFiles(SRC_DIR)) {
       const relative = path.relative(SRC_DIR, file);

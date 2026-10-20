@@ -9,7 +9,7 @@ test('三段工作经历扩容、年月填写、重排和重绘不串写', async
     const page = await session.context.newPage();
     await page.goto(`${TESTBED_URL}/react-work.html`);
     const workbench = await openWorkbench(session.context, session.extensionId);
-    const fact = (value: string) => ({ value, source: 'user' as const, verified: true, updatedAt: 1 });
+    const fact = (value: string) => ({ value, source: 'user' as const, verified: true, reviewStatus: 'confirmed' as const, updatedAt: 1 });
     const work = ['甲公司', '乙公司', '丙公司'].map((name, index) => ({
       id: `work.${index}`, company: fact(name), role: fact(`职位${index}`), description: fact(`真实工作内容${index}`),
       startDate: fact(`${2020 + index}-03`), endDate: fact(`${2021 + index}-06`),

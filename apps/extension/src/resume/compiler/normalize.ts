@@ -15,27 +15,37 @@ import type {
 } from '@/shared/contracts/resume';
 import { parseDateAtom } from '@/shared/utils/date';
 
+import { isConfirmedFact } from '../review/facts';
+
 export { parseDateAtom };
 
-function requireFactValue<T>(fact: ResumeFact<T> | undefined): T | undefined {
-  if (fact === undefined) {
+function confirmedValue<T>(fact: ResumeFact<T> | undefined): T | undefined {
+  if (fact === undefined || !isConfirmedFact(fact as ResumeFact<unknown>)) {
     return undefined;
   }
-  return fact.value;
+  const value = fact.value;
+  if (typeof value === 'string' && value.trim() === '') {
+    return undefined;
+  }
+  if (Array.isArray(value) && value.length === 0) {
+    return undefined;
+  }
+  return value;
 }
 
 function normalizeEducationEntry(facts: EducationFacts): EducationEntry {
-  const startRaw = requireFactValue(facts.startDate);
-  const endRaw = requireFactValue(facts.endDate);
+  const startRaw = confirmedValue(facts.startDate);
+  const endRaw = confirmedValue(facts.endDate);
   const startParsed = startRaw === undefined ? undefined : parseDateAtom(startRaw);
   const endParsed = endRaw === undefined ? undefined : parseDateAtom(endRaw);
   const entry: EducationEntry = {
     id: facts.id,
-    school: facts.school.value,
-    degree: facts.degree.value,
+    school: confirmedValue(facts.school) ?? '',
+    degree: confirmedValue(facts.degree) ?? '',
   };
-  const major = requireFactValue(facts.major);
-  if (facts.gpa !== undefined) entry.gpa = facts.gpa.value;
+  const major = confirmedValue(facts.major);
+  const gpa = confirmedValue(facts.gpa);
+  if (gpa !== undefined) entry.gpa = gpa;
   if (major !== undefined) {
     entry.major = major;
   }
@@ -49,16 +59,16 @@ function normalizeEducationEntry(facts: EducationFacts): EducationEntry {
 }
 
 function normalizeWorkEntry(facts: WorkFacts): WorkEntry {
-  const startRaw = requireFactValue(facts.startDate);
-  const endRaw = requireFactValue(facts.endDate);
+  const startRaw = confirmedValue(facts.startDate);
+  const endRaw = confirmedValue(facts.endDate);
   const startParsed = startRaw === undefined ? undefined : parseDateAtom(startRaw);
   const endParsed = endRaw === undefined ? undefined : parseDateAtom(endRaw);
   const entry: WorkEntry = {
     id: facts.id,
-    company: facts.company.value,
+    company: confirmedValue(facts.company) ?? '',
   };
-  const role = requireFactValue(facts.role);
-  const description = requireFactValue(facts.description);
+  const role = confirmedValue(facts.role);
+  const description = confirmedValue(facts.description);
   if (role !== undefined) {
     entry.role = role;
   }
@@ -77,10 +87,10 @@ function normalizeWorkEntry(facts: WorkFacts): WorkEntry {
 function normalizeSkillEntry(facts: SkillFacts): SkillEntry {
   const entry: SkillEntry = {
     id: facts.id,
-    name: facts.name.value,
+    name: confirmedValue(facts.name) ?? '',
   };
-  const category = requireFactValue(facts.category);
-  const level = requireFactValue(facts.level);
+  const category = confirmedValue(facts.category);
+  const level = confirmedValue(facts.level);
   if (category !== undefined) {
     entry.category = category;
   }
@@ -91,19 +101,19 @@ function normalizeSkillEntry(facts: SkillFacts): SkillEntry {
 }
 
 function normalizeProjectEntry(facts: ProjectFacts): ProjectEntry {
-  const startRaw = requireFactValue(facts.startDate);
-  const endRaw = requireFactValue(facts.endDate);
+  const startRaw = confirmedValue(facts.startDate);
+  const endRaw = confirmedValue(facts.endDate);
   const startParsed = startRaw === undefined ? undefined : parseDateAtom(startRaw);
   const endParsed = endRaw === undefined ? undefined : parseDateAtom(endRaw);
   const entry: ProjectEntry = {
     id: facts.id,
-    name: facts.name.value,
+    name: confirmedValue(facts.name) ?? '',
   };
-  const role = requireFactValue(facts.role);
-  const description = requireFactValue(facts.description);
-  const responsibilities = requireFactValue(facts.responsibilities);
-  const outcomes = requireFactValue(facts.outcomes);
-  const keywords = requireFactValue(facts.keywords);
+  const role = confirmedValue(facts.role);
+  const description = confirmedValue(facts.description);
+  const responsibilities = confirmedValue(facts.responsibilities);
+  const outcomes = confirmedValue(facts.outcomes);
+  const keywords = confirmedValue(facts.keywords);
   if (responsibilities !== undefined) entry.responsibilities = responsibilities;
   if (outcomes !== undefined) entry.outcomes = outcomes;
   if (keywords !== undefined) entry.keywords = [...keywords];
@@ -123,28 +133,30 @@ function normalizeProjectEntry(facts: ProjectFacts): ProjectEntry {
 }
 
 export function normalizeResume(facts: ResumeFactsDocument): NormalizedResume {
-  const basic: NormalizedBasic = { name: facts.basic.name.value };
-  const phone = requireFactValue(facts.basic.phone);
-  const email = requireFactValue(facts.basic.email);
-  const gender = requireFactValue(facts.basic.gender);
-  const intro = requireFactValue(facts.basic.intro);
-  const birthRaw = requireFactValue(facts.basic.birthDate);
+  const basic: NormalizedBasic = { name: confirmedValue(facts.basic.name) ?? '' };
+  const phone = confirmedValue(facts.basic.phone);
+  const email = confirmedValue(facts.basic.email);
+  const gender = confirmedValue(facts.basic.gender);
+  const intro = confirmedValue(facts.basic.intro);
+  const birthRaw = confirmedValue(facts.basic.birthDate);
   if (phone !== undefined) basic.phone = phone;
   if (email !== undefined) basic.email = email;
   if (gender !== undefined) basic.gender = gender;
   if (intro !== undefined) basic.intro = intro;
-  const location = requireFactValue(facts.basic.location);
-  const city = requireFactValue(facts.basic.city);
-  const postalCode = requireFactValue(facts.basic.postalCode);
-  const idType = requireFactValue(facts.basic.idType);
-  const idExplanation = requireFactValue(facts.basic.idExplanation);
+  const location = confirmedValue(facts.basic.location);
+  const city = confirmedValue(facts.basic.city);
+  const postalCode = confirmedValue(facts.basic.postalCode);
+  const idType = confirmedValue(facts.basic.idType);
+  const idExplanation = confirmedValue(facts.basic.idExplanation);
   if (location !== undefined) basic.location = location;
   if (city !== undefined) basic.city = city;
   if (postalCode !== undefined) basic.postalCode = postalCode;
   if (idType !== undefined) basic.idType = idType;
   if (idExplanation !== undefined) basic.idExplanation = idExplanation;
-  if (facts.basic.awards !== undefined) basic.awards = facts.basic.awards.value;
-  if (facts.basic.additionalInfo !== undefined) basic.additionalInfo = facts.basic.additionalInfo.value;
+  const awards = confirmedValue(facts.basic.awards);
+  const additionalInfo = confirmedValue(facts.basic.additionalInfo);
+  if (awards !== undefined) basic.awards = awards;
+  if (additionalInfo !== undefined) basic.additionalInfo = additionalInfo;
   if (birthRaw !== undefined) {
     const parsed = parseDateAtom(birthRaw);
     if (parsed !== undefined && !('present' in parsed)) {
@@ -153,9 +165,9 @@ export function normalizeResume(facts: ResumeFactsDocument): NormalizedResume {
   }
 
   const preferences: NormalizedPreferences = {};
-  const salary = requireFactValue(facts.preferences.expectedSalary);
-  const freshGraduate = requireFactValue(facts.preferences.freshGraduate);
-  const subscribeNotifications = requireFactValue(facts.preferences.subscribeNotifications);
+  const salary = confirmedValue(facts.preferences.expectedSalary);
+  const freshGraduate = confirmedValue(facts.preferences.freshGraduate);
+  const subscribeNotifications = confirmedValue(facts.preferences.subscribeNotifications);
   if (salary !== undefined) preferences.expectedSalary = salary;
   if (freshGraduate !== undefined) preferences.freshGraduate = freshGraduate;
   if (subscribeNotifications !== undefined) preferences.subscribeNotifications = subscribeNotifications;

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { extractResumeFacts, markFactsVerified } from '@/resume/parser/resumeStructureExtractor';
+import { listReviewFields } from '@/resume/review/facts';
 
 const SAMPLE = `张伟
 性别：男
@@ -121,7 +122,7 @@ describe('extractResumeFacts', () => {
 describe('markFactsVerified', () => {
   it('确认导入时递归标记 verified 但保留来源与 id', () => {
     const { facts } = extractResumeFacts(SAMPLE, 1000);
-    const verified = markFactsVerified(facts);
+    const verified = markFactsVerified(facts, listReviewFields(facts).map((field) => field.path));
     expect(verified.basic.name.verified).toBe(true);
     expect(verified.education[0]?.school.verified).toBe(true);
     expect(verified.education[0]?.id).toBe('resume.education.1');

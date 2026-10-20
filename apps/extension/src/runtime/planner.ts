@@ -8,6 +8,7 @@ import { matchRule, normalizeForMatch, resolveResumePath, substituteIndex } from
 import { fingerprintInputFor } from '@/router/FingerprintCache';
 import { entryPathInfo, isOtherPersonContext, isRouteContextValid } from '@/router/RouteContext';
 import type { CompiledResume } from '@/shared/contracts/resume';
+import { checkPathFillability } from '@/resume/validation/fillability';
 import type { FieldMapping, FieldSignature, MappingIssue, SectionType } from '@/shared/contracts/field';
 import type { ReanchorStatus } from '@/shared/contracts/reanchor';
 
@@ -43,6 +44,7 @@ export interface PlanOptions {
 }
 
 interface MappingContext {
+  compiled: CompiledResume;
   routeSource: ResumeRouteSource;
   cache: FingerprintCache | undefined;
   memory: MappingMemory | undefined;
@@ -182,6 +184,27 @@ function mapField(ctx: MappingContext, item: DistilledElement, indexForPath: num
     ctx.issues.push({ fieldKey: signature.fieldKey, label: signature.label, kind: 'AMBIGUOUS', reason: 'LLM_SENSITIVE_REQUIRES_CONFIRMATION' });
     return;
   }
+  const fillability = checkPathFillability(ctx.compiled, targetPath, signature);
+  if (!fillability.ok) {
+    const reason = fillability.reason === 'FACT_NOT_CONFIRMED' ? 'FACT_NOT_CONFIRMED' :
+      fillability.reason === 'FACT_REJECTED' ? 'FACT_REJECTED' :
+      fillability.reason === 'DATE_PRECISION_INSUFFICIENT' ? 'DATE_PRECISION_INSUFFICIENT' :
+      fillability.reason === 'TYPE_MISMATCH' ? 'FACT_TYPE_MISMATCH' :
+      fillability.reason === 'DERIVED_TEXT_INVALID' ? 'DERIVED_TEXT_INVALID' :
+      fillability.reason === 'REQUIRED_FACT_MISSING' ? 'FACT_NOT_CONFIRMED' : 'RESUME_VALUE_MISSING';
+    ctx.issues.push({ label: signature.label, kind: 'NO_DATA', reason, fieldKey: signature.fieldKey });
+    ctx.mappings.push({
+      fieldKey: signature.fieldKey,
+      signature,
+      targetPath,
+      status: 'NO_DATA',
+      source,
+      confidence,
+      reason,
+    });
+    return;
+  }
+
   const resolved = resolveResumePath(ctx.routeSource, targetPath);
   if (!resolved.found) {
     ctx.issues.push({ label: signature.label, kind: 'NO_DATA', reason: 'RESUME_VALUE_MISSING', fieldKey: signature.fieldKey });
@@ -262,6 +285,7 @@ export function buildExecutionPlan(
   options: PlanOptions = {},
 ): ExecutionPlan {
   const ctx: MappingContext = {
+    compiled,
     routeSource: { normalized: compiled.normalized, projections: compiled.projections },
     cache: options.cache,
     memory: options.memory,

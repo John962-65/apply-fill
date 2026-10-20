@@ -14,7 +14,7 @@ test('项目中的通用职位标签使用各自项目角色，不套用工作�
     const page = await session.context.newPage();
     await page.goto(`${TESTBED_URL}/react-repeater.html?role=generic`);
     const workbench = await openWorkbench(session.context, session.extensionId);
-    const fact = (value: string) => ({ value, source: 'user', verified: true, updatedAt: 1 });
+    const fact = (value: string) => ({ value, source: 'user', verified: true, reviewStatus: 'confirmed' as const, updatedAt: 1 });
     await importFacts(workbench, { ...repeaterResumeFacts(), work: [{ id: 'work-other', company: fact('示例公司'), role: fact('不同的工作职位') }] });
     const response = await runAutofill(workbench);
     expect(response.ok, JSON.stringify(response)).toBe(true);

@@ -4,8 +4,9 @@ import type { ChangeEvent } from 'react';
 import { CORRECTIONS_KEY, JOB_CONTEXTS_KEY, JOB_VERSIONS_KEY } from '@/shared/contracts/context';
 import type { ApplicationContext, CorrectionResponse, JobContextResponse, JobVersion, UserCorrectionRecord } from '@/shared/contracts/context';
 import { extractPdfText } from '@/resume/parser/pdfText';
-import { extractResumeFacts, markFactsVerified } from '@/resume/parser/resumeStructureExtractor';
+import { extractResumeFacts } from '@/resume/parser/resumeStructureExtractor';
 import type { ResumeParseStats } from '@/resume/parser/resumeStructureExtractor';
+import { ReviewPanel } from './ReviewPanel';
 import { loadAttachment, saveAttachment } from '@/resume/storage/attachmentStore';
 import type {
   LlmConfigResponse,
@@ -13,9 +14,12 @@ import type {
   LlmProviderConfig,
   LlmTestConnectionResponse,
 } from '@/shared/contracts/llm';
+import type { ResumeAiConfig, ResumeAiConfigView } from '@/shared/contracts/resumeAi';
+import { resumeAiOriginOf } from '@/shared/contracts/resumeAi';
 import { llmBaseUrlOriginPattern } from '@/shared/contracts/llm';
 import type { CompiledResume, ResumeFactsDocument, ResumeVersionInfo } from '@/shared/contracts/resume';
-import type { ActiveTabInfo, CompiledResumeResponse, ResumeStatusInfo, SimpleAck, UploadAttachmentResponse } from '@/shared/messages/protocol';
+import { reviewSummary } from '@/resume/review/facts';
+import type { ActiveTabInfo, CompiledResumeResponse, ResumeAiConfigResponse, ResumeExtractionMessageResponse, ResumeStatusInfo, SimpleAck, UploadAttachmentResponse } from '@/shared/messages/protocol';
 import { createSampleResumeFacts } from '@/shared/samples/sampleResume';
 import { requestPermissionWithTimeout } from '@/shared/utils';
 
@@ -48,6 +52,15 @@ export function App() {
   const [parseNotice, setParseNotice] = useState('');
   const [parseStats, setParseStats] = useState<ResumeParseStats | null>(null);
   const [parseJson, setParseJson] = useState('');
+  const [reviewFacts, setReviewFacts] = useState<ResumeFactsDocument | null>(null);
+  const [reviewNotice, setReviewNotice] = useState('');
+  const [reviewBusy, setReviewBusy] = useState(false);
+  const [parsedSource, setParsedSource] = useState<{ text: string; pageCount: number; layout?: string } | null>(null);
+  const [resumeAiConfig, setResumeAiConfig] = useState<ResumeAiConfigView | null>(null);
+  const [resumeAiApiKey, setResumeAiApiKey] = useState('');
+  const [resumeAiNotice, setResumeAiNotice] = useState('');
+  const [extracting, setExtracting] = useState(false);
+  const [extractionWarnings, setExtractionWarnings] = useState<string[]>([]);
 
   const loadLlmConfig = useCallback(async () => {
     const response = (await chrome.runtime.sendMessage({ type: 'GET_LLM_CONFIG' })) as LlmConfigResponse;
@@ -57,6 +70,101 @@ export function App() {
   const patchLlmConfig = useCallback((patch: Partial<LlmConfigView>) => {
     setLlmConfig((prev) => (prev === null ? prev : { ...prev, ...patch }));
   }, []);
+
+  const loadResumeAiConfig = useCallback(async () => {
+    const response = (await chrome.runtime.sendMessage({ type: 'GET_RESUME_AI_CONFIG' })) as ResumeAiConfigResponse;
+    setResumeAiConfig(response?.config ?? null);
+  }, []);
+
+  const patchResumeAiConfig = useCallback((patch: Partial<ResumeAiConfigView>) => {
+    setResumeAiConfig((prev) => (prev === null ? prev : { ...prev, ...patch }));
+  }, []);
+
+  const saveResumeAiConfig = useCallback(async () => {
+    if (resumeAiConfig === null) return;
+    const patch: Partial<ResumeAiConfig> = {
+      mode: resumeAiConfig.mode,
+      enabled: resumeAiConfig.enabled,
+      baseUrl: resumeAiConfig.baseUrl,
+      model: resumeAiConfig.model,
+      temperature: resumeAiConfig.temperature,
+      timeoutMs: resumeAiConfig.timeoutMs,
+      maxRetries: resumeAiConfig.maxRetries,
+      ...(resumeAiConfig.authorizedOrigin !== undefined ? { authorizedOrigin: resumeAiConfig.authorizedOrigin } : {}),
+    };
+    if (resumeAiApiKey !== '') patch.apiKey = resumeAiApiKey;
+    const response = (await chrome.runtime.sendMessage({ type: 'SET_RESUME_AI_CONFIG', config: patch })) as ResumeAiConfigResponse;
+    if (response?.ok === true) {
+      setResumeAiConfig(response.config ?? null);
+      setResumeAiApiKey('');
+      setResumeAiNotice('简历解析配置已保存（与字段语义路由配置相互独立）');
+    } else {
+      setResumeAiNotice(`保存失败：${response?.message ?? response?.error ?? '未知错误'}`);
+    }
+  }, [resumeAiConfig, resumeAiApiKey]);
+
+  const authorizeResumeAiHost = useCallback(() => {
+    const origin = resumeAiOriginOf(resumeAiConfig?.baseUrl ?? '');
+    if (origin === undefined) {
+      setResumeAiNotice('请先填写有效的 Base URL（需为 HTTPS，本地调试可用 http://localhost）');
+      return;
+    }
+    const pattern = `${origin}/*`;
+    setResumeAiNotice(`正在申请 ${origin} 的简历解析授权，请确认浏览器弹窗…`);
+    void requestPermissionWithTimeout(chrome.permissions.request({ origins: [pattern] })).then(async (granted) => {
+      let verified = false;
+      if (granted) {
+        try { verified = await chrome.permissions.contains({ origins: [pattern] }); } catch { verified = false; }
+      }
+      if (!verified) {
+        setResumeAiNotice(`未获得 ${origin} 的授权，简历正文不会发送到模型服务`);
+        return;
+      }
+      const response = (await chrome.runtime.sendMessage({
+        type: 'SET_RESUME_AI_CONFIG',
+        config: { authorizedOrigin: origin },
+      })) as ResumeAiConfigResponse;
+      if (response?.ok === true) {
+        setResumeAiConfig(response.config ?? null);
+        setResumeAiNotice(`已授权 ${origin} 仅用于用户主动触发的简历结构化解析`);
+      } else {
+        setResumeAiNotice('授权已获得，但配置保存失败，请重试');
+      }
+    });
+  }, [resumeAiConfig]);
+
+  const extractWithResumeAi = useCallback(async () => {
+    if (parsedSource === null) {
+      setResumeAiNotice('请先选择并解析 PDF 附件');
+      return;
+    }
+    if (resumeAiConfig?.mode !== 'cloud' || resumeAiConfig.enabled !== true) {
+      setResumeAiNotice('当前为 Local-Only 模式，简历正文不会发送；请显式切换并授权云端解析');
+      return;
+    }
+    setExtracting(true);
+    setExtractionWarnings([]);
+    setResumeAiNotice('正在调用已授权模型进行分章节结构化提取…');
+    try {
+      const response = (await chrome.runtime.sendMessage({
+        type: 'RESUME_EXTRACT_TEXT',
+        text: parsedSource.text,
+        pageCount: parsedSource.pageCount,
+        ...(parsedSource.layout !== undefined ? { layout: parsedSource.layout } : {}),
+      })) as ResumeExtractionMessageResponse;
+      if (response?.ok === true && response.facts !== undefined) {
+        setReviewFacts(response.facts);
+        setParseJson(JSON.stringify(response.facts, null, 2));
+        setExtractionWarnings(response.warnings ?? []);
+        const summary = reviewSummary(response.facts);
+        setResumeAiNotice(`AI 结构化完成：${summary.total} 个字段待逐项确认（已丢弃无原文证据的字段）`);
+      } else {
+        setResumeAiNotice(`AI 解析失败：${response?.error ?? '未知错误'}`);
+      }
+    } finally {
+      setExtracting(false);
+    }
+  }, [parsedSource, resumeAiConfig]);
 
   const saveLlmConfig = useCallback(async () => {
     if (llmConfig === null) {
@@ -212,7 +320,9 @@ export function App() {
       chrome.runtime.sendMessage({ type: 'LIST_RESUME_VERSIONS' }) as Promise<{ versions?: ResumeVersionInfo[] }>, loadAttachment(),
     ]);
     if (revision !== resumeLoadRevision.current) return;
-    setStatus(info); setCompiled((response?.document as CompiledResume | null) ?? null);
+    const document = (response?.document as CompiledResume | null) ?? null;
+    setStatus(info); setCompiled(document);
+    setReviewFacts(document?.facts ?? null);
     setVersions(history?.versions ?? []); setAttachmentName(stored?.name ?? '');
   }, []);
 
@@ -221,7 +331,8 @@ export function App() {
     void loadCorrections();
     void loadJdContexts();
     void loadLlmConfig();
-  }, [refresh, loadCorrections, loadJdContexts, loadLlmConfig]);
+    void loadResumeAiConfig();
+  }, [refresh, loadCorrections, loadJdContexts, loadLlmConfig, loadResumeAiConfig]);
 
   useEffect(() => {
     const listener = (message: { type?: string }, sender: chrome.runtime.MessageSender) => {
@@ -312,30 +423,68 @@ export function App() {
       setParsing(false);
       return;
     }
-    const parsed = extractResumeFacts(textResult.text);
+    const parsed = extractResumeFacts(textResult.text, Date.now(), {
+      ...(textResult.lines !== undefined ? { lines: textResult.lines } : {}),
+      pageCount: textResult.pageCount,
+      ...(textResult.layout !== undefined ? { layout: textResult.layout } : {}),
+    });
     setParseStats(parsed.stats);
     setParseJson(JSON.stringify(parsed.facts, null, 2));
+    setReviewFacts(parsed.facts);
+    setParsedSource({
+      text: textResult.text,
+      pageCount: textResult.pageCount,
+      ...(textResult.layout !== undefined ? { layout: textResult.layout } : {}),
+    });
     setParseNotice(
-      `已提取 ${textResult.pageCount} 页文本（${textResult.text.replace(/\s/g, '').length} 字），请核对下方结果后确认导入`,
+      `已按${textResult.layout === 'two-column' ? '双栏' : textResult.layout === 'table' ? '表格' : '单栏'}阅读顺序提取 ${textResult.pageCount} 页文本（${textResult.text.replace(/\s/g, '').length} 字）。所有字段均需逐项确认，未确认内容不会进入自动填写。`,
     );
     setParsing(false);
   }, []);
 
-  const confirmParsedImport = useCallback(async () => {
-    if (parseJson.trim() === '') {
-      setParseNotice('没有可导入的解析结果');
+  const saveReview = useCallback(async () => {
+    if (reviewFacts === null) {
+      setReviewNotice('没有可保存的审核结果');
       return;
     }
+    setReviewBusy(true);
     try {
-      const facts = JSON.parse(parseJson) as ResumeFactsDocument;
-      const result = (await chrome.runtime.sendMessage({ type: 'IMPORT_RESUME', facts: markFactsVerified(facts) })) as {
+      const result = (await chrome.runtime.sendMessage({ type: 'SAVE_RESUME_REVIEW', facts: reviewFacts })) as {
         ok: boolean;
         error?: string;
       };
       if (result?.ok === true) {
-        setParseNotice('已确认导入并写入知识库');
+        setReviewNotice('审核结果已保存；待确认字段仍不会进入 Planner');
+        await refresh();
+      } else {
+        setReviewNotice(`保存失败：${result?.error ?? '未知错误'}`);
+      }
+    } finally {
+      setReviewBusy(false);
+    }
+  }, [reviewFacts, refresh]);
+
+  const confirmParsedImport = useCallback(async () => {
+    if (reviewFacts === null && parseJson.trim() === '') {
+      setParseNotice('没有可导入的解析结果');
+      return;
+    }
+    try {
+      const facts = reviewFacts ?? JSON.parse(parseJson) as ResumeFactsDocument;
+      const name = facts.basic.name?.value;
+      if (typeof name !== 'string' || name.trim() === '') {
+        setReviewFacts(facts);
+        setParseNotice('姓名为空：请先在下方审核区补全并确认姓名，再保存为草稿或导入');
+        return;
+      }
+      const result = (await chrome.runtime.sendMessage({ type: 'IMPORT_RESUME', facts, label: versionLabel })) as {
+        ok: boolean;
+        error?: string;
+      };
+      if (result?.ok === true) {
+        setParseNotice('已保存为待审核草稿；请在下方逐项确认后才可自动填写');
+        setReviewNotice('草稿已写入知识库，所有解析字段默认为待确认');
         setParseStats(null);
-        setParseJson('');
         await refresh();
       } else {
         setParseNotice(`导入失败：${result?.error ?? '未知错误'}`);
@@ -343,12 +492,20 @@ export function App() {
     } catch (error) {
       setParseNotice(`导入失败：${error instanceof Error ? error.message : String(error)}`);
     }
-  }, [parseJson, refresh]);
+  }, [parseJson, reviewFacts, refresh, versionLabel]);
 
   const cancelParse = useCallback(() => {
     setParseStats(null);
     setParseJson('');
+    setReviewFacts(compiled?.facts ?? null);
+    setParsedSource(null);
     setParseNotice('已取消本次解析结果');
+  }, [compiled]);
+
+  const changeReviewFacts = useCallback((next: ResumeFactsDocument) => {
+    setReviewFacts(next);
+    setParseJson(JSON.stringify(next, null, 2));
+    setReviewNotice('');
   }, []);
 
   const uploadAttachment = useCallback(async () => {
@@ -478,6 +635,15 @@ export function App() {
           </p>
         ) : null}
       </div>
+
+      <ReviewPanel
+        facts={reviewFacts}
+        compiled={compiled}
+        busy={reviewBusy}
+        notice={reviewNotice}
+        onChange={changeReviewFacts}
+        onSave={() => void saveReview()}
+      />
 
       <div className="card">
         <h2>字段修正记录（映射记忆确认）</h2>
@@ -620,6 +786,96 @@ export function App() {
           <p className="notice" data-testid="llm-notice">
             {llmNotice}
           </p>
+        ) : null}
+      </div>
+
+      <div className="card">
+        <h2>AI 简历结构化解析（独立授权 · 原始全文）</h2>
+        <p style={{ fontSize: 13 }}>
+          与上方字段语义路由完全独立：这里由你主动把 PDF 原文发送给模型，换取带原文引用的结构化字段。
+          默认 Local-Only；只有显式切换为云端、启用、保存配置并授权目标域名后，简历正文才会离开发送。
+          模型返回的每个字段仍必须通过本地原文引用校验，并逐项人工确认。
+        </p>
+        <label style={{ display: 'block', fontSize: 13, marginTop: 8 }}>
+          模式：
+          <select
+            data-testid="resume-ai-mode"
+            value={resumeAiConfig?.mode ?? 'local-only'}
+            onChange={(event) => {
+              const mode = event.target.value === 'cloud' ? 'cloud' : 'local-only';
+              patchResumeAiConfig({ mode, enabled: mode === 'cloud' ? (resumeAiConfig?.enabled ?? false) : false });
+            }}
+          >
+            <option value="local-only">Local-Only（禁止发送简历正文）</option>
+            <option value="cloud">云端解析（需授权）</option>
+          </select>
+        </label>
+        <label style={{ display: 'block', fontSize: 13, marginTop: 8 }}>
+          <input
+            data-testid="resume-ai-enabled"
+            type="checkbox"
+            checked={resumeAiConfig?.enabled ?? false}
+            disabled={resumeAiConfig?.mode !== 'cloud'}
+            onChange={(event) => patchResumeAiConfig({ enabled: event.target.checked })}
+          />{' '}
+          启用云端简历解析（默认关闭）
+        </label>
+        <div style={{ marginTop: 8 }}>
+          <input
+            data-testid="resume-ai-baseurl"
+            placeholder="Base URL（OpenAI 兼容，如 https://api.example.com/v1）"
+            style={{ width: '100%' }}
+            value={resumeAiConfig?.baseUrl ?? ''}
+            onChange={(event) => patchResumeAiConfig({ baseUrl: event.target.value })}
+          />
+        </div>
+        <div style={{ marginTop: 8 }}>
+          <input
+            data-testid="resume-ai-apikey"
+            type="password"
+            placeholder={resumeAiConfig?.hasApiKey === true ? 'API Key（已保存，留空保持不变）' : 'API Key（如服务端无需鉴权可留空）'}
+            style={{ width: '100%' }}
+            value={resumeAiApiKey}
+            onChange={(event) => setResumeAiApiKey(event.target.value)}
+          />
+        </div>
+        <div style={{ marginTop: 8 }}>
+          <input
+            data-testid="resume-ai-model"
+            placeholder="模型名称"
+            style={{ width: '100%' }}
+            value={resumeAiConfig?.model ?? ''}
+            onChange={(event) => patchResumeAiConfig({ model: event.target.value })}
+          />
+        </div>
+        <div style={{ marginTop: 10 }}>
+          <button data-testid="resume-ai-save" className="primary" onClick={() => void saveResumeAiConfig()}>
+            保存独立配置
+          </button>
+          <button data-testid="resume-ai-authorize" onClick={authorizeResumeAiHost}>
+            授权简历解析域名
+          </button>
+          <button
+            data-testid="resume-ai-extract"
+            disabled={extracting || parsedSource === null || resumeAiConfig?.mode !== 'cloud' || resumeAiConfig.enabled !== true}
+            onClick={() => void extractWithResumeAi()}
+          >
+            {extracting ? '解析中…' : '用 AI 解析当前 PDF 原文'}
+          </button>
+        </div>
+        <p style={{ fontSize: 12, color: '#666' }}>
+          已授权域名：{resumeAiConfig?.authorizedOrigin ?? '无'} · 温度 {resumeAiConfig?.temperature ?? 0} · 超时{' '}
+          {resumeAiConfig?.timeoutMs ?? 30000}ms · 重试 {resumeAiConfig?.maxRetries ?? 1} 次
+        </p>
+        {resumeAiNotice !== '' ? (
+          <p className="notice" data-testid="resume-ai-notice">
+            {resumeAiNotice}
+          </p>
+        ) : null}
+        {extractionWarnings.length > 0 ? (
+          <ul data-testid="resume-ai-warnings" style={{ paddingLeft: 18, fontSize: 12, color: '#a15c00' }}>
+            {extractionWarnings.map((warning) => <li key={warning}>{warning}</li>)}
+          </ul>
         ) : null}
       </div>
 
