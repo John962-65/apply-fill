@@ -74,7 +74,7 @@ function FieldEditor({ field, facts, busy, onChange, onStatus }: {
           {field.valueModified || field.evidenceStatus === 'historical' ? <p className="review-hint-error" data-testid={`review-modified-${field.path}`}>
             {field.valueModified ? '值已修改：' : '旧版引用：'}以下引用仅保留为原始记录，不是当前值的证据。{field.originalValue !== undefined ? `原提取值：${valueAsText(field.originalValue)}` : ''}
           </p> : null}
-          <span className="review-evidence-label">{field.valueModified || field.evidenceStatus === 'historical' ? '原始引用（已修改）' : '简历原文'}{evidence.page ? ` · 第 ${evidence.page} 页` : ''}{evidence.section ? ` · ${evidence.section}` : ''}</span>
+          <span className="review-evidence-label">{field.valueModified ? '原始引用（值已修改）' : field.evidenceStatus === 'historical' ? '原始引用（历史记录）' : '简历原文'}{evidence.page ? ` · 第 ${evidence.page} 页` : ''}{evidence.section ? ` · ${evidence.section}` : ''}</span>
           <blockquote>{evidence.text}</blockquote>
           {field.evidence.length > 1 ? <details><summary>其他关联原文（{field.evidence.length - 1}）</summary>
             {field.evidence.slice(1).map((item, index) => <blockquote key={index}>{item.page ? `第 ${item.page} 页：` : ''}{item.text}</blockquote>)}

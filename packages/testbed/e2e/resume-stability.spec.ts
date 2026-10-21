@@ -1,5 +1,6 @@
 import { expect, test } from '@playwright/test';
 import type { Page } from '@playwright/test';
+import { readFileSync } from 'node:fs';
 import type { CompiledResume, ResumeFactsDocument } from '../../../apps/extension/src/shared/contracts/resume';
 import { launchExtensionContext, openWorkbench } from './helpers/extension';
 import type { ExtensionSession } from './helpers/extension';
@@ -178,5 +179,21 @@ test('模拟 API：编辑和清空提取值后保存，原始引用保留为历�
     expect(saved.normalized.projects?.[0]?.description).toBe('Built a dashboard with manual corrections');
     expect(saved.facts.projects?.[0]?.description).toMatchObject({ originalValue: 'Built a dashboard', evidenceStatus: 'historical', valueModified: true,
       evidence: [expect.objectContaining({ text: 'Built a dashboard', status: 'historical', sectionKind: 'projects' })] });
+    const downloadPromise = page.waitForEvent('download');
+    await page.getByRole('button', { name: '导出已编译 JSON' }).click();
+    const download = await downloadPromise;
+    const backup = readFileSync((await download.path())!, 'utf8');
+    await page.getByTestId('resume-json').fill(backup);
+    await page.getByTestId('import-resume').click();
+    await expect(page.getByTestId('import-notice')).toContainText('导入并编译成功');
+    saved = await readCurrent(page);
+    expect(saved.facts.projects?.[0]?.startDate).toMatchObject({ value: '', originalValue: '2024-03', evidenceStatus: 'historical' });
+    expect(saved.facts.projects?.[0]?.description?.evidence).toEqual(JSON.parse(backup).facts.projects[0].description.evidence);
+    const invalid = JSON.parse(backup);
+    Object.assign(invalid.facts.projects[0].startDate, { value: '2024-19', reviewStatus: 'confirmed', verified: true });
+    await page.getByTestId('resume-json').fill(JSON.stringify(invalid));
+    await page.getByTestId('import-resume').click();
+    await expect(page.getByTestId('import-notice')).toContainText('日期无效');
+    expect(await readCurrent(page)).toEqual(saved);
   } finally { await session.close(); }
 });

@@ -387,7 +387,7 @@ export function App() {
     }
     try {
       const facts = JSON.parse(json) as unknown;
-      const result = (await chrome.runtime.sendMessage({ type: 'IMPORT_RESUME', facts, label: versionLabel })) as {
+      const result = (await chrome.runtime.sendMessage({ type: 'IMPORT_RESUME', draft: true, facts, label: versionLabel })) as {
         ok: boolean;
         error?: string;
       };
