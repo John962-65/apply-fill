@@ -32,6 +32,21 @@ JavaScript、TypeScript、React、Node.js（熟练）
 `;
 
 describe('extractResumeFacts', () => {
+  it('职责正文提到公司或项目时不拆成额外经历', () => {
+    const text = `姓名：李雷\n工作经历\n示例科技有限公司 | 软件工程师 | 2022.03 - 2023.08\n负责公司管理后台开发\n参与集团数据平台建设\n项目经历\n项目名称：智能推荐平台\n角色：核心开发\n负责项目架构设计\n• 优化项目推荐性能\n项目成果：完成灰度发布`;
+    const { facts } = extractResumeFacts(text);
+    expect(facts.work).toHaveLength(1);
+    expect(facts.work?.[0]?.description?.value).toContain('负责公司管理后台开发');
+    expect(facts.projects).toHaveLength(1);
+    expect(facts.projects?.[0]?.description?.value).toContain('负责项目架构设计');
+    expect(facts.projects?.[0]?.description?.value).toContain('优化项目推荐性能');
+  });
+
+  it('中英双语章节标题仍识别为对应经历', () => {
+    const { facts } = extractResumeFacts('姓名：李雷\n教育背景 / Education\n示例大学 | 本科 | 2020.09 - 2024.06\n项目经历 / Projects\n项目名称：推荐平台\n负责模型服务开发');
+    expect(facts.education[0]?.school.value).toBe('示例大学');
+    expect(facts.projects?.[0]?.name.value).toBe('推荐平台');
+  });
   it('提取基本信息并标记来源为 resume-import 且未核验', () => {
     const { facts, stats } = extractResumeFacts(SAMPLE, 1000);
     expect(facts.basic.name.value).toBe('张伟');

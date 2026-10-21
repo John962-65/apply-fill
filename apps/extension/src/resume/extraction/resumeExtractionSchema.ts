@@ -80,7 +80,6 @@ export const RESUME_EXTRACTION_SYSTEM_PROMPT = [
   '仅输出符合给定 JSON Schema 的 JSON，不要输出 Markdown。',
 ].join('\n');
 
-const NUMBER_PATTERN = /\d+(?:\.\d+)?/g;
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -117,28 +116,35 @@ function makeFact<T>(value: T, field: ExtractedField, now: number): ResumeFact<T
     source: 'resume-import',
     verified: false,
     reviewStatus: 'pending',
-    confidence: 0.8,
     evidence: evidenceOf(field),
     updatedAt: now,
   };
 }
 
-function sourceMatches(source: string, field: ExtractedField): boolean {
+function quoteExists(source: string, field: ExtractedField): boolean {
   const quote = compact(field.quote);
-  if (quote.length < 2 || !compact(source).includes(quote)) return false;
-  const value = compact(field.value);
-  if (value === '') return false;
-  return quote.includes(value) || compact(field.value).split(/[、/]/).every((part) => part === '' || quote.includes(part)) ||
-    (numericTokens(field.value).length > 0 && numericTokens(field.value).every((token) => quote.includes(token)));
+  return quote.length >= 1 && compact(source).includes(quote);
 }
 
-function numericTokens(value: string): string[] {
-  return value.match(NUMBER_PATTERN) ?? [];
+function sourceMatches(source: string, field: ExtractedField): boolean {
+  if (!quoteExists(source, field)) return false;
+  const quote = compact(field.quote);
+  const value = compact(field.value);
+  if (value === '') return false;
+  return quote.includes(value) || value.split(/[、/]/).every((part) => part === '' || quote.includes(part));
 }
 
 function dateSupported(value: string, field: ExtractedField): boolean {
-  if (parseDateAtom(value) === undefined) return false;
-  return numericTokens(value).every((token) => numericTokens(field.quote).includes(token));
+  const parsed = parseDateAtom(value);
+  if (parsed === undefined) return false;
+  if ('present' in parsed) return /至今|现在|在职|present|current|now/i.test(field.quote);
+  const candidates = field.quote.match(/\d{4}(?:\s*[年./-]\s*\d{1,2}(?!\d))?(?:\s*[月./-]\s*\d{1,2}(?!\d))?\s*[月日号]?/g) ?? [];
+  return candidates.some((raw) => {
+    const actual = parseDateAtom(raw);
+    return actual && !('present' in actual) && actual.year === parsed.year &&
+      (parsed.month === undefined || actual.month === parsed.month) &&
+      (parsed.day === undefined || actual.day === parsed.day);
+  });
 }
 
 function textField(
@@ -171,7 +177,7 @@ function dateField(
 ): ResumeFact<string> | undefined {
   const field = fieldOf(raw);
   if (field === undefined) return undefined;
-  if (!sourceMatches(source, field) || !dateSupported(field.value, field)) {
+  if (!quoteExists(source, field) || !dateSupported(field.value, field)) {
     warnings.push(`${path} 缺少可验证的日期证据，已丢弃`);
     return undefined;
   }

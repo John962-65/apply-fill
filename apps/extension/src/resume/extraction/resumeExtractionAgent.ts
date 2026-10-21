@@ -70,25 +70,26 @@ export class ResumeExtractionAgent {
     }
 
     const url = `${config.baseUrl.replace(/\/+$/, '')}/chat/completions`;
-    const body = JSON.stringify({
+    const makeBody = (format: number): string => JSON.stringify({
       model: config.model,
       temperature: config.temperature,
       stream: false,
-      response_format: {
+      ...(format === 0 ? { response_format: {
         type: 'json_schema',
         json_schema: {
           name: 'resume_extraction',
           strict: true,
           schema: RESUME_EXTRACTION_SCHEMA,
         },
-      },
+      } } : format === 1 ? { response_format: { type: 'json_object' } } : {}),
       messages: [
-        { role: 'system', content: RESUME_EXTRACTION_SYSTEM_PROMPT },
+        { role: 'system', content: RESUME_EXTRACTION_SYSTEM_PROMPT + (format > 0 ? `\n输出结构必须遵循此 JSON Schema：\n${JSON.stringify(RESUME_EXTRACTION_SCHEMA)}` : '') },
         { role: 'user', content: `以下是用户授权用于结构化解析的简历原文：\n\n${trimmed}` },
       ],
     });
 
     let lastError = '';
+    let format = 0;
     for (let attempt = 0; attempt <= config.maxRetries; attempt += 1) {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), config.timeoutMs);
@@ -99,11 +100,17 @@ export class ResumeExtractionAgent {
             'Content-Type': 'application/json',
             ...(config.apiKey !== '' ? { Authorization: `Bearer ${config.apiKey}` } : {}),
           },
-          body,
+          body: makeBody(format),
           signal: controller.signal,
         });
         if (!response.ok) {
           lastError = `HTTP ${response.status}`;
+          if ((response.status === 400 || response.status === 422) && format < 2) {
+            const detail = (await response.text()).slice(0, 2000);
+            if (/response_format|json_schema|json_object|structured.?output/i.test(detail)) {
+              format++; attempt--; continue;
+            }
+          }
           if ((response.status === 429 || response.status >= 500) && attempt < config.maxRetries) {
             await delay(RETRY_DELAY_MS * (attempt + 1));
             continue;

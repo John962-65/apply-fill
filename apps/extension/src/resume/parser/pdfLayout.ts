@@ -84,7 +84,7 @@ function normalizeSectionName(line: string): string {
 
 export function pdfSectionNameOf(line: string): string | undefined {
   const normalized = normalizeSectionName(line);
-  return SECTION_PATTERN.test(normalized) ? normalized : undefined;
+  return normalized.split(/[|｜/]/).find((part) => SECTION_PATTERN.test(part));
 }
 
 function toItem(item: PositionedPdfItem): RawItem | undefined {
@@ -167,6 +167,10 @@ function pageModeOf(lines: RawLine[], width: number): 'single-column' | 'two-col
   if (tableRows.length >= 3 && tableRows.length >= Math.ceil(lines.length * 0.4)) {
     return 'table';
   }
+  // Right-aligned date cells belong to their row, rather than a separate reading column.
+  const dateCells = right.filter((segment) => /\d{4}/.test(segment.text) &&
+    /^[\d\s年月至今在职./~～—–－-]+$/.test(segment.text));
+  if (dateCells.length >= 3 && dateCells.length >= right.length * 0.8) return 'table';
   if (left.length >= 3 && right.length >= 3 && full.length <= Math.max(2, segments.length * 0.2)) {
     return 'two-column';
   }

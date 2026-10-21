@@ -112,6 +112,124 @@ test('空 JSON 导入给出友好提示而不是解析错误', async () => {
   }
 });
 
+test('初始化刷新迟到时保留刚选择的附件与新解析草稿', async () => {
+  const session = await launchExtensionContext();
+  try {
+    const page = await session.context.newPage();
+    await page.addInitScript(() => {
+      const host = globalThis as unknown as { chrome: { runtime: { sendMessage(message: { type?: string }): Promise<unknown> } }; releaseInitialStatus?: () => void };
+      const original = host.chrome.runtime.sendMessage.bind(host.chrome.runtime);
+      let first = true;
+      host.chrome.runtime.sendMessage = async (message) => {
+        const result = await original(message);
+        if (first && message.type === 'GET_RESUME_STATUS') {
+          first = false;
+          await new Promise<void>((resolve) => { host.releaseInitialStatus = resolve; });
+        }
+        return result;
+      };
+    });
+    await page.goto(`chrome-extension://${session.extensionId}/workbench.html`);
+    await expect.poll(() => page.evaluate(() => typeof (globalThis as unknown as { releaseInitialStatus?: unknown }).releaseInitialStatus)).toBe('function');
+    await page.setInputFiles('[data-testid="attachment-input"]', { name: 'latest.pdf', mimeType: 'application/pdf', buffer: RESUME_PDF });
+    await expect(page.getByTestId('upload-notice')).toContainText('已保存附件：latest.pdf');
+    await page.getByTestId('parse-attachment').click();
+    await expect(page.getByTestId('review-input-basic.name')).toHaveValue('ZhangSan');
+    await page.evaluate(() => (globalThis as unknown as { releaseInitialStatus?: () => void }).releaseInitialStatus?.());
+    await expect(page.locator('body')).toContainText('当前附件：latest.pdf');
+    await expect(page.getByTestId('review-input-basic.name')).toHaveValue('ZhangSan');
+  } finally { await session.close(); }
+});
+
+test('AI 解析在导入入口完成，兼容 JSON 接口并对照原文逐项核对', async () => {
+  const session = await launchExtensionContext();
+  try {
+    const formats: string[] = [];
+    let fail = false;
+    await session.context.route('**/resume-model/v1/chat/completions', async (route) => {
+      if (fail) { await route.fulfill({ status: 401, json: { error: { message: 'test authentication failure' } } }); return; }
+      const body = route.request().postDataJSON();
+      formats.push(body.response_format?.type);
+      expect(body.messages[1].content).toContain('Example University');
+      expect(body.messages[1].content).toContain('[第 1 页]');
+      if (formats.length === 1) {
+        await route.fulfill({ status: 400, json: { error: { message: 'unsupported response_format json_schema' } } }); return;
+      }
+      const field = (value: string, quote = value) => ({ value, quote, page: 1 });
+      const data = { basic: { name: field('ZhangSan', 'Name: ZhangSan'), phone: field('13800001111', 'Phone: 13800001111'),
+        email: field('invented@example.com', 'Email: zhangsan@example.com') }, education: [], work: [],
+        projects: [{ name: field('Project Alpha'), description: field('Built a data dashboard') }], skills: [], warnings: [] };
+      await route.fulfill({ json: { choices: [{ message: { content: JSON.stringify(data) } }] } });
+    });
+    const page = await openWorkbench(session.context, session.extensionId);
+    await page.getByRole('link', { name: '配置 AI 解析服务' }).click();
+    await page.getByTestId('resume-ai-mode').selectOption('cloud');
+    await page.getByTestId('resume-ai-enabled').check();
+    await page.getByTestId('resume-ai-baseurl').fill('http://localhost:5173/resume-model/v1');
+    await page.getByTestId('resume-ai-model').fill('test-parser');
+    await page.getByTestId('resume-ai-authorize').click();
+    await expect(page.getByTestId('resume-ai-notice')).toContainText('配置已保存并授权');
+    await page.setInputFiles('[data-testid="attachment-input"]', { name: 'resume.pdf', mimeType: 'application/pdf', buffer: RESUME_PDF });
+    await expect(page.getByTestId('upload-notice')).toContainText('已保存附件');
+    await page.getByTestId('parse-with-ai').click();
+    await expect(page.getByTestId('resume-ai-notice')).toContainText('AI 解析完成', { timeout: 20000 });
+    expect(formats).toEqual(['json_schema', 'json_object']);
+    await expect(page.getByTestId('review-input-basic.name')).toHaveValue('ZhangSan');
+    await expect(page.getByTestId('review-evidence-basic.name')).toContainText('Name: ZhangSan');
+    await expect(page.getByTestId('review-evidence-basic.name').locator('blockquote').first()).toBeVisible();
+    await expect(page.getByTestId('review-status-basic.name')).toHaveText('待核对');
+    await expect(page.getByTestId('review-input-basic.email')).toHaveValue('');
+    await expect(page.getByTestId('resume-ai-warnings')).toContainText('已丢弃');
+    await page.getByTestId('review-confirm-basic.name').click();
+    await page.getByTestId('review-save').click();
+    await expect(page.getByTestId('review-panel')).toContainText('审核结果已保存');
+    await expect(page.locator('pre')).toContainText('"name": "ZhangSan"');
+    await expect(page.locator('pre')).not.toContainText('invented@example.com');
+    await page.getByTestId('review-panel').evaluate((element) => element.scrollIntoView({ block: 'start' }));
+    await page.screenshot({ path: `/tmp/applyfill-review-${process.env.APPLYFILL_E2E_BROWSER ?? 'chrome'}-desktop.png` });
+    await page.setViewportSize({ width: 390, height: 844 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    await page.screenshot({ path: `/tmp/applyfill-review-${process.env.APPLYFILL_E2E_BROWSER ?? 'chrome'}-mobile.png` });
+    fail = true;
+    await page.getByTestId('parse-with-ai').click();
+    await expect(page.getByTestId('resume-ai-notice')).toContainText('AI 解析失败');
+    await expect(page.getByTestId('review-input-basic.name')).toHaveValue('ZhangSan');
+  } finally { await session.close(); }
+});
+
+test('审核界面可定位缺失字段、补录整段经历，修改后需重新确认并保存', async () => {
+  const session = await launchExtensionContext();
+  try {
+    const page = await openWorkbench(session.context, session.extensionId);
+    await page.setInputFiles('[data-testid="attachment-input"]', { name: 'resume.pdf', mimeType: 'application/pdf', buffer: RESUME_PDF });
+    await page.getByTestId('parse-attachment').click();
+    await expect(page.getByTestId('review-panel')).toBeVisible();
+    await page.getByTestId('review-add-work').click();
+    await expect(page.getByTestId('review-status-work[1].company')).toHaveText('需补充');
+    await page.getByRole('button', { name: '需补充 / 修改', exact: true }).click();
+    await expect(page.getByTestId('review-input-work[1].company')).toBeVisible();
+    await expect(page.getByTestId('review-input-basic.name')).toHaveCount(0);
+    await page.getByTestId('review-input-work[1].company').pressSequentially('补录公司');
+    await expect(page.getByTestId('review-input-work[1].company')).toHaveValue('补录公司');
+    await page.getByRole('button', { name: '全部信息', exact: true }).click();
+    await page.getByTestId('review-input-work[1].role').fill('前端工程师');
+    await page.getByTestId('review-input-work[1].startDate').fill('2024-19');
+    await expect(page.getByTestId('review-field-work[1].startDate')).toContainText('日期无法识别');
+    await expect(page.getByTestId('review-confirm-work[1].startDate')).toBeDisabled();
+    await page.getByTestId('review-input-work[1].startDate').fill('2024-09');
+    await page.getByTestId('review-confirm-group-work-1').click();
+    await expect(page.getByTestId('review-status-work[1].role')).toHaveText('已确认');
+    await page.getByTestId('review-input-work[1].role').fill('高级前端工程师');
+    await expect(page.getByTestId('review-status-work[1].role')).toHaveText('待核对');
+    await page.getByTestId('review-confirm-work[1].role').click();
+    await page.getByTestId('review-save').click();
+    await expect(page.locator('pre')).toContainText('补录公司');
+    await page.reload();
+    await expect(page.getByTestId('review-input-work[1].role')).toHaveValue('高级前端工程师');
+    await expect(page.getByTestId('review-status-work[1].role')).toHaveText('已确认');
+  } finally { await session.close(); }
+});
+
 test('工作台导出可重新导入，当前事实可编辑，非法导入不覆盖已存简历', async () => {
   const session = await launchExtensionContext();
   try {

@@ -7,6 +7,16 @@ function item(str: string, x: number, y: number, width: number) {
 }
 
 describe('formatPdfLayout', () => {
+  it('右对齐的起止日期保留在经历同行，避免误排为独立右栏', () => {
+    const layout = formatPdfLayout([{ pageNumber: 1, width: 600, items: [
+      item('A University', 40, 700, 180), item('2018.09 - 2022.06', 390, 700, 150),
+      item('B University', 40, 680, 180), item('2022.09 - 2024.06', 390, 680, 150),
+      item('C University', 40, 660, 180), item('2024.09 - 至今', 390, 660, 150),
+    ] }]);
+    expect(layout.mode).toBe('table');
+    expect(layout.lines[0]?.text).toBe('A University | 2018.09 - 2022.06');
+    expect(layout.lines[1]?.text).toBe('B University | 2022.09 - 2024.06');
+  });
   it('双栏按左列完成后右列，且章节标题保持阅读顺序', () => {
     const layout = formatPdfLayout([{
       pageNumber: 1,

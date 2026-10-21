@@ -83,6 +83,7 @@ const PHONE_PATTERN = /(?:\+?86[\s-]?)?1[3-9]\d{9}/;
 const EMAIL_PATTERN = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/;
 const BULLET_PREFIX = /^[\s\-–—•●·*※○◆■□▪]+/;
 const ENTRY_LABEL_LINE = /^(?:项目名称|项目角色|担任角色|角色|职责|职位|岗位|职务|专业|项目时间|时间)[:：]/;
+const DESCRIPTION_START = /^(?:负责|参与|主导|协助|完成|实现|设计|开发|搭建|推动|通过|使用|采用|基于|项目(?:背景|描述|职责|成果|技术|内容)|工作(?:内容|职责)|技术栈|主要职责|责任描述|项目经理|项目负责人|implemented|developed|built|responsible|led|worked|designed)/i;
 const LABEL_PATTERNS = {
   name: /(?:姓名|名字|name)[:：]\s*([^\s|｜，,;；]+)/i,
   gender: /性别[:：]\s*(男|女)/,
@@ -108,7 +109,7 @@ function sectionKindOf(line: string): SectionKind | undefined {
     .replace(/^[一二三四五六七八九十]+[、.．]?/, '')
     .replace(/^\d+[、.．)]/, '');
   for (const def of SECTION_DEFS) {
-    if (def.match.test(stripped)) return def.kind;
+    if (stripped.split(/[|｜/]/).some((part) => def.match.test(part))) return def.kind;
   }
   return undefined;
 }
@@ -393,8 +394,8 @@ function parseWorkDrafts(drafts: EntryDraft[], now: number, uncertain: string[],
 function isProjectStart(line: ParsedLine, index: number): boolean {
   const text = normalizeLine(line.text);
   if (/^(?:项目名称|项目)[:：]/.test(text)) return true;
-  if (PROJECT_PATTERN.test(text)) return true;
-  if (BULLET_PREFIX.test(text)) return false;
+  if (BULLET_PREFIX.test(text) || DESCRIPTION_START.test(text) || ENTRY_LABEL_LINE.test(text)) return false;
+  if (PROJECT_PATTERN.test(text) && text.length <= 90 && !/[。；;]/.test(text)) return true;
   if (index === 0 && text.length <= 80 && !ENTRY_LABEL_LINE.test(text)) return true;
   if (!DATE_RANGE_PATTERN.test(text) || text.length > 90) return false;
   const remainder = stripDateRanges(text);
@@ -587,7 +588,7 @@ export function extractResumeFacts(
     const contentLines = section.lines.filter((line) => normalizeLine(line.text) !== '');
     if (section.kind === 'education') {
       const parsed = parseEducationDrafts(
-        entryDraftsOf(contentLines, (line) => SCHOOL_PATTERN.test(line.text)),
+        entryDraftsOf(contentLines, (line) => SCHOOL_PATTERN.test(line.text) && !DESCRIPTION_START.test(stripBullet(line.text)) && !BULLET_PREFIX.test(line.text)),
         now,
         stats.uncertain,
         section.heading,
@@ -595,7 +596,7 @@ export function extractResumeFacts(
       education.push(...parsed.map((entry, index) => ({ ...entry, id: `resume.education.${education.length + index + 1}` })));
     } else if (section.kind === 'work') {
       const parsed = parseWorkDrafts(
-        entryDraftsOf(contentLines, (line) => COMPANY_PATTERN.test(line.text)),
+        entryDraftsOf(contentLines, (line) => COMPANY_PATTERN.test(line.text) && !DESCRIPTION_START.test(stripBullet(line.text)) && !BULLET_PREFIX.test(line.text)),
         now,
         stats.uncertain,
         section.heading,

@@ -1,14 +1,13 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 
 import type { CompiledResume, FactReviewStatus, ResumeFactsDocument } from '@/shared/contracts/resume';
+import { GROUP_LABELS, setFactReviewStatus } from '@/resume/review/facts';
+import type { ReviewGroup } from '@/resume/review/facts';
 import {
-  GROUP_LABELS,
-  listReviewFields,
-  reviewSummary,
-  setFactReviewStatus,
-  updateFactValue,
-} from '@/resume/review/facts';
-import type { ReviewField, ReviewGroup } from '@/resume/review/facts';
+  addReviewEntry, editReviewField, listEditableReviewFields, needsReview, REVIEW_GROUPS,
+  reviewEntryTitle, reviewFieldIssue, valueAsText,
+} from '@/resume/review/editor';
+import type { EditableReviewField, EntryGroup } from '@/resume/review/editor';
 
 interface ReviewPanelProps {
   facts: ResumeFactsDocument | null;
@@ -19,227 +18,184 @@ interface ReviewPanelProps {
   onSave(): void;
 }
 
-const STATUS_LABEL: Record<FactReviewStatus, string> = {
-  pending: '待确认',
-  confirmed: '已确认',
-  rejected: '已拒绝',
-};
+type Filter = 'all' | 'pending' | 'attention' | 'confirmed';
+const FILTERS: Array<[Filter, string]> = [['all', '全部信息'], ['attention', '需补充 / 修改'], ['pending', '待核对'], ['confirmed', '已确认']];
+const STATUS_LABEL: Record<FactReviewStatus, string> = { pending: '待核对', confirmed: '已确认', rejected: '不使用' };
+const ENTRY_GROUPS: EntryGroup[] = ['education', 'work', 'projects', 'skills'];
 
-const STATUS_COLOR: Record<FactReviewStatus, string> = {
-  pending: '#a15c00',
-  confirmed: '#157347',
-  rejected: '#b42318',
-};
-
-function valueAsText(value: unknown): string {
-  if (Array.isArray(value)) return value.join('、');
-  if (value === undefined || value === null) return '';
-  return String(value);
-}
-
-function editorValueFor(field: ReviewField, raw: string): unknown {
-  if (field.path.endsWith('.keywords')) {
-    return raw.split(/[、,，;；]+/).map((part) => part.trim()).filter((part) => part !== '');
-  }
-  if (field.path === 'preferences.expectedSalary') {
-    const number = Number(raw);
-    return Number.isFinite(number) ? number : 0;
-  }
-  if (field.path === 'preferences.freshGraduate' || field.path === 'preferences.subscribeNotifications') {
-    return raw === 'true';
-  }
-  return raw;
-}
-
-function statusFor(field: ReviewField, compiled: CompiledResume | null): string {
-  if (field.status !== 'confirmed') return '';
-  const report = compiled?.fillability?.fields.find((item) => item.path === field.path);
-  if (report === undefined) return '';
-  return report.fillable ? '可填写' : `不可填写：${report.reason ?? 'UNKNOWN'}`;
-}
-
-function FieldEditor({
-  field,
-  facts,
-  compiled,
-  onChange,
-  onStatus,
-}: {
-  field: ReviewField;
+function FieldEditor({ field, facts, busy, onChange, onStatus }: {
+  field: EditableReviewField;
   facts: ResumeFactsDocument;
-  compiled: CompiledResume | null;
+  busy: boolean;
   onChange(facts: ResumeFactsDocument): void;
   onStatus(status: FactReviewStatus): void;
 }) {
-  const setValue = (value: unknown): void => {
-    onChange(updateFactValue(facts, field.path, value));
-  };
+  const text = valueAsText(field.value);
+  const empty = text.trim() === '';
+  const issue = reviewFieldIssue(field);
   const booleanField = field.path === 'preferences.freshGraduate' || field.path === 'preferences.subscribeNotifications';
-  const longTextField = /\.(description|responsibilities|outcomes|intro|awards|additionalInfo)$/.test(field.path);
-  const fillability = statusFor(field, compiled);
+  const longText = /\.(description|responsibilities|outcomes|intro|awards|additionalInfo)$/.test(field.path);
+  const evidence = field.evidence[0];
+  const setValue = (raw: string | boolean): void => {
+    let value: unknown = raw;
+    if (field.path.endsWith('.keywords')) value = String(raw).split(/[、,，;；]+/).map((part) => part.trim()).filter(Boolean);
+    if (field.path === 'preferences.expectedSalary' && raw !== '') value = Number(raw);
+    onChange(editReviewField(facts, field, value));
+  };
+  const fieldId = `review-${field.path}`;
   return (
-    <div className="review-field" data-testid={`review-field-${field.path}`}>
+    <div className={`review-field ${longText ? 'review-field-wide' : ''} ${issue ? 'review-field-attention' : ''} review-${field.status}`}
+      data-testid={`review-field-${field.path}`} data-review-pending={needsReview(field) ? 'true' : undefined}>
       <div className="review-field-head">
-        <label htmlFor={`review-${field.path}`}>{field.label}{field.required ? ' *' : ''}</label>
-        <span className="review-status" style={{ color: STATUS_COLOR[field.status] }} data-testid={`review-status-${field.path}`}>
-          {STATUS_LABEL[field.status]}
+        <label htmlFor={fieldId}>{field.label}</label>
+        <span className={`review-status ${empty && field.status !== 'rejected' ? 'review-status-empty' : ''}`}
+          data-testid={`review-status-${field.path}`}>
+          {field.status === 'rejected' ? '不使用' : empty ? field.required ? '需补充' : '未提取 · 可选填' : STATUS_LABEL[field.status]}
         </span>
-        {fillability !== '' ? <span className="review-fillability">{fillability}</span> : null}
       </div>
       {booleanField ? (
-        <input
-          id={`review-${field.path}`}
-          type="checkbox"
-          checked={field.value === true}
-          onChange={(event) => setValue(event.target.checked)}
-        />
-      ) : longTextField ? (
-        <textarea
-          id={`review-${field.path}`}
-          data-testid={`review-input-${field.path}`}
-          value={valueAsText(field.value)}
-          onChange={(event) => setValue(event.target.value)}
-        />
+        <label className="review-boolean"><input id={fieldId} type="checkbox" disabled={busy} checked={field.value === true}
+          onChange={(event) => setValue(event.target.checked)} />{field.value === true ? '是' : '否'}</label>
+      ) : longText ? (
+        <textarea id={fieldId} data-testid={`review-input-${field.path}`} disabled={busy} value={text}
+          placeholder={`未提取到${field.label}？可以直接在这里补充。`} aria-describedby={`${fieldId}-hint`}
+          onChange={(event) => setValue(event.target.value)} />
       ) : (
-        <input
-          id={`review-${field.path}`}
-          data-testid={`review-input-${field.path}`}
-          value={valueAsText(field.value)}
-          onChange={(event) => setValue(editorValueFor(field, event.target.value))}
-        />
+        <input id={fieldId} data-testid={`review-input-${field.path}`} disabled={busy} value={text}
+          placeholder={/Date$/.test(field.path) ? '例如 2022-09；结束时间可填至今' : `未提取到，可手动补充${field.label}`}
+          aria-describedby={`${fieldId}-hint`} onChange={(event) => setValue(event.target.value)} />
       )}
-      <div className="review-actions">
-        <button
-          type="button"
-          data-testid={`review-confirm-${field.path}`}
-          disabled={field.status === 'confirmed' || valueAsText(field.value).trim() === ''}
-          onClick={() => onStatus('confirmed')}
-        >
-          确认
-        </button>
-        <button
-          type="button"
-          data-testid={`review-reject-${field.path}`}
-          disabled={field.status === 'rejected'}
-          onClick={() => onStatus('rejected')}
-        >
-          拒绝
-        </button>
-        {field.status !== 'pending' ? (
-          <button type="button" onClick={() => onStatus('pending')}>恢复待确认</button>
-        ) : null}
-      </div>
-      <details className="review-evidence" data-testid={`review-evidence-${field.path}`}>
-        <summary>查看原文证据（{field.evidence.length}）</summary>
-        {field.evidence.length === 0 ? <p>无原文证据。请人工补全后确认。</p> : (
-          <ul>
-            {field.evidence.map((evidence, index) => (
-              <li key={`${field.path}-${index}`}>
-                {evidence.page !== undefined ? `第 ${evidence.page} 页 · ` : ''}
-                {evidence.section !== undefined ? `${evidence.section} · ` : ''}
-                「{evidence.text}」
-              </li>
-            ))}
-          </ul>
-        )}
-      </details>
+      <p id={`${fieldId}-hint`} className={`review-hint ${issue ? 'review-hint-error' : ''}`}>
+        {issue ?? (field.status === 'rejected' ? '已排除，这项不会用于自动填写。' : empty ? '简历中没有的信息可保持为空，无需确认。' :
+          field.status === 'confirmed' ? '已核对；保存后可用于自动填写。' : field.source === 'user' ? '你修改了这项，请检查后确认。' : '请与下面的简历原文对照，核对无误后确认。')}
+      </p>
+      {evidence ? (
+        <div className="review-evidence" data-testid={`review-evidence-${field.path}`}>
+          <span className="review-evidence-label">简历原文{evidence.page ? ` · 第 ${evidence.page} 页` : ''}{evidence.section ? ` · ${evidence.section}` : ''}</span>
+          <blockquote>{evidence.text}</blockquote>
+          {field.evidence.length > 1 ? <details><summary>其他关联原文（{field.evidence.length - 1}）</summary>
+            {field.evidence.slice(1).map((item, index) => <blockquote key={index}>{item.page ? `第 ${item.page} 页：` : ''}{item.text}</blockquote>)}
+          </details> : null}
+        </div>
+      ) : !empty ? <p className="review-no-evidence">没有对应原文，请对照自己的简历核对。</p> : null}
+      {!empty || !field.missing ? <div className="review-actions">
+        <button type="button" data-testid={`review-confirm-${field.path}`} disabled={busy || field.status === 'confirmed' || empty || !!issue}
+          onClick={() => onStatus('confirmed')}>核对无误</button>
+        <button type="button" data-testid={`review-reject-${field.path}`} disabled={busy || field.status === 'rejected'}
+          onClick={() => onStatus('rejected')}>不使用这项</button>
+        {field.status !== 'pending' ? <button type="button" disabled={busy} onClick={() => onStatus('pending')}>重新核对</button> : null}
+      </div> : null}
     </div>
   );
 }
 
 export function ReviewPanel({ facts, compiled, busy, notice, onChange, onSave }: ReviewPanelProps) {
-  const fields = useMemo(() => (facts === null ? [] : listReviewFields(facts)), [facts]);
-  const summary = useMemo(() => (facts === null ? null : reviewSummary(facts)), [facts]);
+  const [filter, setFilter] = useState<Filter>('all');
+  const [error, setError] = useState('');
+  const [attentionPaths, setAttentionPaths] = useState<string[]>([]);
+  const fields = useMemo(() => facts === null ? [] : listEditableReviewFields(facts), [facts]);
+  const pending = fields.filter(needsReview);
+  const attention = fields.filter((field) => reviewFieldIssue(field) !== undefined);
+  const confirmed = fields.filter((field) => field.status === 'confirmed' && !reviewFieldIssue(field));
+  const dirty = facts !== null && JSON.stringify(facts) !== JSON.stringify(compiled?.facts);
   const grouped = useMemo(() => {
-    const groups = new Map<ReviewGroup, Map<number, ReviewField[]>>();
+    const groups = new Map<ReviewGroup, Map<number, EditableReviewField[]>>();
+    for (const group of REVIEW_GROUPS) groups.set(group, new Map());
     for (const field of fields) {
-      const entries = groups.get(field.group) ?? new Map<number, ReviewField[]>();
+      const entries = groups.get(field.group)!;
       const key = field.entryIndex ?? -1;
-      const list = entries.get(key) ?? [];
-      list.push(field);
-      entries.set(key, list);
-      groups.set(field.group, entries);
+      entries.set(key, [...(entries.get(key) ?? []), field]);
     }
     return groups;
   }, [fields]);
 
-  if (facts === null) {
-    return (
-      <div className="card">
-        <h2>字段级审核</h2>
-        <p>导入 PDF 或 JSON 后，可在此逐字段确认、编辑或拒绝；未确认字段不会进入自动填写计划。</p>
-      </div>
-    );
-  }
+  if (facts === null) return <section className="card review-panel review-empty" id="resume-review">
+    <h2>2. 核对简历信息</h2><p>解析后，个人信息和每段经历会显示在这里，并附上原文供你对照。</p>
+  </section>;
 
-  const changeStatus = (path: string, status: FactReviewStatus, next: ResumeFactsDocument): void => {
-    try {
-      onChange(setFactReviewStatus(next, path, status));
-    } catch (error) {
-      window.alert(error instanceof Error ? error.message : String(error));
-    }
+  const changeStatus = (field: EditableReviewField, status: FactReviewStatus): void => {
+    try { onChange(setFactReviewStatus(facts, field.path, status)); setError(''); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
   };
-
-  const confirmGroup = (groupFields: ReviewField[]): void => {
+  const confirmEntry = (entry: EditableReviewField[]): void => {
     let next = facts;
-    for (const field of groupFields) {
-      if (field.status !== 'pending' || valueAsText(field.value).trim() === '') continue;
-      next = setFactReviewStatus(next, field.path, 'confirmed');
+    for (const field of entry) {
+      if (field.status === 'pending' && valueAsText(field.value).trim() && !reviewFieldIssue(field)) {
+        next = setFactReviewStatus(next, field.path, 'confirmed');
+      }
     }
     onChange(next);
   };
-
+  const selectFilter = (next: Filter): void => {
+    if (next === 'attention') setAttentionPaths(attention.map((field) => field.path));
+    setFilter(next);
+  };
+  const visible = (field: EditableReviewField): boolean => filter === 'all' ||
+    (filter === 'pending' && needsReview(field)) || (filter === 'attention' && (reviewFieldIssue(field) !== undefined ||
+      (attentionPaths.includes(field.path) && field.status === 'pending'))) ||
+    (filter === 'confirmed' && field.status === 'confirmed');
+  const focusNext = (): void => {
+    setFilter('all');
+    requestAnimationFrame(() => {
+      const target = document.querySelector<HTMLElement>('[data-review-pending="true"]');
+      target?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      target?.querySelector<HTMLElement>('input, textarea')?.focus({ preventScroll: true });
+    });
+  };
   return (
-    <div className="card" data-testid="review-panel">
-      <h2>字段级审核（原件证据对齐）</h2>
-      <p style={{ fontSize: 13 }}>
-        已确认 {summary?.confirmed ?? 0} · 待确认 {summary?.pending ?? 0} · 已拒绝 {summary?.rejected ?? 0}。
-        只有已确认且可填写验证通过的字段会进入 Planner。拒绝的字段会保留在草稿中，但不会被填写。
-      </p>
-      {compiled?.fillability !== undefined ? (
-        <p style={{ fontSize: 12, color: compiled.fillability.ok ? '#157347' : '#a15c00' }} data-testid="fillability-summary">
-          可填写性：{compiled.fillability.ok ? '通过' : `存在 ${compiled.fillability.issues.length} 个问题`} ·
-          已确认 {compiled.fillability.confirmedFields} · 待确认 {compiled.fillability.pendingFields} ·
-          已拒绝 {compiled.fillability.rejectedFields}
-        </p>
-      ) : null}
-      {notice !== '' ? <p className="notice">{notice}</p> : null}
-      <div style={{ marginTop: 8 }}>
-        <button data-testid="review-save" className="primary" disabled={busy} onClick={onSave}>
-          保存审核结果
-        </button>
+    <section className="card review-panel" data-testid="review-panel" id="resume-review" aria-label="核对简历信息">
+      <div className="review-title-row"><div><h2>2. 核对简历信息</h2>
+        <p className="review-intro">先处理橙色的缺失或异常项，再对照原文核对其他信息。确认后记得保存。</p></div>
+        <button type="button" onClick={focusNext} disabled={!pending.length || busy}>定位下一项</button>
       </div>
-      {[...grouped.entries()].map(([group, entries]) => (
-        <section key={group} className="review-group" data-testid={`review-group-${group}`}>
-          <h3>{GROUP_LABELS[group]}</h3>
-          {[...entries.entries()].map(([entryIndex, groupFields]) => (
-            <div key={`${group}-${entryIndex}`} className="review-entry">
-              {entryIndex >= 0 ? (
-                <div className="review-entry-head">
-                  <strong>{GROUP_LABELS[group]} {entryIndex + 1}</strong>
-                  <button
-                    type="button"
-                    data-testid={`review-confirm-group-${group}-${entryIndex}`}
-                    onClick={() => confirmGroup(groupFields)}
-                  >
-                    确认本段全部非空字段
-                  </button>
-                </div>
-              ) : null}
-              {groupFields.map((field) => (
-                <FieldEditor
-                  key={field.path}
-                  field={field}
-                  facts={facts}
-                  compiled={compiled}
-                  onChange={onChange}
-                  onStatus={(status) => changeStatus(field.path, status, facts)}
-                />
-              ))}
-            </div>
-          ))}
-        </section>
-      ))}
-    </div>
+      <div className="review-overview" data-testid="review-overview">
+        <button type="button" onClick={() => selectFilter('attention')}><strong>{attention.length}</strong><span>需补充 / 修改</span></button>
+        <button type="button" onClick={() => setFilter('pending')}><strong>{pending.length}</strong><span>待核对（含需补充项）</span></button>
+        <button type="button" onClick={() => setFilter('confirmed')}><strong>{confirmed.length}</strong><span>已确认</span></button>
+      </div>
+      <p className="review-guide" data-testid="review-guide">
+        {pending.length ? `还有 ${pending.length} 项需要处理。空白的可选字段不用确认；未核对或选择不使用的信息不会自动填写。` : '已无待核对项。保存后，可返回招聘页面开始填写。'}
+      </p>
+      <div className="review-toolbar">
+        <div className="review-filters" role="group" aria-label="筛选审核信息">{FILTERS.map(([key, label]) =>
+          <button key={key} type="button" aria-pressed={filter === key} onClick={() => selectFilter(key)}>{label}</button>)}</div>
+        <nav className="review-nav" aria-label="跳转到信息分类">{REVIEW_GROUPS.filter((group) => group !== 'preferences' || grouped.get(group)!.size).map((group) =>
+          <a key={group} href={`#review-section-${group}`}>{GROUP_LABELS[group]}</a>)}</nav>
+      </div>
+      {error ? <p className="review-error" role="alert">{error}</p> : null}
+      {[...grouped.entries()].map(([group, entries]) => {
+        if (group === 'preferences' && !entries.size) return null;
+        const allGroupFields = [...entries.values()].flat();
+        const count = allGroupFields.filter(needsReview).length;
+        return <section key={group} className="review-group" id={`review-section-${group}`} data-testid={`review-group-${group}`}>
+          <div className="review-group-head"><h3>{GROUP_LABELS[group]}<span>{count ? `${count} 项待处理` : entries.size ? '已处理' : '尚未提取'}</span></h3>
+            {ENTRY_GROUPS.includes(group as EntryGroup) ? <button type="button" disabled={busy} data-testid={`review-add-${group}`}
+              onClick={() => { setFilter('all'); onChange(addReviewEntry(facts, group as EntryGroup)); }}>＋ 补充{GROUP_LABELS[group]}</button> : group === 'basic' ?
+              <button type="button" disabled={busy || !allGroupFields.some((field) => needsReview(field) && !reviewFieldIssue(field))}
+                onClick={() => confirmEntry(allGroupFields)}>个人信息已核对</button> : null}
+          </div>
+          {!entries.size ? <p className="review-group-empty">没有提取到{GROUP_LABELS[group]}。简历中有这部分内容时，可以点击右侧按钮补录。</p> : null}
+          {entries.size > 0 && !allGroupFields.some(visible) ? <p className="review-group-empty">当前筛选下没有需要处理的信息。</p> : null}
+          {[...entries.entries()].map(([index, entry]) => {
+            const shown = entry.filter(visible);
+            if (!shown.length) return null;
+            const actionable = entry.filter((field) => field.status === 'pending' && valueAsText(field.value).trim() && !reviewFieldIssue(field));
+            return <article key={index} className="review-entry" data-testid={`review-entry-${group}-${index}`}>
+              {index >= 0 ? <div className="review-entry-head"><div><span className="review-entry-number">{GROUP_LABELS[group]} {index + 1}</span>
+                <h4>{reviewEntryTitle(group, entry, index)}</h4></div>
+                <button type="button" disabled={busy || !actionable.length} data-testid={`review-confirm-group-${group}-${index}`}
+                  onClick={() => confirmEntry(entry)}>本段已核对（确认 {actionable.length} 项）</button></div> : null}
+              <div className="review-field-grid">{shown.map((field) => <FieldEditor key={field.path} field={field} facts={facts} busy={busy}
+                onChange={onChange} onStatus={(status) => changeStatus(field, status)} />)}</div>
+            </article>;
+          })}
+        </section>;
+      })}
+      <footer className="review-save-bar"><div><strong>{dirty ? '有尚未保存的修改' : '审核结果已保存'}</strong>
+        <span>{confirmed.length} 项已确认，{pending.length} 项待核对。可先保存，之后继续核对。</span>
+        {notice ? <p className="notice" role="status">{notice.startsWith('已保存') ? '本次核对结果已保存。' : notice}</p> : null}</div>
+        <button data-testid="review-save" className="primary" disabled={busy} onClick={onSave}>{busy ? '正在保存…' : '保存到简历'}</button>
+      </footer>
+    </section>
   );
 }

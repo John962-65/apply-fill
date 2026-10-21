@@ -19,6 +19,7 @@ import { resumeAiOriginOf } from '@/shared/contracts/resumeAi';
 import { llmBaseUrlOriginPattern } from '@/shared/contracts/llm';
 import type { CompiledResume, ResumeFactsDocument, ResumeVersionInfo } from '@/shared/contracts/resume';
 import { reviewSummary } from '@/resume/review/facts';
+import { formatExtractionWarning } from '@/resume/review/editor';
 import type { ActiveTabInfo, CompiledResumeResponse, ResumeAiConfigResponse, ResumeExtractionMessageResponse, ResumeStatusInfo, SimpleAck, UploadAttachmentResponse } from '@/shared/messages/protocol';
 import { createSampleResumeFacts } from '@/shared/samples/sampleResume';
 import { requestPermissionWithTimeout } from '@/shared/utils';
@@ -59,8 +60,10 @@ export function App() {
   const [resumeAiConfig, setResumeAiConfig] = useState<ResumeAiConfigView | null>(null);
   const [resumeAiApiKey, setResumeAiApiKey] = useState('');
   const [resumeAiNotice, setResumeAiNotice] = useState('');
+  const [resumeAiDirty, setResumeAiDirty] = useState(false);
   const [extracting, setExtracting] = useState(false);
   const [extractionWarnings, setExtractionWarnings] = useState<string[]>([]);
+  const parseRevision = useRef(0);
 
   const loadLlmConfig = useCallback(async () => {
     const response = (await chrome.runtime.sendMessage({ type: 'GET_LLM_CONFIG' })) as LlmConfigResponse;
@@ -74,10 +77,12 @@ export function App() {
   const loadResumeAiConfig = useCallback(async () => {
     const response = (await chrome.runtime.sendMessage({ type: 'GET_RESUME_AI_CONFIG' })) as ResumeAiConfigResponse;
     setResumeAiConfig(response?.config ?? null);
+    setResumeAiDirty(false);
   }, []);
 
   const patchResumeAiConfig = useCallback((patch: Partial<ResumeAiConfigView>) => {
     setResumeAiConfig((prev) => (prev === null ? prev : { ...prev, ...patch }));
+    setResumeAiDirty(true);
   }, []);
 
   const saveResumeAiConfig = useCallback(async () => {
@@ -97,6 +102,7 @@ export function App() {
     if (response?.ok === true) {
       setResumeAiConfig(response.config ?? null);
       setResumeAiApiKey('');
+      setResumeAiDirty(false);
       setResumeAiNotice('简历解析配置已保存（与字段语义路由配置相互独立）');
     } else {
       setResumeAiNotice(`保存失败：${response?.message ?? response?.error ?? '未知错误'}`);
@@ -122,19 +128,23 @@ export function App() {
       }
       const response = (await chrome.runtime.sendMessage({
         type: 'SET_RESUME_AI_CONFIG',
-        config: { authorizedOrigin: origin },
+        config: { ...resumeAiConfig, ...(resumeAiApiKey ? { apiKey: resumeAiApiKey } : {}), authorizedOrigin: origin },
       })) as ResumeAiConfigResponse;
       if (response?.ok === true) {
         setResumeAiConfig(response.config ?? null);
-        setResumeAiNotice(`已授权 ${origin} 仅用于用户主动触发的简历结构化解析`);
+        setResumeAiApiKey('');
+        setResumeAiDirty(false);
+        setResumeAiNotice(`配置已保存并授权 ${origin}，现在可以点击“AI 解析简历”。`);
       } else {
         setResumeAiNotice('授权已获得，但配置保存失败，请重试');
       }
     });
-  }, [resumeAiConfig]);
+  }, [resumeAiConfig, resumeAiApiKey]);
 
-  const extractWithResumeAi = useCallback(async () => {
-    if (parsedSource === null) {
+  const extractWithResumeAi = useCallback(async (sourceOverride?: NonNullable<typeof parsedSource>) => {
+    if (resumeAiDirty) { setResumeAiNotice('API 设置有修改，请先保存并授权后再解析。'); return; }
+    const source = sourceOverride ?? parsedSource;
+    if (source === null) {
       setResumeAiNotice('请先选择并解析 PDF 附件');
       return;
     }
@@ -142,29 +152,43 @@ export function App() {
       setResumeAiNotice('当前为 Local-Only 模式，简历正文不会发送；请显式切换并授权云端解析');
       return;
     }
+    const revision = ++parseRevision.current;
     setExtracting(true);
     setExtractionWarnings([]);
     setResumeAiNotice('正在调用已授权模型进行分章节结构化提取…');
     try {
       const response = (await chrome.runtime.sendMessage({
         type: 'RESUME_EXTRACT_TEXT',
-        text: parsedSource.text,
-        pageCount: parsedSource.pageCount,
-        ...(parsedSource.layout !== undefined ? { layout: parsedSource.layout } : {}),
+        text: source.text,
+        pageCount: source.pageCount,
+        ...(source.layout !== undefined ? { layout: source.layout } : {}),
       })) as ResumeExtractionMessageResponse;
+      if (revision !== parseRevision.current) return;
       if (response?.ok === true && response.facts !== undefined) {
         setReviewFacts(response.facts);
         setParseJson(JSON.stringify(response.facts, null, 2));
-        setExtractionWarnings(response.warnings ?? []);
+        setExtractionWarnings((response.warnings ?? []).map(formatExtractionWarning));
         const summary = reviewSummary(response.facts);
-        setResumeAiNotice(`AI 结构化完成：${summary.total} 个字段待逐项确认（已丢弃无原文证据的字段）`);
+        setParseStats({ basic: Object.keys(response.facts.basic).filter((key) => key !== 'name' || response.facts?.basic.name.value),
+          education: response.facts.education.length, work: response.facts.work?.length ?? 0,
+          projects: response.facts.projects?.length ?? 0, skills: response.facts.skills?.length ?? 0, uncertain: (response.warnings ?? []).map(formatExtractionWarning) });
+        setParseNotice(`AI 已提取 ${summary.total} 项信息，请在下方对照原文核对。`);
+        setResumeAiNotice(`AI 解析完成，${summary.total} 项信息等待核对。没有原文支持的内容已列入提示。`);
+        document.getElementById('resume-review')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
       } else {
-        setResumeAiNotice(`AI 解析失败：${response?.error ?? '未知错误'}`);
+        const reason = response?.error ?? '未知错误';
+        const friendly: Record<string, string> = { RESUME_AI_NOT_AUTHORIZED: '请先授权模型服务域名', RESUME_AI_NOT_CONFIGURED: '请填写并保存 API 地址和模型名称',
+          RESUME_AI_TIMEOUT: '模型响应超时，可稍后重试', INVALID_MODEL_JSON: '模型没有返回有效的结构化数据，可重试或更换模型',
+          RESUME_AI_NETWORK_ERROR: '无法连接模型服务，请检查 API 地址与网络', RESUME_AI_PERMISSION_DENIED: '浏览器尚未授予该模型域名的访问权限',
+          'HTTP 401': 'API 密钥无效或未提供，请检查密钥', 'HTTP 403': '模型服务拒绝访问，请检查账号和模型权限', 'HTTP 429': '请求超过服务限额，请检查额度或稍后重试' };
+        setResumeAiNotice(`AI 解析失败：${friendly[reason] ?? reason}。已提取的本地结果仍保留。`);
       }
+    } catch {
+      if (revision === parseRevision.current) setResumeAiNotice('AI 解析请求未完成，请检查模型配置后重试。本地结果仍保留。');
     } finally {
-      setExtracting(false);
+      if (revision === parseRevision.current) setExtracting(false);
     }
-  }, [parsedSource, resumeAiConfig]);
+  }, [parsedSource, resumeAiConfig, resumeAiDirty]);
 
   const saveLlmConfig = useCallback(async () => {
     if (llmConfig === null) {
@@ -314,6 +338,7 @@ export function App() {
 
   const refresh = useCallback(async () => {
     const revision = ++resumeLoadRevision.current;
+    const sourceRevision = parseRevision.current;
     const [info, response, history, stored] = await Promise.all([
       chrome.runtime.sendMessage({ type: 'GET_RESUME_STATUS' }) as Promise<ResumeStatusInfo>,
       chrome.runtime.sendMessage({ type: 'GET_COMPILED_RESUME' }) as Promise<CompiledResumeResponse>,
@@ -322,8 +347,11 @@ export function App() {
     if (revision !== resumeLoadRevision.current) return;
     const document = (response?.document as CompiledResume | null) ?? null;
     setStatus(info); setCompiled(document);
-    setReviewFacts(document?.facts ?? null);
-    setVersions(history?.versions ?? []); setAttachmentName(stored?.name ?? '');
+    if (sourceRevision === parseRevision.current) {
+      setReviewFacts(document?.facts ?? null);
+      setAttachmentName(stored?.name ?? '');
+    }
+    setVersions(history?.versions ?? []);
   }, []);
 
   useEffect(() => {
@@ -390,7 +418,12 @@ export function App() {
     if (file === undefined) {
       return;
     }
+    const revision = ++parseRevision.current;
+    setParsing(false); setExtracting(false); setParsedSource(null); setParseStats(null);
+    setParseJson(''); setResumeAiNotice(''); setExtractionWarnings([]);
+    setParseNotice('附件已选择，点击“解析为简历”提取信息。');
     const bytes = await file.arrayBuffer();
+    if (revision !== parseRevision.current) return;
     await saveAttachment({
       name: file.name,
       type: file.type !== '' ? file.type : 'application/pdf',
@@ -398,12 +431,20 @@ export function App() {
       bytes,
       savedAt: Date.now(),
     });
+    if (revision !== parseRevision.current) return;
     setAttachmentName(file.name);
     setUploadNotice(`已保存附件：${file.name}（${Math.max(1, Math.round(file.size / 1024))} KB）`);
   }, []);
 
-  const parseAttachment = useCallback(async () => {
+  const parseAttachment = useCallback(async (useAi: boolean = false) => {
+    const revision = ++parseRevision.current;
+    setExtracting(false);
+    setParsedSource(null);
+    setResumeAiNotice(''); setExtractionWarnings([]);
+    setParsing(true);
+    try {
     const stored = await loadAttachment();
+    if (revision !== parseRevision.current) return;
     if (stored === null) {
       setParseNotice('请先选择 PDF 附件');
       return;
@@ -413,6 +454,7 @@ export function App() {
     setParseJson('');
     setParseNotice('正在本地解析 PDF（不上传任何数据）…');
     const textResult = await extractPdfText(stored.bytes);
+    if (revision !== parseRevision.current) return;
     if (!textResult.ok) {
       setParseNotice(`PDF 文本提取失败：${textResult.error ?? '未知错误'}`);
       setParsing(false);
@@ -431,16 +473,32 @@ export function App() {
     setParseStats(parsed.stats);
     setParseJson(JSON.stringify(parsed.facts, null, 2));
     setReviewFacts(parsed.facts);
-    setParsedSource({
-      text: textResult.text,
+    const source = {
+      text: textResult.lines?.length ? textResult.lines.map((line, index, lines) =>
+        `${index === 0 || lines[index - 1]?.page !== line.page ? `[第 ${line.page} 页]\n` : ''}${line.text}`).join('\n') : textResult.text,
       pageCount: textResult.pageCount,
       ...(textResult.layout !== undefined ? { layout: textResult.layout } : {}),
-    });
+    };
+    setParsedSource(source);
     setParseNotice(
-      `已按${textResult.layout === 'two-column' ? '双栏' : textResult.layout === 'table' ? '表格' : '单栏'}阅读顺序提取 ${textResult.pageCount} 页文本（${textResult.text.replace(/\s/g, '').length} 字）。所有字段均需逐项确认，未确认内容不会进入自动填写。`,
+      `已提取 ${textResult.pageCount} 页文字并生成本地解析结果。可点击“AI 辅助解析”进一步识别，再到下方核对信息。`,
     );
-    setParsing(false);
-  }, []);
+    if (useAi) { setParsing(false); await extractWithResumeAi(source); }
+    } catch {
+      if (revision === parseRevision.current) setParseNotice('读取或解析附件失败，请重新选择有效的 PDF 后重试。');
+    } finally {
+      if (revision === parseRevision.current) setParsing(false);
+    }
+  }, [extractWithResumeAi]);
+
+  const reparseText = useCallback(() => {
+    if (!parsedSource?.text.trim()) return;
+    parseRevision.current++; setExtracting(false);
+    const parsed = extractResumeFacts(parsedSource.text.replace(/^\[第 \d+ 页\]\s*$/gm, ''));
+    setReviewFacts(parsed.facts); setParseJson(JSON.stringify(parsed.facts, null, 2)); setParseStats(parsed.stats);
+    setParseNotice('已按修改后的原文重新解析，请核对下方信息。');
+    setResumeAiNotice(''); setExtractionWarnings([]);
+  }, [parsedSource]);
 
   const saveReview = useCallback(async () => {
     if (reviewFacts === null) {
@@ -449,12 +507,14 @@ export function App() {
     }
     setReviewBusy(true);
     try {
-      const result = (await chrome.runtime.sendMessage({ type: 'SAVE_RESUME_REVIEW', facts: reviewFacts })) as {
+      const result = (await chrome.runtime.sendMessage({ type: parseStats !== null && reviewFacts.basic.name.value.trim() ? 'IMPORT_RESUME' : 'SAVE_RESUME_REVIEW', facts: reviewFacts, label: versionLabel })) as {
         ok: boolean;
         error?: string;
       };
       if (result?.ok === true) {
-        setReviewNotice('审核结果已保存；待确认字段仍不会进入 Planner');
+        const counts = reviewSummary(reviewFacts);
+        const message = `已保存${counts.pending ? '为待审核草稿' : '到简历'}：已确认 ${counts.confirmed} 项，待核对 ${counts.pending} 项。仅已确认的信息用于自动填写。`;
+        setReviewNotice(message); setParseNotice(message); setParseStats(null);
         await refresh();
       } else {
         setReviewNotice(`保存失败：${result?.error ?? '未知错误'}`);
@@ -462,7 +522,7 @@ export function App() {
     } finally {
       setReviewBusy(false);
     }
-  }, [reviewFacts, refresh]);
+  }, [reviewFacts, refresh, parseStats, versionLabel]);
 
   const confirmParsedImport = useCallback(async () => {
     if (reviewFacts === null && parseJson.trim() === '') {
@@ -495,6 +555,7 @@ export function App() {
   }, [parseJson, reviewFacts, refresh, versionLabel]);
 
   const cancelParse = useCallback(() => {
+    parseRevision.current++; setExtracting(false); setParsing(false);
     setParseStats(null);
     setParseJson('');
     setReviewFacts(compiled?.facts ?? null);
@@ -533,8 +594,188 @@ export function App() {
 
   return (
     <div className="workbench">
+      <header className="workbench-header"><span className="workbench-brand">ApplyFill</span><h1>把简历变成可直接填写的资料</h1>
+        <p>导入简历 → AI 提取信息 → 对照原文核对 → 保存并开始填写</p></header>
+      <div className="card resume-import-card">
+        <h2>1. 导入你的简历</h2>
+        <p className="import-description">选择 PDF，让 AI 整理个人信息和每段经历，再对照原文核对。没有模型配置时也可使用本地解析。</p>
+        <input
+          data-testid="attachment-input"
+          type="file"
+          accept=".pdf,application/pdf"
+          disabled={parsing || extracting}
+          onChange={(event) => void pickAttachment(event)}
+        />
+        <div style={{ marginTop: 10 }}>
+          <button data-testid="parse-with-ai" className="primary"
+            disabled={parsing || extracting || !attachmentName || resumeAiDirty || resumeAiConfig?.mode !== 'cloud' || !resumeAiConfig.enabled || !resumeAiConfig.model || resumeAiConfig.authorizedOrigin !== resumeAiOriginOf(resumeAiConfig.baseUrl)}
+            onClick={() => void parseAttachment(true)}>
+            {extracting ? 'AI 正在识别信息…' : parsing ? '正在读取 PDF…' : 'AI 解析简历'}
+          </button>
+          <button data-testid="parse-attachment" disabled={parsing || extracting} onClick={() => void parseAttachment()}>
+            {parsing ? '正在读取…' : '仅本地解析'}
+          </button>
+          <span style={{ marginLeft: 10, fontSize: 13 }}>
+            {attachmentName === '' ? '未选择附件' : `当前附件：${attachmentName}`}
+          </span>
+        </div>
+        <p className="import-ai-state">{resumeAiDirty ? 'API 设置尚未保存，请先保存并授权。' : resumeAiConfig?.mode === 'cloud' && resumeAiConfig.enabled
+          ? `AI 解析将把这份简历的文字发送到 ${resumeAiOriginOf(resumeAiConfig.baseUrl) ?? '你配置的模型服务'}。`
+          : '使用 AI 解析前，先填写 API 地址、密钥和模型并授权。'} <a href="#resume-ai-settings"
+            onClick={() => document.getElementById('resume-ai-settings')?.setAttribute('open', '')}>配置 AI 解析服务</a></p>
+        {resumeAiNotice ? <p className="notice" data-testid="resume-ai-notice" role="status">{resumeAiNotice}</p> : null}
+        {extractionWarnings.length ? <details className="parse-warnings" open><summary>AI 解析提示（{extractionWarnings.length}）</summary>
+          <ul data-testid="resume-ai-warnings">{extractionWarnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul></details> : null}
+        {parseNotice !== '' ? (
+          <p className="notice" data-testid="parse-notice">
+            {parseNotice}
+          </p>
+        ) : null}
+        {parseStats !== null ? (
+          <div data-testid="parse-preview" style={{ marginTop: 10 }}>
+            <p style={{ fontSize: 13 }} data-testid="parse-stats">
+              个人信息 {parseStats.basic.length} 项 · 教育经历 {parseStats.education} 段 · 工作/实习{' '}
+              {parseStats.work} 段 · 项目经历 {parseStats.projects} 段 · 技能/证书 {parseStats.skills} 项
+            </p>
+            {parseStats.uncertain.length > 0 ? (
+              <details className="parse-warnings" open><summary>未归类原文或解析提示（{parseStats.uncertain.length}）</summary>
+              <p>这些内容尚未对应到具体字段。请检查是否漏掉经历，必要时在下方补录。</p>
+              <ul data-testid="parse-uncertain">
+                {parseStats.uncertain.map((item) => (
+                  <li key={item}>{item}</li>
+                ))}
+              </ul></details>
+            ) : null}
+            <details className="parse-advanced"><summary>查看解析数据（高级）</summary><textarea
+              data-testid="parse-json"
+              style={{ minHeight: 160, width: '100%' }}
+              value={parseJson}
+              spellCheck={false}
+              readOnly
+            /></details>
+            <div style={{ marginTop: 8 }}>
+              <button data-testid="parse-confirm" className="primary" onClick={() => void confirmParsedImport()}>
+                保存当前核对结果
+              </button>
+              <button data-testid="parse-cancel" onClick={cancelParse}>
+                取消
+              </button>
+            </div>
+          </div>
+        ) : null}
+        {parsedSource ? <details className="parse-source"><summary>查看 / 修正提取的简历原文</summary>
+          <p>排版提取顺序有误时，可在这里修正文字，再重新解析。下方审核区的修改会被新的解析结果替换。</p>
+          <textarea aria-label="提取的简历原文" data-testid="resume-source-text" value={parsedSource.text} disabled={extracting || parsing}
+            onChange={(event) => setParsedSource({ ...parsedSource, text: event.target.value })} />
+          <button type="button" disabled={extracting || parsing} onClick={reparseText}>按文字重新本地解析</button>
+          <button type="button" disabled={extracting || parsing || resumeAiConfig?.mode !== 'cloud' || !resumeAiConfig.enabled}
+            onClick={() => void extractWithResumeAi()}>按文字重新 AI 解析</button>
+        </details> : null}
+        <details className="parse-upload" open><summary>将 PDF 附件上传到招聘网站</summary>
+          <p>此操作将原 PDF 作为附件交给当前招聘网站，填写资料请先完成上方解析和核对。</p>
+          <button data-testid="upload-attachment" onClick={() => void uploadAttachment()}>上传附件到当前页面</button>
+        </details>
+        {uploadNotice !== '' ? (
+          <p className="notice" data-testid="upload-notice">
+            {uploadNotice}
+          </p>
+        ) : null}
+      </div>
+
+      <details className="card ai-settings" id="resume-ai-settings">
+        <summary>配置 AI 解析服务 · API 地址、密钥和模型</summary>
+        <h2>AI 简历解析设置</h2>
+        <p style={{ fontSize: 13 }}>
+          配置你自己的兼容 Chat Completions 的模型服务。AI 会读取简历文字（包含姓名、联系方式等），整理每段经历并返回原文出处。
+          授权后由你点击“AI 解析简历”发起；选择本地解析时不发送简历内容。AI 结果仍需在下方核对。
+        </p>
+        <label style={{ display: 'block', fontSize: 13, marginTop: 8 }}>
+          模式：
+          <select
+            data-testid="resume-ai-mode"
+            value={resumeAiConfig?.mode ?? 'local-only'}
+            onChange={(event) => {
+              const mode = event.target.value === 'cloud' ? 'cloud' : 'local-only';
+              patchResumeAiConfig({ mode, enabled: mode === 'cloud' ? (resumeAiConfig?.enabled ?? false) : false });
+            }}
+          >
+            <option value="local-only">Local-Only（禁止发送简历正文）</option>
+            <option value="cloud">云端解析（需授权）</option>
+          </select>
+        </label>
+        <label style={{ display: 'block', fontSize: 13, marginTop: 8 }}>
+          <input
+            data-testid="resume-ai-enabled"
+            type="checkbox"
+            checked={resumeAiConfig?.enabled ?? false}
+            disabled={resumeAiConfig?.mode !== 'cloud'}
+            onChange={(event) => patchResumeAiConfig({ enabled: event.target.checked })}
+          />{' '}
+          允许使用 AI 解析简历文字
+        </label>
+        <div style={{ marginTop: 8 }}>
+          <input
+            data-testid="resume-ai-baseurl"
+            aria-label="简历解析 API 地址"
+            placeholder="Base URL（OpenAI 兼容，如 https://api.example.com/v1）"
+            style={{ width: '100%' }}
+            value={resumeAiConfig?.baseUrl ?? ''}
+            onChange={(event) => patchResumeAiConfig({ baseUrl: event.target.value })}
+          />
+        </div>
+        <div style={{ marginTop: 8 }}>
+          <input
+            data-testid="resume-ai-apikey"
+            aria-label="简历解析 API Key"
+            type="password"
+            placeholder={resumeAiConfig?.hasApiKey === true ? 'API Key（已保存，留空保持不变）' : 'API Key（如服务端无需鉴权可留空）'}
+            style={{ width: '100%' }}
+            value={resumeAiApiKey}
+            onChange={(event) => { setResumeAiApiKey(event.target.value); setResumeAiDirty(true); }}
+          />
+        </div>
+        <div style={{ marginTop: 8 }}>
+          <input
+            data-testid="resume-ai-model"
+            aria-label="简历解析模型名称"
+            placeholder="模型名称"
+            style={{ width: '100%' }}
+            value={resumeAiConfig?.model ?? ''}
+            onChange={(event) => patchResumeAiConfig({ model: event.target.value })}
+          />
+        </div>
+        <div style={{ marginTop: 10 }}>
+          <button data-testid="resume-ai-save" className="primary" onClick={() => void saveResumeAiConfig()}>
+            保存 API 设置
+          </button>
+          <button data-testid="resume-ai-authorize" onClick={authorizeResumeAiHost}>
+            保存并授权模型服务
+          </button>
+          <button
+            data-testid="resume-ai-extract"
+            disabled={extracting || resumeAiDirty || parsedSource === null || resumeAiConfig?.mode !== 'cloud' || resumeAiConfig.enabled !== true}
+            onClick={() => void extractWithResumeAi()}
+          >
+            {extracting ? '解析中…' : '用 AI 解析当前 PDF 原文'}
+          </button>
+        </div>
+        <p style={{ fontSize: 12, color: '#666' }}>
+          已授权域名：{resumeAiConfig?.authorizedOrigin ?? '无'} · 温度 {resumeAiConfig?.temperature ?? 0} · 超时{' '}
+          {resumeAiConfig?.timeoutMs ?? 30000}ms · 重试 {resumeAiConfig?.maxRetries ?? 1} 次
+        </p>
+      </details>
+
+      <ReviewPanel
+        facts={reviewFacts}
+        compiled={compiled}
+        busy={reviewBusy || extracting || parsing}
+        notice={reviewNotice}
+        onChange={changeReviewFacts}
+        onSave={() => void saveReview()}
+      />
+
       <div className="card">
-        <h2>三层简历知识库 · 原始事实层导入</h2>
+        <h2>高级：结构化 JSON 导入与导出</h2>
         <input data-testid="version-label" aria-label="简历版本名称" placeholder="版本名称（可选，例如：前端岗位）" value={versionLabel} onChange={(event) => setVersionLabel(event.target.value)} />
         <textarea
           data-testid="resume-json"
@@ -572,78 +813,6 @@ export function App() {
           </div>
         ))}
       </div>
-
-      <div className="card">
-        <h2>简历附件（PDF）</h2>
-        <p style={{ fontSize: 13 }}>选择附件后点击“上传附件到当前页面”，扩展会在目标页尝试注入文件并验证网站接收状态。</p>
-        <input
-          data-testid="attachment-input"
-          type="file"
-          accept=".pdf,application/pdf"
-          onChange={(event) => void pickAttachment(event)}
-        />
-        <div style={{ marginTop: 10 }}>
-          <button data-testid="upload-attachment" className="primary" onClick={() => void uploadAttachment()}>
-            上传附件到当前页面
-          </button>
-          <button data-testid="parse-attachment" disabled={parsing} onClick={() => void parseAttachment()}>
-            解析为简历（本地）
-          </button>
-          <span style={{ marginLeft: 10, fontSize: 13 }}>
-            {attachmentName === '' ? '未选择附件' : `当前附件：${attachmentName}`}
-          </span>
-        </div>
-        {parseNotice !== '' ? (
-          <p className="notice" data-testid="parse-notice">
-            {parseNotice}
-          </p>
-        ) : null}
-        {parseStats !== null ? (
-          <div data-testid="parse-preview" style={{ marginTop: 10 }}>
-            <p style={{ fontSize: 13 }} data-testid="parse-stats">
-              个人信息 {parseStats.basic.length} 项 · 教育经历 {parseStats.education} 段 · 工作/实习{' '}
-              {parseStats.work} 段 · 项目经历 {parseStats.projects} 段 · 技能/证书 {parseStats.skills} 项 · 需要确认{' '}
-              {parseStats.uncertain.length} 项
-            </p>
-            {parseStats.uncertain.length > 0 ? (
-              <ul data-testid="parse-uncertain" style={{ paddingLeft: 18, fontSize: 12, color: '#a15c00' }}>
-                {parseStats.uncertain.map((item) => (
-                  <li key={item}>{item}</li>
-                ))}
-              </ul>
-            ) : null}
-            <textarea
-              data-testid="parse-json"
-              style={{ minHeight: 160, width: '100%' }}
-              value={parseJson}
-              spellCheck={false}
-              onChange={(event) => setParseJson(event.target.value)}
-            />
-            <div style={{ marginTop: 8 }}>
-              <button data-testid="parse-confirm" className="primary" onClick={() => void confirmParsedImport()}>
-                确认导入
-              </button>
-              <button data-testid="parse-cancel" onClick={cancelParse}>
-                取消
-              </button>
-            </div>
-          </div>
-        ) : null}
-        {uploadNotice !== '' ? (
-          <p className="notice" data-testid="upload-notice">
-            {uploadNotice}
-          </p>
-        ) : null}
-      </div>
-
-      <ReviewPanel
-        facts={reviewFacts}
-        compiled={compiled}
-        busy={reviewBusy}
-        notice={reviewNotice}
-        onChange={changeReviewFacts}
-        onSave={() => void saveReview()}
-      />
 
       <div className="card">
         <h2>字段修正记录（映射记忆确认）</h2>
@@ -789,95 +958,6 @@ export function App() {
         ) : null}
       </div>
 
-      <div className="card">
-        <h2>AI 简历结构化解析（独立授权 · 原始全文）</h2>
-        <p style={{ fontSize: 13 }}>
-          与上方字段语义路由完全独立：这里由你主动把 PDF 原文发送给模型，换取带原文引用的结构化字段。
-          默认 Local-Only；只有显式切换为云端、启用、保存配置并授权目标域名后，简历正文才会离开发送。
-          模型返回的每个字段仍必须通过本地原文引用校验，并逐项人工确认。
-        </p>
-        <label style={{ display: 'block', fontSize: 13, marginTop: 8 }}>
-          模式：
-          <select
-            data-testid="resume-ai-mode"
-            value={resumeAiConfig?.mode ?? 'local-only'}
-            onChange={(event) => {
-              const mode = event.target.value === 'cloud' ? 'cloud' : 'local-only';
-              patchResumeAiConfig({ mode, enabled: mode === 'cloud' ? (resumeAiConfig?.enabled ?? false) : false });
-            }}
-          >
-            <option value="local-only">Local-Only（禁止发送简历正文）</option>
-            <option value="cloud">云端解析（需授权）</option>
-          </select>
-        </label>
-        <label style={{ display: 'block', fontSize: 13, marginTop: 8 }}>
-          <input
-            data-testid="resume-ai-enabled"
-            type="checkbox"
-            checked={resumeAiConfig?.enabled ?? false}
-            disabled={resumeAiConfig?.mode !== 'cloud'}
-            onChange={(event) => patchResumeAiConfig({ enabled: event.target.checked })}
-          />{' '}
-          启用云端简历解析（默认关闭）
-        </label>
-        <div style={{ marginTop: 8 }}>
-          <input
-            data-testid="resume-ai-baseurl"
-            placeholder="Base URL（OpenAI 兼容，如 https://api.example.com/v1）"
-            style={{ width: '100%' }}
-            value={resumeAiConfig?.baseUrl ?? ''}
-            onChange={(event) => patchResumeAiConfig({ baseUrl: event.target.value })}
-          />
-        </div>
-        <div style={{ marginTop: 8 }}>
-          <input
-            data-testid="resume-ai-apikey"
-            type="password"
-            placeholder={resumeAiConfig?.hasApiKey === true ? 'API Key（已保存，留空保持不变）' : 'API Key（如服务端无需鉴权可留空）'}
-            style={{ width: '100%' }}
-            value={resumeAiApiKey}
-            onChange={(event) => setResumeAiApiKey(event.target.value)}
-          />
-        </div>
-        <div style={{ marginTop: 8 }}>
-          <input
-            data-testid="resume-ai-model"
-            placeholder="模型名称"
-            style={{ width: '100%' }}
-            value={resumeAiConfig?.model ?? ''}
-            onChange={(event) => patchResumeAiConfig({ model: event.target.value })}
-          />
-        </div>
-        <div style={{ marginTop: 10 }}>
-          <button data-testid="resume-ai-save" className="primary" onClick={() => void saveResumeAiConfig()}>
-            保存独立配置
-          </button>
-          <button data-testid="resume-ai-authorize" onClick={authorizeResumeAiHost}>
-            授权简历解析域名
-          </button>
-          <button
-            data-testid="resume-ai-extract"
-            disabled={extracting || parsedSource === null || resumeAiConfig?.mode !== 'cloud' || resumeAiConfig.enabled !== true}
-            onClick={() => void extractWithResumeAi()}
-          >
-            {extracting ? '解析中…' : '用 AI 解析当前 PDF 原文'}
-          </button>
-        </div>
-        <p style={{ fontSize: 12, color: '#666' }}>
-          已授权域名：{resumeAiConfig?.authorizedOrigin ?? '无'} · 温度 {resumeAiConfig?.temperature ?? 0} · 超时{' '}
-          {resumeAiConfig?.timeoutMs ?? 30000}ms · 重试 {resumeAiConfig?.maxRetries ?? 1} 次
-        </p>
-        {resumeAiNotice !== '' ? (
-          <p className="notice" data-testid="resume-ai-notice">
-            {resumeAiNotice}
-          </p>
-        ) : null}
-        {extractionWarnings.length > 0 ? (
-          <ul data-testid="resume-ai-warnings" style={{ paddingLeft: 18, fontSize: 12, color: '#a15c00' }}>
-            {extractionWarnings.map((warning) => <li key={warning}>{warning}</li>)}
-          </ul>
-        ) : null}
-      </div>
 
       <div className="card">
         <h2>知识库状态</h2>

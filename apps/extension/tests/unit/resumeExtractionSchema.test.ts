@@ -45,6 +45,29 @@ function payload(overrides: Record<string, unknown> = {}) {
 }
 
 describe('LLM extraction grounding', () => {
+  it('数字相同不能证明模型编写的其他事实，缺少原文的表述会被丢弃', () => {
+    const data = payload();
+    data.projects[0]!.description = { value: '团队人数 300', quote: '性能提升 300%', page: 1 };
+    const result = validateResumeExtraction(data, SOURCE);
+    expect(result?.facts.projects?.[0]?.description).toBeUndefined();
+  });
+
+  it('接受日期分隔符与前导零的规范化，但不允许推断至今', () => {
+    const data = payload({ education: [{ school: { value: '示例大学', quote: '示例大学', page: 1 },
+      degree: { value: '本科', quote: '本科', page: 1 },
+      startDate: { value: '2020-09', quote: '2020.9', page: 1 },
+      endDate: { value: '至今', quote: '2020.9', page: 1 } }] });
+    const result = validateResumeExtraction(data, `${SOURCE}\n示例大学 本科 2020.9`);
+    expect(result?.facts.education[0]?.startDate?.value).toBe('2020-09');
+    expect(result?.facts.education[0]?.endDate).toBeUndefined();
+  });
+
+  it('不能把同一句话中的两个日期数字交叉拼成新日期', () => {
+    const data = payload({ education: [{ school: { value: '示例大学', quote: '示例大学', page: 1 },
+      degree: { value: '本科', quote: '本科', page: 1 },
+      startDate: { value: '2020-06', quote: '2020.9 - 2024.6', page: 1 } }] });
+    expect(validateResumeExtraction(data, '示例大学 本科 2020.9 - 2024.6')?.facts.education[0]?.startDate).toBeUndefined();
+  });
   it('保留有原文引用的字段并全部标记待确认', () => {
     const result = validateResumeExtraction(payload(), SOURCE, 1000);
     expect(result?.facts.basic.name.value).toBe('张三');
