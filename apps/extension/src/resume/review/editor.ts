@@ -70,7 +70,7 @@ export function needsReview(field: EditableReviewField): boolean {
 
 export function editReviewField(doc: ResumeFactsDocument, field: EditableReviewField, value: unknown): ResumeFactsDocument {
   if (getFact(doc, field.path)) {
-    if (!field.required && valueAsText(value).trim() === '') {
+    if (!field.required && valueAsText(value).trim() === '' && !getFact(doc, field.path)?.evidence?.length) {
       const next = structuredClone(doc);
       const target = field.entryIndex === undefined ? next[field.group as 'basic' | 'preferences'] : next[field.group as EntryGroup]?.[field.entryIndex];
       if (target) delete (target as unknown as Record<string, unknown>)[field.path.slice(field.path.lastIndexOf('.') + 1)];

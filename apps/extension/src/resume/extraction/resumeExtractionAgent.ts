@@ -1,5 +1,6 @@
 import type { ResumeAiConfig, ResumeAiExtractionResponse } from '@/shared/contracts/resumeAi';
 import { resumeAiOriginOf } from '@/shared/contracts/resumeAi';
+import { ResumeSourceIndex } from './sourceGrounding';
 
 import {
   RESUME_EXTRACTION_SCHEMA,
@@ -84,7 +85,7 @@ export class ResumeExtractionAgent {
       } } : format === 1 ? { response_format: { type: 'json_object' } } : {}),
       messages: [
         { role: 'system', content: RESUME_EXTRACTION_SYSTEM_PROMPT + (format > 0 ? `\n输出结构必须遵循此 JSON Schema：\n${JSON.stringify(RESUME_EXTRACTION_SCHEMA)}` : '') },
-        { role: 'user', content: `以下是用户授权用于结构化解析的简历原文：\n\n${trimmed}` },
+        { role: 'user', content: JSON.stringify({ sourceLines: new ResumeSourceIndex(trimmed).promptLines() }) },
       ],
     });
 

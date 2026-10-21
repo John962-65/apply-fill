@@ -63,6 +63,9 @@ export interface ReviewField {
   required: boolean;
   evidence: NonNullable<ResumeFact<unknown>['evidence']>;
   source: ResumeFact<unknown>['source'];
+  valueModified?: boolean;
+  originalValue?: unknown;
+  evidenceStatus?: ResumeFact<unknown>['evidenceStatus'];
 }
 
 export interface ReviewSummary {
@@ -237,6 +240,14 @@ export function updateFactValue<T>(
   if (fact === undefined) {
     throw new Error(`简历字段不存在：${path}`);
   }
+  if (JSON.stringify(fact.value) === JSON.stringify(value)) return next;
+  if (fact.evidence?.length) {
+    if (fact.originalValue === undefined && fact.valueModified !== true) fact.originalValue = clone(fact.value);
+    fact.valueModified = true;
+    fact.evidenceStatus = 'historical';
+    fact.evidence = fact.evidence.map((evidence) => ({ ...evidence, status: 'historical' }));
+    delete fact.confidence;
+  }
   fact.value = value;
   fact.source = 'user';
   fact.reviewStatus = 'pending';
@@ -304,6 +315,7 @@ function fieldsOfEntry(
         required: requiredFieldsOf(group, key),
         evidence: fact.evidence ?? [],
         source: fact.source,
+        valueModified: fact.valueModified, originalValue: fact.originalValue, evidenceStatus: fact.evidenceStatus,
       };
     });
 }
@@ -322,6 +334,7 @@ export function listReviewFields(doc: ResumeFactsDocument): ReviewField[] {
       required: key === 'name',
       evidence: fact.evidence ?? [],
       source: fact.source,
+      valueModified: fact.valueModified, originalValue: fact.originalValue, evidenceStatus: fact.evidenceStatus,
     });
   }
   for (const group of ['education', 'work', 'projects', 'skills'] as const) {
@@ -343,6 +356,7 @@ export function listReviewFields(doc: ResumeFactsDocument): ReviewField[] {
       required: false,
       evidence: fact.evidence ?? [],
       source: fact.source,
+      valueModified: fact.valueModified, originalValue: fact.originalValue, evidenceStatus: fact.evidenceStatus,
     });
   }
   return fields;
@@ -361,7 +375,8 @@ export function reviewSummary(doc: ResumeFactsDocument): ReviewSummary {
 export function confirmAllWithEvidence(doc: ResumeFactsDocument, now: number = Date.now()): ResumeFactsDocument {
   let next = clone(doc);
   for (const field of listReviewFields(doc)) {
-    if (field.status !== 'pending' || field.evidence.length === 0) continue;
+    if (field.status !== 'pending' || field.valueModified || field.evidenceStatus === 'historical' ||
+      !field.evidence.some((evidence) => evidence.status !== 'historical')) continue;
     next = setFactReviewStatus(next, field.path, 'confirmed', now);
   }
   return next;

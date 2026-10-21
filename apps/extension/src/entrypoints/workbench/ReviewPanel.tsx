@@ -50,7 +50,7 @@ function FieldEditor({ field, facts, busy, onChange, onStatus }: {
         <label htmlFor={fieldId}>{field.label}</label>
         <span className={`review-status ${empty && field.status !== 'rejected' ? 'review-status-empty' : ''}`}
           data-testid={`review-status-${field.path}`}>
-          {field.status === 'rejected' ? '不使用' : empty ? field.required ? '需补充' : '未提取 · 可选填' : STATUS_LABEL[field.status]}
+          {field.status === 'rejected' ? '不使用' : empty ? field.required ? '需补充' : field.valueModified ? '已清空' : '未提取 · 可选填' : STATUS_LABEL[field.status]}
         </span>
       </div>
       {booleanField ? (
@@ -71,7 +71,10 @@ function FieldEditor({ field, facts, busy, onChange, onStatus }: {
       </p>
       {evidence ? (
         <div className="review-evidence" data-testid={`review-evidence-${field.path}`}>
-          <span className="review-evidence-label">简历原文{evidence.page ? ` · 第 ${evidence.page} 页` : ''}{evidence.section ? ` · ${evidence.section}` : ''}</span>
+          {field.valueModified || field.evidenceStatus === 'historical' ? <p className="review-hint-error" data-testid={`review-modified-${field.path}`}>
+            {field.valueModified ? '值已修改：' : '旧版引用：'}以下引用仅保留为原始记录，不是当前值的证据。{field.originalValue !== undefined ? `原提取值：${valueAsText(field.originalValue)}` : ''}
+          </p> : null}
+          <span className="review-evidence-label">{field.valueModified || field.evidenceStatus === 'historical' ? '原始引用（已修改）' : '简历原文'}{evidence.page ? ` · 第 ${evidence.page} 页` : ''}{evidence.section ? ` · ${evidence.section}` : ''}</span>
           <blockquote>{evidence.text}</blockquote>
           {field.evidence.length > 1 ? <details><summary>其他关联原文（{field.evidence.length - 1}）</summary>
             {field.evidence.slice(1).map((item, index) => <blockquote key={index}>{item.page ? `第 ${item.page} 页：` : ''}{item.text}</blockquote>)}
@@ -156,6 +159,7 @@ export function ReviewPanel({ facts, compiled, busy, notice, onChange, onSave }:
       <p className="review-guide" data-testid="review-guide">
         {pending.length ? `还有 ${pending.length} 项需要处理。空白的可选字段不用确认；未核对或选择不使用的信息不会自动填写。` : '已无待核对项。保存后，可返回招聘页面开始填写。'}
       </p>
+      {facts.migration ? <p className="review-guide" data-testid="resume-migration-notice">旧版资料已恢复为可审核草稿，原始数据已保留在迁移记录中。请补全并核对后保存。</p> : null}
       <div className="review-toolbar">
         <div className="review-filters" role="group" aria-label="筛选审核信息">{FILTERS.map(([key, label]) =>
           <button key={key} type="button" aria-pressed={filter === key} onClick={() => selectFilter(key)}>{label}</button>)}</div>

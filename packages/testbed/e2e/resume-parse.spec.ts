@@ -151,7 +151,8 @@ test('AI 解析在导入入口完成，兼容 JSON 接口并对照原文逐项�
       const body = route.request().postDataJSON();
       formats.push(body.response_format?.type);
       expect(body.messages[1].content).toContain('Example University');
-      expect(body.messages[1].content).toContain('[第 1 页]');
+      expect(body.messages[1].content).toContain('p1-l1');
+      expect(JSON.parse(body.messages[1].content).sourceLines[0].page).toBe(1);
       if (formats.length === 1) {
         await route.fulfill({ status: 400, json: { error: { message: 'unsupported response_format json_schema' } } }); return;
       }

@@ -1,11 +1,37 @@
 import { describe, expect, it } from 'vitest';
 
 import { compileResume } from '@/resume/compiler';
-import { getFact, setFactReviewStatus, updateFactValue } from '@/resume/review/facts';
+import { confirmAllWithEvidence, getFact, setFactReviewStatus, updateFactValue } from '@/resume/review/facts';
+import { extractResumeFacts } from '@/resume/parser/resumeStructureExtractor';
+import { validateResumeDraft, validateResumeFacts } from '@/resume/schema/validate';
 import { checkPathFillability } from '@/resume/validation/fillability';
 import { createSampleResumeFacts } from '@/shared/samples/sampleResume';
 
 describe('field-level review', () => {
+  it('编辑提取值保留原始引用和值，但不再将原文当作新值证据', () => {
+    const facts = extractResumeFacts('姓名：张三\n邮箱：old@example.com').facts;
+    facts.basic.email!.confidence = 0.9;
+    const edited = updateFactValue(facts, 'basic.email', 'new@example.com');
+    expect(edited.basic.email).toMatchObject({ value: 'new@example.com', originalValue: 'old@example.com', valueModified: true,
+      evidenceStatus: 'historical', reviewStatus: 'pending', verified: false,
+      evidence: [{ text: '邮箱：old@example.com', status: 'historical' }] });
+    expect(edited.basic.email?.confidence).toBeUndefined();
+    expect(confirmAllWithEvidence(edited).basic.email?.reviewStatus).toBe('pending');
+    const confirmed = setFactReviewStatus(edited, 'basic.email', 'confirmed');
+    expect(confirmed.basic.email?.evidenceStatus).toBe('historical');
+    expect(compileResume(confirmed).normalized.basic.email).toBe('new@example.com');
+    expect(updateFactValue(edited, 'basic.email', 'third@example.com').basic.email?.originalValue).toBe('old@example.com');
+    expect(facts.basic.email?.value).toBe('old@example.com');
+  });
+
+  it('相同值不会制造修改历史；草稿允许待纠正的日期，正式导入和确认值仍严格校验', () => {
+    const facts = extractResumeFacts('姓名：张三\n教育经历\n示例大学 | 本科 | 2020.09 - 2024.06').facts;
+    expect(updateFactValue(facts, 'basic.name', '张三').basic.name.valueModified).toBeUndefined();
+    const pending = updateFactValue(facts, 'education[0].startDate', '2024-19');
+    expect(() => validateResumeDraft(pending)).not.toThrow();
+    expect(() => validateResumeFacts(pending)).toThrow('日期无效');
+    expect(() => validateResumeDraft(setFactReviewStatus(pending, 'education[0].startDate', 'confirmed'))).toThrow('日期无效');
+  });
   it('未确认事实保留在草稿中但不会进入 normalized 或 Planner', () => {
     const facts = createSampleResumeFacts();
     facts.projects![0]!.name.reviewStatus = 'pending';

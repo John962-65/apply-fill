@@ -23,7 +23,7 @@ export type BackgroundMessage =
   | { type: 'FRAME_HELLO'; url: string; title: string }
   | { type: 'GET_COMPILED_RESUME'; runId?: string }
   | { type: 'GET_RESUME_STATUS' }
-  | { type: 'IMPORT_RESUME'; facts: ResumeFactsDocument; label?: string }
+  | { type: 'IMPORT_RESUME'; facts: ResumeFactsDocument; label?: string; draft?: boolean }
   | { type: 'SAVE_RESUME_REVIEW'; facts: ResumeFactsDocument }
   | { type: 'CLEAR_RESUME' }
   | { type: 'LIST_RESUME_VERSIONS' }

@@ -1,7 +1,6 @@
 import type { CompiledResume, ResumeVersionInfo } from '@/shared/contracts/resume';
 import { RESUME_COMPILER_VERSION, RESUME_SCHEMA_VERSION } from '@/shared/contracts/resume';
-import { validateResumeFacts } from '../schema/validate';
-import { migrateResumeFacts } from '../review/facts';
+import { migrateStoredResumeFacts } from './migrateStoredResume';
 import { createId } from '@/shared/utils/id';
 import { compileResume } from '../compiler/compile';
 
@@ -62,11 +61,14 @@ export function saveCompiledResume(document: CompiledResume, label?: string): Pr
     request.onsuccess = () => {
       const versions = (request.result as unknown[]).filter(isVersion);
       if (!versions.length) {
-        const previous = (request.result as CompiledResume[]).find((entry) => entry?.facts && entry?.normalized);
-        if (previous) versions.push({ id: createId('resume'), label: `${previous.normalized.basic.name} · 原有版本`, createdAt: previous.compiledAt, document: previous });
+        const previous = (request.result as CompiledResume[]).find((entry) => entry?.facts);
+        if (previous) {
+          const recovered = upgradeStored(previous);
+          versions.push({ id: createId('resume'), label: `${recovered.normalized.basic.name || '待核对草稿'} · 原有版本`, createdAt: recovered.compiledAt, document: recovered });
+        }
       }
       const createdAt = Math.max(Date.now(), ...versions.map((version) => version.createdAt + 1));
-      const version: ResumeVersion = { id: createId('resume'), label: label?.trim().slice(0, 80) || `${document.normalized.basic.name} · ${new Date(createdAt).toLocaleString()}`, createdAt, document };
+      const version: ResumeVersion = { id: createId('resume'), label: label?.trim().slice(0, 80) || `${document.normalized.basic.name || '待核对草稿'} · ${new Date(createdAt).toLocaleString()}`, createdAt, document };
       versions.push(version);
       versions.sort((a, b) => b.createdAt - a.createdAt);
       versions.forEach((entry, index) => { if (index < MAX_VERSIONS) store.put(entry, `${VERSION_PREFIX}${entry.id}`); else store.delete(`${VERSION_PREFIX}${entry.id}`); });
@@ -77,11 +79,11 @@ export function saveCompiledResume(document: CompiledResume, label?: string): Pr
 }
 
 function upgradeStored(value: CompiledResume): CompiledResume {
-  if (value.compilerVersion === RESUME_COMPILER_VERSION && value.schemaVersion === RESUME_SCHEMA_VERSION &&
-    value.facts.schemaVersion === RESUME_SCHEMA_VERSION && value.fillability !== undefined) {
+  if (value?.compilerVersion === RESUME_COMPILER_VERSION && value.schemaVersion === RESUME_SCHEMA_VERSION &&
+    value.facts?.schemaVersion === RESUME_SCHEMA_VERSION && value.fillability !== undefined) {
     return value;
   }
-  return compileResume(validateResumeFacts(migrateResumeFacts(value.facts)));
+  return compileResume(migrateStoredResumeFacts(value?.facts ?? value), Number.isFinite(value?.compiledAt) ? value.compiledAt : Date.now());
 }
 
 export function loadCompiledResume(): Promise<CompiledResume | null> {

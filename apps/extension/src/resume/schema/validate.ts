@@ -50,6 +50,9 @@ function fact(
   if (item.reviewStatus !== undefined && !STATUSES.has(item.reviewStatus as FactReviewStatus)) {
     throw new Error(`${path} 的审核状态无效`);
   }
+  if (item.evidenceStatus !== undefined && item.evidenceStatus !== 'current' && item.evidenceStatus !== 'historical') throw new Error(`${path} 的证据状态无效`);
+  if (item.valueModified !== undefined && typeof item.valueModified !== 'boolean') throw new Error(`${path} 的修改标记无效`);
+  if (item.valueModified === true && item.evidenceStatus !== 'historical') throw new Error(`${path} 修改后的值不能沿用原始证据`);
   if (item.evidence !== undefined) {
     if (!Array.isArray(item.evidence) || item.evidence.some((entry) => {
       if (typeof entry !== 'object' || entry === null) return true;
@@ -77,7 +80,7 @@ function fact(
     !PHONE_PATTERN.test(item.value.trim())) {
     throw new Error(`${path} 手机号格式无效`);
   }
-  if (/\.(startDate|endDate|birthDate)$/.test(path) && parseDateAtom(String(item.value)) === undefined) {
+  if (/\.(startDate|endDate|birthDate)$/.test(path) && (options.allowDraft !== true || status === 'confirmed') && parseDateAtom(String(item.value)) === undefined) {
     throw new Error(`${path} 日期无效，请保留原始年、月、日精度`);
   }
   if (options.allowDraft === true && status !== 'confirmed' && typeof item.value === 'string' && item.value.trim() === '') {

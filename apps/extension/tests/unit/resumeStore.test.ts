@@ -1,10 +1,24 @@
 import { describe, expect, it } from 'vitest';
 
 import { compileResume } from '@/resume/compiler/compile';
-import { activateResumeVersion, clearCompiledResume, deleteResumeVersion, listResumeVersions, loadCompiledResume, saveCompiledResume } from '@/resume/storage/resumeStore';
+import { activateResumeVersion, clearCompiledResume, deleteResumeVersion, listResumeVersions, loadCompiledResume, saveCompiledResume, updateActiveCompiledResume } from '@/resume/storage/resumeStore';
+import { updateFactValue, setFactReviewStatus } from '@/resume/review/facts';
+import { validateResumeDraft } from '@/resume/schema/validate';
 import { createSampleResumeFacts } from '@/shared/samples/sampleResume';
 
 describe('resumeStore', () => {
+  async function rawStore<T>(operation: (store: IDBObjectStore) => IDBRequest<T>): Promise<T> {
+    return new Promise((resolve, reject) => {
+      const opening = indexedDB.open('applyfill', 1);
+      opening.onsuccess = () => {
+        const db = opening.result; const tx = db.transaction('resumes', 'readwrite');
+        const request = operation(tx.objectStore('resumes'));
+        tx.oncomplete = () => { db.close(); resolve(request.result); };
+        tx.onerror = () => reject(tx.error);
+      };
+      opening.onerror = () => reject(opening.error);
+    });
+  }
   it('初始状态为空', async () => {
     expect(await loadCompiledResume()).toBeNull();
   });
@@ -72,6 +86,47 @@ describe('resumeStore', () => {
     const gpa = loaded?.facts.education[0]?.gpa;
     expect(gpa?.reviewStatus).toBe('pending');
     expect(gpa?.verified).toBe(false);
+    await clearCompiledResume();
+  });
+
+  it('旧版空姓名、缺失学历和空日期按草稿恢复，读取不会覆盖原始记录', async () => {
+    await clearCompiledResume();
+    const fact = (value: string) => ({ value, source: 'resume-import', verified: false, updatedAt: 1 });
+    const rawFacts = { schemaVersion: 1, updatedAt: 1, basic: { name: fact('') },
+      education: [{ school: fact('示例大学'), startDate: fact('') }], preferences: {}, unrecognizedNotes: '保留的原始信息' };
+    const old = { compilerVersion: 1, schemaVersion: 1, compiledAt: 42, facts: rawFacts, normalized: { basic: { name: '' } } };
+    await rawStore((store) => store.put(old, 'current'));
+    const loaded = await loadCompiledResume();
+    expect(loaded?.facts.basic.name.reviewStatus).toBe('pending');
+    expect(loaded?.facts.education[0]?.degree.value).toBe('');
+    expect(loaded?.facts.education[0]?.startDate?.value).toBe('');
+    expect(loaded?.facts.migration?.originalFacts).toEqual(rawFacts);
+    expect(await rawStore((store) => store.get('current'))).toEqual(old);
+    expect(loaded?.normalized.basic.name).toBe('');
+    let edited = updateFactValue(loaded!.facts, 'basic.name', '恢复后的姓名');
+    edited = setFactReviewStatus(edited, 'basic.name', 'confirmed');
+    await updateActiveCompiledResume(compileResume(validateResumeDraft(edited)));
+    const saved = await loadCompiledResume();
+    expect(saved?.normalized.basic.name).toBe('恢复后的姓名');
+    expect(saved?.facts.migration?.originalFacts).toEqual(rawFacts);
+    await clearCompiledResume();
+  });
+
+  it('旧版缺少姓名、经历 ID 或含损坏字段时可恢复，所有原始字段留在快照', async () => {
+    await clearCompiledResume();
+    const rawFacts = { schemaVersion: 1, basic: { phone: { value: 123, verified: true } }, education: [{}], projects: [{ id: 'same' }, { id: 'same' }] };
+    await rawStore((store) => store.put({ facts: rawFacts, compilerVersion: 1, schemaVersion: 1 }, 'current'));
+    const loaded = await loadCompiledResume();
+    expect(loaded?.facts.basic.name.value).toBe('');
+    expect(loaded?.facts.basic.phone).toBeUndefined();
+    expect(loaded?.facts.education[0]?.school.value).toBe('');
+    expect(new Set(loaded?.facts.projects?.map((entry) => entry.id)).size).toBe(2);
+    expect(loaded?.facts.migration?.originalFacts).toEqual(rawFacts);
+    await saveCompiledResume(compileResume(createSampleResumeFacts()), '新导入');
+    const versions = await listResumeVersions();
+    expect(versions).toHaveLength(2);
+    await activateResumeVersion(versions[1]!.id);
+    expect((await loadCompiledResume())?.facts.migration?.originalFacts).toEqual(rawFacts);
     await clearCompiledResume();
   });
 

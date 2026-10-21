@@ -54,11 +54,11 @@ describe('resume review editor', () => {
     expect(() => editReviewField(facts, { ...field, path: 'basic.__proto__' }, 'bad')).toThrow();
   });
 
-  it('清空可选日期会删除该事实，允许保存草稿并稍后补录', () => {
+  it('清空提取日期保留历史引用，允许保存草稿并稍后补录', () => {
     const facts = extractResumeFacts('姓名：李雷\n工作经历\n示例公司 | 工程师 | 2020.09 - 2024.06').facts;
     const start = listEditableReviewFields(facts).find((field) => field.path === 'work[0].startDate')!;
     const cleared = editReviewField(facts, start, '');
-    expect(cleared.work?.[0]?.startDate).toBeUndefined();
+    expect(cleared.work?.[0]?.startDate).toMatchObject({ value: '', originalValue: '2020-09', valueModified: true, evidenceStatus: 'historical' });
     expect(() => validateResumeDraft(cleared)).not.toThrow();
     expect(facts.work?.[0]?.startDate?.value).toBe('2020-09');
   });

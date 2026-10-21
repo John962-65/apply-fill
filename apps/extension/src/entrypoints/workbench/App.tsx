@@ -507,7 +507,7 @@ export function App() {
     }
     setReviewBusy(true);
     try {
-      const result = (await chrome.runtime.sendMessage({ type: parseStats !== null && reviewFacts.basic.name.value.trim() ? 'IMPORT_RESUME' : 'SAVE_RESUME_REVIEW', facts: reviewFacts, label: versionLabel })) as {
+      const result = (await chrome.runtime.sendMessage({ type: parseStats !== null ? 'IMPORT_RESUME' : 'SAVE_RESUME_REVIEW', draft: true, facts: reviewFacts, label: versionLabel })) as {
         ok: boolean;
         error?: string;
       };
@@ -523,36 +523,6 @@ export function App() {
       setReviewBusy(false);
     }
   }, [reviewFacts, refresh, parseStats, versionLabel]);
-
-  const confirmParsedImport = useCallback(async () => {
-    if (reviewFacts === null && parseJson.trim() === '') {
-      setParseNotice('没有可导入的解析结果');
-      return;
-    }
-    try {
-      const facts = reviewFacts ?? JSON.parse(parseJson) as ResumeFactsDocument;
-      const name = facts.basic.name?.value;
-      if (typeof name !== 'string' || name.trim() === '') {
-        setReviewFacts(facts);
-        setParseNotice('姓名为空：请先在下方审核区补全并确认姓名，再保存为草稿或导入');
-        return;
-      }
-      const result = (await chrome.runtime.sendMessage({ type: 'IMPORT_RESUME', facts, label: versionLabel })) as {
-        ok: boolean;
-        error?: string;
-      };
-      if (result?.ok === true) {
-        setParseNotice('已保存为待审核草稿；请在下方逐项确认后才可自动填写');
-        setReviewNotice('草稿已写入知识库，所有解析字段默认为待确认');
-        setParseStats(null);
-        await refresh();
-      } else {
-        setParseNotice(`导入失败：${result?.error ?? '未知错误'}`);
-      }
-    } catch (error) {
-      setParseNotice(`导入失败：${error instanceof Error ? error.message : String(error)}`);
-    }
-  }, [parseJson, reviewFacts, refresh, versionLabel]);
 
   const cancelParse = useCallback(() => {
     parseRevision.current++; setExtracting(false); setParsing(false);
@@ -654,7 +624,7 @@ export function App() {
               readOnly
             /></details>
             <div style={{ marginTop: 8 }}>
-              <button data-testid="parse-confirm" className="primary" onClick={() => void confirmParsedImport()}>
+              <button data-testid="parse-confirm" className="primary" disabled={reviewBusy} onClick={() => void saveReview()}>
                 保存当前核对结果
               </button>
               <button data-testid="parse-cancel" onClick={cancelParse}>

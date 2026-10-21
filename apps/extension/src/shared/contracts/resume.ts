@@ -1,5 +1,5 @@
 export const RESUME_SCHEMA_VERSION = 2;
-export const RESUME_COMPILER_VERSION = 3;
+export const RESUME_COMPILER_VERSION = 4;
 
 export type FactSource = 'user' | 'resume-import' | 'verified-document';
 export type FactReviewStatus = 'pending' | 'confirmed' | 'rejected';
@@ -13,6 +13,9 @@ export interface FactEvidence {
   blockId?: string;
   startOffset?: number;
   endOffset?: number;
+  instanceId?: string;
+  sectionKind?: 'basic' | 'education' | 'work' | 'projects' | 'skills' | 'awards' | 'additional';
+  status?: 'current' | 'historical';
 }
 
 export interface ResumeFact<T> {
@@ -23,6 +26,9 @@ export interface ResumeFact<T> {
   reviewStatus?: FactReviewStatus;
   confidence?: number;
   evidence?: FactEvidence[];
+  evidenceStatus?: 'current' | 'historical';
+  originalValue?: T;
+  valueModified?: boolean;
   updatedAt: number;
 }
 
@@ -104,6 +110,11 @@ export interface ResumeFactsDocument {
   preferences: PreferenceFacts;
   updatedAt: number;
   extraction?: ResumeExtractionMeta;
+  migration?: {
+    originalFacts: unknown;
+    fromSchemaVersion?: number;
+    warnings: string[];
+  };
   review?: {
     updatedAt: number;
     lastPath?: string;

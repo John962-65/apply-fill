@@ -633,7 +633,9 @@ export function installBackgroundRuntime(): void {
   };
 
   router.register('IMPORT_RESUME', async (message) => mutateResume(async () => {
-    const facts = validateResumeFacts((message as { facts?: unknown }).facts);
+    const facts = (message as { draft?: unknown }).draft === true
+      ? validateResumeDraft((message as { facts?: unknown }).facts)
+      : validateResumeFacts((message as { facts?: unknown }).facts);
     const compiled = compileResume(facts);
     const label = (message as { label?: unknown }).label;
     await saveCompiledResume(compiled, typeof label === 'string' ? label : undefined);
