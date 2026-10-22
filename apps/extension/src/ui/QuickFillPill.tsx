@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
+import { flushSync } from 'react-dom';
 import type { Root } from 'react-dom/client';
 
 import type { PillFieldView, QuickFillPillActions, QuickFillPillController, ResumePathOption } from '@/shared/contracts/ui';
@@ -50,6 +51,14 @@ function PillApp(props: { actions: QuickFillPillActions; fields: PillFieldView[]
   const [showOptional, setShowOptional] = useState(false);
   const [showPopulated, setShowPopulated] = useState(false);
   const [feedback, setFeedback] = useState('');
+  const [fieldBusy, setFieldBusy] = useState(false);
+  const performFieldAction = async (action: () => void | Promise<unknown>) => {
+    if (fieldBusy) return;
+    setFieldBusy(true);
+    try { await action(); }
+    catch { setFeedback('操作未完成，请查看字段状态后重试'); }
+    finally { setFieldBusy(false); }
+  };
   const [alternativesFor, setAlternativesFor] = useState<string | undefined>(undefined);
   const [alternatives, setAlternatives] = useState<ResumePathOption[]>([]);
   const [essayFor, setEssayFor] = useState<string | undefined>(undefined);
@@ -80,7 +89,7 @@ function PillApp(props: { actions: QuickFillPillActions; fields: PillFieldView[]
     return null;
   }
   return (
-    <div className="pill" data-testid="quickfill-pill">
+    <div className="pill" data-testid="quickfill-pill" aria-busy={fieldBusy}>
       <div className="pill-header">
         <span data-testid="pill-count">{count > 0 ? `需要人工处理（${count}）` : '填写结果'}</span>
         <button type="button" onClick={() => setCollapsed((value) => !value)} data-testid="pill-toggle">
@@ -109,7 +118,7 @@ function PillApp(props: { actions: QuickFillPillActions; fields: PillFieldView[]
               )}
               <div className="pill-actions">
                 {field.requiresSource === true ? null : (
-                  <button type="button" onClick={() => actions.onRetry(field.fieldKey)} data-testid="pill-retry">
+                  <button type="button" disabled={fieldBusy} onClick={() => void performFieldAction(() => actions.onRetry(field.fieldKey))} data-testid="pill-retry">
                     重试
                   </button>
                 )}
@@ -125,7 +134,7 @@ function PillApp(props: { actions: QuickFillPillActions; fields: PillFieldView[]
                     复制
                   </button>
                 )}
-                <button type="button" onClick={() => void openAlternatives(field.fieldKey)} data-testid="pill-source">
+                <button type="button" disabled={fieldBusy} onClick={() => void openAlternatives(field.fieldKey)} data-testid="pill-source">
                   换来源
                 </button>
                 {field.essay === true ? (
@@ -155,6 +164,7 @@ function PillApp(props: { actions: QuickFillPillActions; fields: PillFieldView[]
                 {field.requiresSource === true ? null : (
                   <button
                     type="button"
+                    disabled={fieldBusy}
                     onClick={() => {
                       actions.onSkip(field.fieldKey);
                       setFeedback(`已跳过 ${field.label !== '' ? field.label : field.fieldKey}`);
@@ -167,6 +177,7 @@ function PillApp(props: { actions: QuickFillPillActions; fields: PillFieldView[]
                 {field.requiresSource === true ? null : (
                   <button
                     type="button"
+                    disabled={fieldBusy}
                     onClick={() => {
                       actions.onMarkChecked(field.fieldKey);
                       setFeedback('已标记核对，受用户保护');
@@ -179,10 +190,12 @@ function PillApp(props: { actions: QuickFillPillActions; fields: PillFieldView[]
                 {alternativesFor === field.fieldKey ? (
                   <select
                     data-testid="pill-source-select"
+                    disabled={fieldBusy}
                     defaultValue=""
                     onChange={(event) => {
                       if (event.target.value !== '') {
-                        actions.onRemap(field.fieldKey, event.target.value);
+                        const path = event.target.value;
+                        void performFieldAction(() => actions.onRemap(field.fieldKey, path));
                         setAlternativesFor(undefined);
                       }
                     }}
@@ -267,7 +280,7 @@ export function mountQuickFillPill(actions: QuickFillPillActions): QuickFillPill
   const root: Root = createRoot(container);
   let fields: PillFieldView[] = [];
   const render = (): void => {
-    root.render(<PillApp actions={actions} fields={fields} />);
+    flushSync(() => root.render(<PillApp actions={actions} fields={fields} />));
   };
   render();
   return {

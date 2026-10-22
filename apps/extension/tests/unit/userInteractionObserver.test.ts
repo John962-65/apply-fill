@@ -26,6 +26,15 @@ describe('isTrustedUserEvent', () => {
     expect(isTrustedUserEvent(fakeEvent(button), (event) => event.target as Element | null)).toBe(false);
   });
 
+  it('插件 Shadow DOM 中的事件也被排除，站点 Shadow DOM 的编辑继续允许', () => {
+    document.body.innerHTML = '<div data-applyfill-ui id="plugin"></div><div id="site"></div>';
+    for (const [id, expected] of [['plugin', false], ['site', true]] as const) {
+      const root = mustQuery<HTMLElement>(`#${id}`).attachShadow({ mode: 'open' });
+      const input = document.createElement('input'); root.append(input);
+      expect(isTrustedUserEvent(fakeEvent(input), () => input)).toBe(expected);
+    }
+  });
+
   it('无法解析目标元素 → false', () => {
     expect(isTrustedUserEvent(fakeEvent(null), () => null)).toBe(false);
   });

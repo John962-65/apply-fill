@@ -44,6 +44,7 @@ test('第二段项目学到的来源语义经重载和简历重排后按各自�
     await row.getByTestId('pill-source-select').selectOption('projects[1].role');
     await expect(page.getByTestId('project-role-103')).toHaveValue('核心开发');
     await expect.poll(() => memoryPaths(workbench)).toEqual(['projects[{index}].role']);
+    await expect(page.getByTestId('quickfill-pill')).toHaveAttribute('aria-busy', 'false');
 
     await importFacts(workbench, { ...facts, projects: [...facts.projects].reverse() });
     await page.reload();

@@ -38,7 +38,10 @@ test('单字段换来源等待期间可以取消，迟到的选项不会被点�
     await row.getByTestId('pill-source').click();
     await row.getByTestId('pill-source-select').selectOption('education[0].school');
     await expect(page.locator('#manual-popup')).toBeVisible();
+    await expect(page.getByTestId('quickfill-pill')).toHaveAttribute('aria-busy', 'true');
+    await expect(row.getByTestId('pill-source')).toBeDisabled();
     expect((await sendTabCommand(workbench, 'CANCEL_RUN')).ok).toBe(true);
+    await expect(page.getByTestId('quickfill-pill')).toHaveAttribute('aria-busy', 'false');
     await expect(page.locator('#manual-popup [role="option"]')).toHaveText('示例大学');
     await expect(page.locator('#manual-select')).not.toHaveAttribute('data-committed', /.+/);
     const state = await workbench.evaluate(async () => {

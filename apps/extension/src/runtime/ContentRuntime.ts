@@ -1261,9 +1261,7 @@ export class ContentRuntime {
 
   private buildPillActions(): QuickFillPillActions {
     return {
-      onRetry: (fieldKey) => {
-        void this.pillRetryField(fieldKey);
-      },
+      onRetry: (fieldKey) => this.pillRetryField(fieldKey),
       onCopy: (fieldKey) => {
         this.copyTargetValue(fieldKey);
       },
@@ -1273,9 +1271,7 @@ export class ContentRuntime {
         }
         return listResumeValuePaths(this.lastCompiled);
       },
-      onRemap: (fieldKey, path) => {
-        void this.pillRemapField(fieldKey, path);
-      },
+      onRemap: (fieldKey, path) => this.pillRemapField(fieldKey, path),
       onSkip: (fieldKey) => {
         this.mutatePillResult(fieldKey, (result) => {
           result.status = 'NEEDS_MANUAL';

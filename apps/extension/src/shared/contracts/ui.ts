@@ -25,10 +25,10 @@ export interface EssayDraft {
 }
 
 export interface QuickFillPillActions {
-  onRetry(fieldKey: string): void;
+  onRetry(fieldKey: string): void | Promise<unknown>;
   onCopy(fieldKey: string): void;
   onListAlternatives(fieldKey: string): Promise<ResumePathOption[]>;
-  onRemap(fieldKey: string, path: string): void;
+  onRemap(fieldKey: string, path: string): void | Promise<unknown>;
   onSkip(fieldKey: string): void;
   onMarkChecked(fieldKey: string): void;
   onFocusField(fieldKey: string): void;

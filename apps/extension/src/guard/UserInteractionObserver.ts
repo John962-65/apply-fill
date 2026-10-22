@@ -33,7 +33,14 @@ export function isTrustedUserEvent(
   if (target === null) {
     return false;
   }
-  return target.closest(pluginUiSelector) === null;
+  if (event.composedPath?.().some((node) => node instanceof Element && node.closest(pluginUiSelector) !== null)) return false;
+  let node: Element | null = target;
+  while (node !== null) {
+    if (node.closest(pluginUiSelector) !== null) return false;
+    const root = node.getRootNode();
+    node = root instanceof ShadowRoot ? root.host : null;
+  }
+  return true;
 }
 
 export class UserInteractionObserver {
