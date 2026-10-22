@@ -15,7 +15,7 @@ import type {
   LlmTestConnectionResponse,
 } from '@/shared/contracts/llm';
 import type { ResumeAiConfig, ResumeAiConfigView } from '@/shared/contracts/resumeAi';
-import { resumeAiOriginOf } from '@/shared/contracts/resumeAi';
+import { DEFAULT_RESUME_AI_CONFIG, resumeAiOriginOf } from '@/shared/contracts/resumeAi';
 import { llmBaseUrlOriginPattern } from '@/shared/contracts/llm';
 import type { CompiledResume, ResumeFactsDocument, ResumeVersionInfo } from '@/shared/contracts/resume';
 import { reviewSummary } from '@/resume/review/facts';
@@ -62,6 +62,9 @@ export function App() {
   const [resumeAiNotice, setResumeAiNotice] = useState('');
   const [resumeAiDirty, setResumeAiDirty] = useState(false);
   const [extracting, setExtracting] = useState(false);
+  const [extractionElapsed, setExtractionElapsed] = useState(0);
+  const [extractionTimeout, setExtractionTimeout] = useState(DEFAULT_RESUME_AI_CONFIG.timeoutMs);
+  const extractionStartedAt = useRef(0);
   const [extractionWarnings, setExtractionWarnings] = useState<string[]>([]);
   const parseRevision = useRef(0);
 
@@ -153,6 +156,9 @@ export function App() {
       return;
     }
     const revision = ++parseRevision.current;
+    extractionStartedAt.current = Date.now();
+    setExtractionElapsed(0);
+    setExtractionTimeout(resumeAiConfig.timeoutMs);
     setExtracting(true);
     setExtractionWarnings([]);
     setResumeAiNotice('正在调用已授权模型进行分章节结构化提取…');
@@ -178,10 +184,12 @@ export function App() {
       } else {
         const reason = response?.error ?? '未知错误';
         const friendly: Record<string, string> = { RESUME_AI_NOT_AUTHORIZED: '请先授权模型服务域名', RESUME_AI_NOT_CONFIGURED: '请填写并保存 API 地址和模型名称',
-          RESUME_AI_TIMEOUT: '模型响应超时，可稍后重试', INVALID_MODEL_JSON: '模型没有返回有效的结构化数据，可重试或更换模型',
+          RESUME_AI_TIMEOUT: `单次等待 ${Math.round(resumeAiConfig.timeoutMs / 1000)} 秒后仍未收到完整结果。可在“配置 AI 解析服务”中增加请求超时，或稍后重试`, INVALID_MODEL_JSON: '模型没有返回有效的结构化数据，可重试或更换模型',
+          MODEL_OUTPUT_TRUNCATED: '模型输出超过长度限制，结果不完整；可减少简历内容或更换支持更长输出的模型',
           RESUME_AI_NETWORK_ERROR: '无法连接模型服务，请检查 API 地址与网络', RESUME_AI_PERMISSION_DENIED: '浏览器尚未授予该模型域名的访问权限',
           'HTTP 401': 'API 密钥无效或未提供，请检查密钥', 'HTTP 403': '模型服务拒绝访问，请检查账号和模型权限', 'HTTP 429': '请求超过服务限额，请检查额度或稍后重试' };
-        setResumeAiNotice(`AI 解析失败：${friendly[reason] ?? reason}。已提取的本地结果仍保留。`);
+        setResumeAiNotice(`AI 解析失败：${friendly[reason] ?? reason}。现有解析和核对结果仍保留。`);
+        setParseNotice(`已保留 ${source.pageCount} 页简历文字及现有解析结果，可继续核对或调整设置后重试 AI 解析。`);
       }
     } catch {
       if (revision === parseRevision.current) setResumeAiNotice('AI 解析请求未完成，请检查模型配置后重试。本地结果仍保留。');
@@ -355,6 +363,12 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    if (!extracting) return;
+    const timer = setInterval(() => setExtractionElapsed(Math.floor((Date.now() - extractionStartedAt.current) / 1000)), 1000);
+    return () => clearInterval(timer);
+  }, [extracting]);
+
+  useEffect(() => {
     void refresh();
     void loadCorrections();
     void loadJdContexts();
@@ -481,7 +495,8 @@ export function App() {
     };
     setParsedSource(source);
     setParseNotice(
-      `已提取 ${textResult.pageCount} 页文字并生成本地解析结果。可点击“AI 辅助解析”进一步识别，再到下方核对信息。`,
+      useAi ? `已提取 ${textResult.pageCount} 页文字，本地解析结果已保留，正在进行 AI 解析。` :
+        `已提取 ${textResult.pageCount} 页文字并生成本地解析结果。可点击“AI 辅助解析”进一步识别，再到下方核对信息。`,
     );
     if (useAi) { setParsing(false); await extractWithResumeAi(source); }
     } catch {
@@ -594,6 +609,9 @@ export function App() {
           : '使用 AI 解析前，先填写 API 地址、密钥和模型并授权。'} <a href="#resume-ai-settings"
             onClick={() => document.getElementById('resume-ai-settings')?.setAttribute('open', '')}>配置 AI 解析服务</a></p>
         {resumeAiNotice ? <p className="notice" data-testid="resume-ai-notice" role="status">{resumeAiNotice}</p> : null}
+        {extracting ? <p className="notice" data-testid="resume-ai-progress" role="status">
+          已等待 {extractionElapsed} 秒 · 单次最长等待 {Math.round(extractionTimeout / 1000)} 秒，正在等待完整的模型结果。
+        </p> : null}
         {extractionWarnings.length ? <details className="parse-warnings" open><summary>AI 解析提示（{extractionWarnings.length}）</summary>
           <ul data-testid="resume-ai-warnings">{extractionWarnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul></details> : null}
         {parseNotice !== '' ? (
@@ -715,6 +733,15 @@ export function App() {
           />
         </div>
         <div style={{ marginTop: 10 }}>
+          <label style={{ display: 'block', fontSize: 13, marginBottom: 8 }}>
+            请求超时（秒）：{' '}
+            <input data-testid="resume-ai-timeout" type="number" min={1} max={600} step={1} disabled={extracting}
+              value={Math.round((resumeAiConfig?.timeoutMs ?? DEFAULT_RESUME_AI_CONFIG.timeoutMs) / 1000)}
+              onChange={(event) => { if (event.target.value !== '') patchResumeAiConfig({ timeoutMs: Number(event.target.value) * 1000 }); }} />
+          </label>
+          <p style={{ fontSize: 12, color: '#666' }}>默认等待 120 秒；长简历或模型响应较慢时可设为 300 秒，最多 600 秒。超时后可手动重试。</p>
+          {resumeAiOriginOf(resumeAiConfig?.baseUrl ?? '') === 'https://api.deepseek.com' ?
+            <p style={{ fontSize: 12, color: '#666' }}>DeepSeek 简历提取使用 JSON 输出并关闭思考模式，以减少等待时间。</p> : null}
           <button data-testid="resume-ai-save" className="primary" onClick={() => void saveResumeAiConfig()}>
             保存 API 设置
           </button>
@@ -731,7 +758,7 @@ export function App() {
         </div>
         <p style={{ fontSize: 12, color: '#666' }}>
           已授权域名：{resumeAiConfig?.authorizedOrigin ?? '无'} · 温度 {resumeAiConfig?.temperature ?? 0} · 超时{' '}
-          {resumeAiConfig?.timeoutMs ?? 30000}ms · 重试 {resumeAiConfig?.maxRetries ?? 1} 次
+          {resumeAiConfig?.timeoutMs ?? DEFAULT_RESUME_AI_CONFIG.timeoutMs}ms · 故障重试 {resumeAiConfig?.maxRetries ?? 1} 次（超时不自动重发）
         </p>
       </details>
 

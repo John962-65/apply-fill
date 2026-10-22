@@ -71,10 +71,12 @@ export class ResumeExtractionAgent {
     }
 
     const url = `${config.baseUrl.replace(/\/+$/, '')}/chat/completions`;
+    const isDeepSeek = origin === 'https://api.deepseek.com';
     const makeBody = (format: number): string => JSON.stringify({
       model: config.model,
       temperature: config.temperature,
       stream: false,
+      ...(isDeepSeek ? { thinking: { type: 'disabled' }, max_tokens: 8192 } : {}),
       ...(format === 0 ? { response_format: {
         type: 'json_schema',
         json_schema: {
@@ -90,7 +92,8 @@ export class ResumeExtractionAgent {
     });
 
     let lastError = '';
-    let format = 0;
+    // DeepSeek Chat Completions documents JSON mode, not strict JSON Schema output.
+    let format = isDeepSeek ? 1 : 0;
     for (let attempt = 0; attempt <= config.maxRetries; attempt += 1) {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), config.timeoutMs);
@@ -118,7 +121,9 @@ export class ResumeExtractionAgent {
           }
           return { ok: false, error: lastError };
         }
-        const data = (await response.json()) as { choices?: Array<{ message?: { content?: unknown } }> };
+        const data = (await response.json()) as { choices?: Array<{ finish_reason?: string; message?: { content?: unknown } }> };
+        controller.signal.throwIfAborted();
+        if (data.choices?.[0]?.finish_reason === 'length') return { ok: false, error: 'MODEL_OUTPUT_TRUNCATED' };
         const content = data.choices?.[0]?.message?.content;
         if (typeof content !== 'string' || content.trim() === '') {
           lastError = 'EMPTY_MODEL_RESPONSE';
@@ -148,6 +153,8 @@ export class ResumeExtractionAgent {
             : error instanceof Error && error.name === 'AbortError'
               ? 'RESUME_AI_TIMEOUT'
               : 'RESUME_AI_NETWORK_ERROR';
+        // A timed-out request may still be generating on the provider. Do not submit it again automatically.
+        if (lastError === 'RESUME_AI_TIMEOUT') return { ok: false, error: lastError };
         if (attempt < config.maxRetries) {
           await delay(RETRY_DELAY_MS * (attempt + 1));
           continue;

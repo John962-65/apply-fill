@@ -5,6 +5,7 @@ export const RESUME_AI_CONFIG_STORAGE_KEY = 'applyfill.resume-ai.config.v1';
 export type ResumeAiMode = 'local-only' | 'cloud';
 
 export interface ResumeAiConfig {
+  version: 2;
   mode: ResumeAiMode;
   enabled: boolean;
   baseUrl: string;
@@ -29,13 +30,14 @@ export interface ResumeAiConfigView {
 }
 
 export const DEFAULT_RESUME_AI_CONFIG: ResumeAiConfig = {
+  version: 2,
   mode: 'local-only',
   enabled: false,
   baseUrl: '',
   apiKey: '',
   model: '',
   temperature: 0,
-  timeoutMs: 30000,
+  timeoutMs: 120000,
   maxRetries: 1,
 };
 
@@ -59,13 +61,16 @@ export function normalizeResumeAiConfig(raw: unknown): ResumeAiConfig {
   const record = (raw !== null && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
   const mode = record.mode === 'cloud' ? 'cloud' : 'local-only';
   return {
+    version: 2,
     mode,
     enabled: mode === 'cloud' && record.enabled === true,
     baseUrl: readString(record.baseUrl, '', 500),
     apiKey: readString(record.apiKey, '', 500),
     model: readString(record.model, '', 200),
     temperature: clampNumber(record.temperature, 0, 0, 2),
-    timeoutMs: Math.round(clampNumber(record.timeoutMs, DEFAULT_RESUME_AI_CONFIG.timeoutMs, 1000, 120000)),
+    // Version 1 had a fixed 30s default with no UI control. Preserve explicit settings after upgrade.
+    timeoutMs: Math.round(clampNumber(record.version !== 2 && record.timeoutMs === 30000 ? undefined : record.timeoutMs,
+      DEFAULT_RESUME_AI_CONFIG.timeoutMs, 1000, 600000)),
     maxRetries: Math.round(clampNumber(record.maxRetries, DEFAULT_RESUME_AI_CONFIG.maxRetries, 0, 3)),
     ...(typeof record.authorizedOrigin === 'string' && record.authorizedOrigin !== ''
       ? { authorizedOrigin: record.authorizedOrigin.slice(0, 300) }

@@ -12,12 +12,14 @@ export interface ResumeExtractionServiceOptions {
   fetchFn?: FetchLike;
   storageArea?: chrome.storage.StorageArea;
   canAccessOrigin?: (origin: string) => Promise<boolean>;
+  keepAliveFn?: () => Promise<unknown>;
 }
 
 export class ResumeExtractionService {
   private readonly storageArea: chrome.storage.StorageArea | undefined;
   private readonly agent: ResumeExtractionAgent;
   private readonly canAccessOrigin: (origin: string) => Promise<boolean>;
+  private readonly keepAliveFn: () => Promise<unknown>;
 
   constructor(options: ResumeExtractionServiceOptions = {}) {
     this.storageArea = options.storageArea ?? chrome.storage?.local;
@@ -25,6 +27,7 @@ export class ResumeExtractionService {
     this.canAccessOrigin = options.canAccessOrigin ?? (async (origin) => {
       try { return await chrome.permissions.contains({ origins: [`${origin}/*`] }); } catch { return false; }
     });
+    this.keepAliveFn = options.keepAliveFn ?? (async () => chrome.runtime.getPlatformInfo());
   }
 
   async loadConfig(): Promise<ResumeAiConfig> {
@@ -49,6 +52,15 @@ export class ResumeExtractionService {
     if (config.mode === 'cloud' && config.enabled && origin && config.authorizedOrigin === origin && !await this.canAccessOrigin(origin)) {
       return { ok: false, error: 'RESUME_AI_PERMISSION_DENIED' };
     }
-    return this.agent.extract(text, config);
+    // Bounded to this request. Chrome recommends API activity for long-running worker operations:
+    // https://developer.chrome.com/docs/extensions/develop/migrate/to-service-workers#keep-sw-alive
+    const timer = config.mode === 'cloud' && config.enabled && origin && config.authorizedOrigin === origin
+      ? setInterval(() => { void Promise.resolve().then(this.keepAliveFn).catch(() => undefined); }, 25000)
+      : undefined;
+    try {
+      return await this.agent.extract(text, config);
+    } finally {
+      if (timer !== undefined) clearInterval(timer);
+    }
   }
 }
