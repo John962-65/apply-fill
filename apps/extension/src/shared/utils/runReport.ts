@@ -1,5 +1,13 @@
 import type { FieldExecutionResult, MappingIssue } from '../contracts/field';
 import type { RunCounts } from '../contracts/run';
+import type { RunSummary } from '../contracts/run';
+
+export function completionStatus(summary: Pick<RunSummary, 'status' | 'counts' | 'mappingIssues' | 'dirty' | 'frames'>): RunSummary['status'] {
+  if (summary.status !== 'COMPLETED' && summary.status !== 'PARTIAL') return summary.status;
+  return summary.counts.needsManual > 0 || summary.mappingIssues.some((issue) => !issue.fieldKey && issueNeedsAttention(issue)) ||
+    (summary.dirty?.newRequired?.length ?? 0) > 0 || summary.frames?.some((frame) => frame.status === 'PARTIAL' || frame.status === 'NEEDS_MANUAL')
+    ? 'PARTIAL' : 'COMPLETED';
+}
 
 export function issueNeedsAttention(issue: MappingIssue): boolean {
   if (issue.kind === 'DISABLED' || issue.kind === 'READONLY') return false;

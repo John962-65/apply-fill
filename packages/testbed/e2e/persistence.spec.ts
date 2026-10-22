@@ -15,7 +15,7 @@ test('主帧换来源只更新自己的记录，保留跨域子帧的已验证 A
     });
     const workbench = await openWorkbench(session.context, session.extensionId);
     await importFacts(workbench, framesResumeFacts());
-    expect((await runAutofill(workbench)).summary?.status).toBe('COMPLETED');
+    expect((await runAutofill(workbench)).summary?.status).toBe('PARTIAL');
     const before = await readRoutingData(workbench);
     expect(before.cache.some((item) => item.input.host === 'localhost:5173' && item.input.normalizedLabel === '姓名')).toBe(true);
     expect(before.cache.some((item) => item.input.host === '127.0.0.1:5173' && item.input.normalizedLabel === '学校名称')).toBe(true);

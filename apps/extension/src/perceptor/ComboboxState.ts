@@ -38,16 +38,14 @@ export function readComboboxVisibleText(element: HTMLElement): string {
 }
 
 export function readComboboxCommitted(element: HTMLElement): ComboboxValueRead {
+  // A present business-value input is authoritative even when it is empty.
+  // A stale label/data attribute must never override an uncommitted form value.
+  const hidden = findHiddenCommitInput(element);
+  if (hidden !== undefined) return { source: 'FORM_VALUE', value: hidden.value.trim() };
+  const committed = element.getAttribute('data-committed');
+  if (committed !== null) return { source: 'COMPONENT_STATE', value: committed.trim() };
   const selected = mokaSelectedText(element);
   if (selected) return { source: 'COMPONENT_STATE', value: selected };
-  const committed = element.getAttribute('data-committed');
-  if (committed !== null && committed.trim() !== '') {
-    return { source: 'COMPONENT_STATE', value: committed.trim() };
-  }
-  const hidden = findHiddenCommitInput(element);
-  if (hidden !== undefined && hidden.value.trim() !== '') {
-    return { source: 'FORM_VALUE', value: hidden.value.trim() };
-  }
   const visible = readComboboxVisibleText(element);
   if (visible !== '') {
     return { source: 'VISIBLE', value: visible };

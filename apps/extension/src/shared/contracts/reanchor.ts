@@ -23,6 +23,7 @@ export interface InstanceObservation {
   sectionType: SectionType;
   contextText?: string;
   fields: ObservationField[];
+  continuityInstanceId?: string;
 }
 
 export interface FormInstanceSnapshot {

@@ -89,7 +89,7 @@ test('步骤改变时中止旧组合框等待，迟到的旧选项不能被点�
       trigger.setAttribute('aria-label', '待人工确认单位'); document.querySelector('label[for="school"]')!.textContent = '待人工确认单位';
     });
     const response = await awaitAutofill(workbench);
-    expect(response.summary?.status).toBe('COMPLETED'); expect(response.summary?.stepTransitions).toHaveLength(1);
+    expect(response.summary?.status).toBe('PARTIAL'); expect(response.summary?.stepTransitions).toHaveLength(1);
     await expect(page.locator('#late-popup [role="option"]')).toHaveText('示例大学');
     await expect(page.locator('#school')).not.toHaveAttribute('data-committed', /.+/);
   } finally { await session.close(); }

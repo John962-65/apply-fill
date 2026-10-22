@@ -17,7 +17,7 @@ test('终态复检：页面校验错误被识别并降级为人工处理，新�
     expect(summary).toBeDefined();
     if (summary === undefined) return;
 
-    expect(summary.status).toBe('COMPLETED');
+    expect(summary.status).toBe('PARTIAL');
     const byLabel = new Map(summary.fields.map((field) => [field.label, field]));
     expect(byLabel.get('姓名')?.status).toBe('VERIFIED');
     expect(byLabel.get('联系电话')?.status).toBe('VERIFIED');

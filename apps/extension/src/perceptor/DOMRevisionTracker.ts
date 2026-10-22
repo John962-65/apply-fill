@@ -33,11 +33,8 @@ export class DOMRevisionTracker {
     if (this.observer !== null) {
       return;
     }
-    this.observer = new MutationObserver(() => {
-      this.revisionValue += 1;
-      this.lastMutationAt = this.now();
-    });
-    this.observer.observe(this.root, { childList: true, subtree: true, attributes: true });
+    this.observer = new MutationObserver((records) => this.record(records));
+    this.observer.observe(this.root, { childList: true, subtree: true, attributes: true, characterData: true });
   }
 
   stop(): void {
@@ -46,11 +43,21 @@ export class DOMRevisionTracker {
   }
 
   get revision(): number {
-    if ((this.observer?.takeRecords().length ?? 0) > 0) {
+    this.record(this.observer?.takeRecords() ?? []);
+    return this.revisionValue;
+  }
+
+  private record(records: MutationRecord[]): void {
+    if (records.some((record) => {
+      const target = record.target instanceof Element ? record.target : record.target.parentElement;
+      if (target?.closest('[data-applyfill-ui]')) return false;
+      if (record.type === 'childList' && [...record.addedNodes, ...record.removedNodes].every((node) =>
+        node instanceof Element && node.matches('[data-applyfill-ui]'))) return false;
+      return true;
+    })) {
       this.revisionValue += 1;
       this.lastMutationAt = this.now();
     }
-    return this.revisionValue;
   }
 
   async waitFor(predicate: () => boolean, timeoutMs: number, signal?: AbortSignal): Promise<boolean> {

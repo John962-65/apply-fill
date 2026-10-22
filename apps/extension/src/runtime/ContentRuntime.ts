@@ -24,6 +24,8 @@ import {
   PortalTracker,
   readFieldValueText,
   readStableAttribute,
+  findVisibleOverlays,
+  isOverlayRelatedToTrigger,
   scanFormElements,
   scanRepeatableSections,
 } from '@/perceptor';
@@ -43,7 +45,7 @@ import type { CompiledResume } from '@/shared/contracts/resume';
 import type { ControlKind, FieldExecutionResult, FieldSignature, MappingIssue, SectionType } from '@/shared/contracts/field';
 import type { InstanceObservation, InstanceReport, ObservationField, ReanchorStatus } from '@/shared/contracts/reanchor';
 import type { RunEvent, RunSummary } from '@/shared/contracts/run';
-import type { ExecutionWave, WaveExecutionSummary } from '@/shared/contracts/scheduler';
+import type { WaveExecutionSummary } from '@/shared/contracts/scheduler';
 import { LLM_DISABLED_ERROR, LLM_NOT_CONFIGURED_ERROR } from '@/shared/contracts/llm';
 import type { LlmRouteResponse } from '@/shared/contracts/llm';
 import { sendToBackground } from '@/shared/messages/client';
@@ -51,7 +53,8 @@ import { isTabMessage } from '@/shared/messages/protocol';
 import type { AttachmentInfo, AutofillRunResponse, SimpleAck, UploadAttachmentResponse } from '@/shared/messages/protocol';
 import { createId } from '@/shared/utils/id';
 import { decodeBytes } from '@/shared/utils/binary';
-import { executionCounts, mappingIssueText } from '@/shared/utils/runReport';
+import { completionStatus, executionCounts, mappingIssueText } from '@/shared/utils/runReport';
+import { DiagnosticRecorder } from './DiagnosticRecorder';
 import type { ApplicationContext } from '@/jd/ApplicationContext';
 import { generateEssayDraft } from '@/jd/EssayGenerator';
 import type { EssayProjection } from '@/jd/EssayGenerator';
@@ -88,6 +91,7 @@ interface ContainerRole {
   sectionType: SectionType;
   instanceId: string;
   stepId: string;
+  runId?: string;
 }
 
 const SCOPED_SECTION_TYPES = new Set<SectionType>(['education', 'project', 'work']);
@@ -172,6 +176,7 @@ export class ContentRuntime {
   private lastCompiled: CompiledResume | null = null;
   private lastPlan: ExecutionPlan | null = null;
   private lastSummary: RunSummary | null = null;
+  private diagnostics = new DiagnosticRecorder();
   private pill: QuickFillPillController | null = null;
   private readonly stepObserver = new StepObserver(document, (text) => {
     for (const value of privateFactStrings(this.lastCompiled)) if (value) text = text.split(value).join('[private]');
@@ -222,6 +227,11 @@ export class ContentRuntime {
       isIdentityValid: (element, field) => isFieldBindingValid(element, field.signature, this.formId,
         this.findContainerRole(element), this.stepObserver.stepId()),
       verifyField: (context) => verifier.verify(context),
+      onDiagnostic: (field, diagnostic) => this.diagnostics.record({
+        ...this.diagnostics.field(diagnostic.runId, field.signature, diagnostic.wave),
+        mappingSource: this.lastPlan?.mappings.find((mapping) => mapping.fieldKey === field.signature.fieldKey)?.source,
+        targetPath: field.targetPath, ...diagnostic,
+      }),
       selectAgent,
       cascaderWalker: new CascaderWalker(portalTracker),
       dateAgent: new DateAgent(portalTracker, selectAgent),
@@ -230,6 +240,7 @@ export class ContentRuntime {
       barrier: new WaveBarrier(document, undefined, (element) => this.resolveFieldKey(element)),
       registry: this.dependencyRegistry,
       mutex: new ExecutionMutex(),
+      getDomRevision: () => this.revisionTracker.revision,
     });
     this.observer = new UserInteractionObserver({
       resolveFieldKey: (target) => this.resolveFieldKey(target),
@@ -491,6 +502,7 @@ export class ContentRuntime {
       return empty;
     }
     this.lastCompiled = compiled;
+    this.diagnostics = new DiagnosticRecorder(privateFactStrings(compiled));
 
     await this.routingPersistence.load(runId, signal);
     this.pendingCacheCandidates.clear();
@@ -637,6 +649,9 @@ export class ContentRuntime {
     });
     summary.counts = { ...summary.counts, ...this.computeStatusCounts(results, summary.mappingIssues) };
     summary.status = signal.aborted ? 'CANCELLED' : summary.status;
+    summary.status = completionStatus(summary);
+    summary.diagnostics = this.diagnostics.snapshot();
+    summary.diagnosticsDropped = this.diagnostics.dropped;
     const finalResults = new Map(results.map((result) => [result.fieldKey, result]));
     for (const candidate of this.pendingCacheCandidates.values()) {
       if (!signal.aborted && finalResults.get(candidate.fieldKey)?.status === 'VERIFIED') {
@@ -703,116 +718,8 @@ export class ContentRuntime {
       sections = this.collectScopedSections(elements);
     }
 
-    const instanceInputs: ScopedInstanceInput[] = [];
-    const instanceReports: InstanceReport[] = [];
-    const containerElements = new Set<HTMLElement>();
-    const now = Date.now();
-
-    // One allocation pass owns all same-type containers in this step. Separate
-    // passes could claim the same snapshot twice or misreport other scopes as missing.
-    for (const [sectionType, peers] of this.groupScopedSections(sections)) {
-      const records = [...new Set(peers.flatMap((section) => section.containers))].map((container) => {
-        const owner = peers.filter((section) => section.containers.includes(container))
-          .sort((a, b) => a.scope.contains(b.scope) ? 1 : b.scope.contains(a.scope) ? -1 : 0)[0]!;
-        const distilled = distillScopedElements(container, { formId: this.formId, stepId, sectionType, instanceId: 'instance_pending' })
-          .filter((item) => owner.scope.contains(item.element) && !sections.some((other) => other !== owner &&
-            owner.scope.contains(other.scope) && other.scope.contains(item.element)));
-        return { container, distilled };
-      }).filter((record) => record.distilled.length > 0);
-      const containers = records.map((record) => record.container);
-      const availableEntryIds = entryIdsOf(compiled, sectionType);
-      const distilledPerContainer = records.map((record) => record.distilled);
-      const observations = distilledPerContainer.map((items) => toObservation(sectionType, items));
-      const snapshots = instanceRegistry.bySection(sectionType);
-      const scopeAmbiguous = new Set(peers.map((section) => section.scope.closest('form'))).size > 1 ||
-        peers.some((section) => sections.some((other) => other !== section && section.scope.contains(other.scope)));
-      const output: ReturnType<ReanchorManager['reanchorSection']> = scopeAmbiguous ? { results: observations.map(() => ({ status: 'AMBIGUOUS' as const, reason: 'SECTION_SCOPE_REQUIRES_CONFIRMATION',
-        evidence: { stableIdMatched: false, witnessMatched: false, topologyMatched: false, contextMatched: false } })), missingSnapshots: [] } : this.reanchorManager.reanchorSection({
-        sectionType,
-        observations,
-        snapshots,
-        availableEntryIds,
-        claimedEntryIds: instanceRegistry.entryIdsOwnedBy(sectionType),
-        allocateInstanceId: () => instanceRegistry.allocateInstanceId(sectionType),
-      });
-
-      output.results.forEach((result, index) => {
-        const container = containers[index];
-        const items = distilledPerContainer[index] ?? [];
-        const observation = observations[index];
-        if (container === undefined || observation === undefined) {
-          return;
-        }
-        let instanceId = result.instanceId;
-        if (instanceId === undefined) {
-          instanceId = instanceRegistry.allocateInstanceId(sectionType);
-        }
-        for (const item of items) {
-          item.field.instanceId = instanceId;
-          item.field.descriptor.instanceId = instanceId;
-        }
-        containerElements.add(container);
-        this.containerRoles.set(container, { sectionType, instanceId, stepId });
-
-        const witness = extractWitness(sectionType, observation.fields);
-        const topology = buildTopology(observation.fields);
-        if (result.status === 'MATCHED' || result.status === 'NEW_INSTANCE') {
-          instanceRegistry.upsert(instanceId, {
-            sectionType,
-            resumeEntryId: result.resumeEntryId,
-            witness,
-            topology,
-            observedAt: now,
-          });
-        } else {
-          instanceRegistry.reserveInstanceId(sectionType, instanceId);
-        }
-
-        instanceInputs.push({
-          sectionType,
-          instanceId,
-          resumeEntryId: result.status === 'AMBIGUOUS' ? undefined : result.resumeEntryId,
-          reanchorStatus: result.status,
-          distilled: items,
-          reason: result.reason,
-        });
-        const report: InstanceReport = {
-          stepId,
-          sectionType,
-          containerIndex: index,
-          instanceId,
-          status: reportStatusOf(result.status),
-        };
-        if (result.resumeEntryId !== undefined && result.status !== 'AMBIGUOUS') {
-          report.resumeEntryId = result.resumeEntryId;
-        }
-        if (witness.primary !== undefined) {
-          report.witnessPrimary = witness.primary.value;
-        }
-        if (result.reason !== undefined) {
-          report.reason = result.reason;
-        }
-        instanceReports.push(report);
-      });
-
-      for (const snapshot of output.missingSnapshots) {
-        const report: InstanceReport = {
-          stepId,
-          sectionType,
-          containerIndex: -1,
-          instanceId: snapshot.instanceId,
-          status: 'MISSING',
-        };
-        if (snapshot.resumeEntryId !== undefined) {
-          report.resumeEntryId = snapshot.resumeEntryId;
-        }
-        if (snapshot.witness.primary !== undefined) {
-          report.witnessPrimary = snapshot.witness.primary.value;
-        }
-        instanceReports.push(report);
-      }
-    }
-
+    const binding = this.bindSections(compiled, elements, stepId);
+    const { instanceInputs, containerElements } = binding;
     const flatElements = elements.filter((element) => !isInsideAny(element, containerElements));
     const flatDistilled = distillElements(flatElements, { formId: this.formId, stepId });
     const planOptions = {
@@ -830,6 +737,8 @@ export class ContentRuntime {
       });
     }
     this.rememberPlan(plan);
+    this.lastPlan = plan;
+    this.diagnostics.plan(runId, plan);
 
     if (emitStart) {
       this.emit({ type: 'RUN_STARTED', runId, totalFields: plan.executable.length });
@@ -845,11 +754,12 @@ export class ContentRuntime {
       pauseGate,
       compiled,
       initialPlan: runnable,
-      containerElements,
+      binding,
+      executedKeys,
     });
     const results = orchestration.results;
 
-    if (!signal.aborted) this.refreshSnapshots(instanceInputs, instanceRegistry);
+    if (!signal.aborted) this.refreshSnapshots(orchestration.binding.instanceInputs, instanceRegistry);
     const verifiedKeys = new Set(
       results.filter((result) => result.status === 'VERIFIED').map((result) => result.fieldKey),
     );
@@ -883,8 +793,8 @@ export class ContentRuntime {
       results,
       waves: orchestration.waves,
       cycles: orchestration.cycles,
-      issues: [...preIssues, ...plan.issues, ...orchestration.finalPlan.issues],
-      instances: instanceReports,
+      issues: [...preIssues, ...orchestration.finalPlan.issues],
+      instances: orchestration.binding.instanceReports,
       observedKeys: [...new Set([...plan.elementByKey.keys(), ...orchestration.finalPlan.elementByKey.keys()])],
       plan: orchestration.finalPlan === runnable ? plan : orchestration.finalPlan,
     };
@@ -896,59 +806,127 @@ export class ContentRuntime {
     pauseGate: PauseGate;
     compiled: CompiledResume;
     initialPlan: ExecutionPlan;
-    containerElements: Set<HTMLElement>;
+    binding: ReturnType<ContentRuntime['bindSections']>;
+    executedKeys: Set<string>;
   }): Promise<{
     results: FieldExecutionResult[];
     waves: WaveExecutionSummary[];
     cycles: Array<{ sourceFieldKey: string; targetFieldKey: string }>;
     finalPlan: ExecutionPlan;
+    binding: ReturnType<ContentRuntime['bindSections']>;
   }> {
     const { runId, signal, pauseGate } = context;
     const scheduler = this.waveScheduler;
-    const executor = (fields: ExecutableField[], _wave: ExecutionWave, waveSignal: AbortSignal) =>
-      this.engine.executeRun(fields, {
-        runId,
-        signal: waveSignal,
-        checkpoint: (checkpointSignal) => this.checkpointRun(runId, checkpointSignal, pauseGate),
-        onEvent: (event) => this.emit(event),
-      });
-    const results: FieldExecutionResult[] = [];
+    const results = new Map<string, FieldExecutionResult>();
+    const attempts = new Map<string, number>();
+    const attemptedNodes = new Map<string, HTMLElement>();
     const waves: WaveExecutionSummary[] = [];
     const cycles: Array<{ sourceFieldKey: string; targetFieldKey: string }> = [];
-    const executedKeys = new Set<string>();
     let currentPlan = context.initialPlan;
-    let pending = currentPlan.executable.slice();
-    let passes = 0;
-    while (pending.length > 0 && passes <= MAX_RECONCILE_PASSES) {
-      const groups = scheduler.groupByWave(pending);
-      let sawAdded = false;
-      for (const wave of scheduler.order) {
-        const fields = groups.get(wave) ?? [];
-        if (fields.length === 0) {
+    let binding = context.binding;
+    let replans = 0;
+    const maxReplans = (MAX_RECONCILE_PASSES + 1) * scheduler.order.length;
+    const predicate = new NativeCommitPredicate();
+    const reboundVerifier = new FieldVerifier(predicate);
+    const pendingFields = async (): Promise<ExecutableField[]> => {
+      const pending: ExecutableField[] = [];
+      for (const field of currentPlan.executable) {
+        const key = field.signature.fieldKey;
+        const previous = results.get(key);
+        if (this.registry.isUserProtected(key)) {
+          if (previous) { previous.status = 'USER_OVERRIDDEN'; previous.reason = 'USER_PROTECTED'; }
+          else if (!context.executedKeys.has(key)) pending.push(field);
           continue;
         }
-        const outcome = await scheduler.runWave(wave, fields, { executor, signal });
-        waves.push(outcome.summary);
-        cycles.push(...outcome.cycles);
-        for (const result of outcome.results) {
-          executedKeys.add(result.fieldKey);
+        if (!previous && context.executedKeys.has(key)) continue;
+        if (previous?.status === 'VERIFIED' || previous?.reason === 'IDENTITY_LOST') {
+          const rebound = attemptedNodes.get(key) !== field.element || previous.reason === 'IDENTITY_LOST';
+          const startedAt = Date.now();
+          const verifier = rebound ? reboundVerifier : predicate;
+          const commit = await verifier.verify({ fieldKey: key, signature: field.signature,
+            controlKind: field.signature.controlKind, element: field.element,
+            expectedValue: field.expectedValue, expectedText: field.expectedText, expectedCommitValue: field.expectedCommitValue, signal });
+          if (rebound) this.diagnostics.record({ ...this.diagnostics.field(runId, field.signature, 'RECOVER'),
+            actionStage: 'VERIFY', result: commit.status, reason: commit.failureReason,
+            elapsedMs: Date.now() - startedAt, targetPath: field.targetPath });
+          if (commit.status === 'CONFIRMED') {
+            previous.status = 'VERIFIED'; previous.commit = commit; delete previous.reason;
+            attemptedNodes.set(key, field.element);
+            continue;
+          }
         }
-        results.push(...outcome.results);
-        if (outcome.delta.added.length > 0) {
-          sawAdded = true;
+        if (previous && previous.status !== 'VERIFIED' &&
+          !(previous.reason === 'IDENTITY_LOST' && attemptedNodes.get(key) !== field.element)) continue;
+        if ((attempts.get(key) ?? 0) > MAX_RECONCILE_PASSES) {
+          if (previous) { previous.status = 'NEEDS_MANUAL'; previous.reason = 'REPLAN_BUDGET_EXHAUSTED'; }
+          this.diagnostics.record({ ...this.diagnostics.field(runId, field.signature, 'RECOVER'),
+            actionStage: 'RECOVER', result: 'MANUAL', reason: 'REPLAN_BUDGET_EXHAUSTED' });
+          continue;
         }
+        pending.push(field);
       }
-      if (!sawAdded || signal.aborted) {
-        break;
+      return pending;
+    };
+    while (!signal.aborted) {
+      const pending = await pendingFields();
+      if (!pending.length) break;
+      const groups = scheduler.groupByWave(pending);
+      const wave = scheduler.order.find((candidate) => (groups.get(candidate)?.length ?? 0) > 0)!;
+      const fields = groups.get(wave)!;
+      for (const field of fields) {
+        const key = field.signature.fieldKey;
+        attempts.set(key, (attempts.get(key) ?? 0) + 1);
+        attemptedNodes.set(key, field.element);
       }
-      passes += 1;
-      if (passes > MAX_RECONCILE_PASSES) {
-        break;
+      const outcome = await scheduler.runWave(wave, fields, { signal,
+        executor: (executables, _wave, waveSignal) => this.engine.executeRun(executables, {
+          runId, signal: waveSignal, wave,
+          checkpoint: (checkpointSignal) => this.checkpointRun(runId, checkpointSignal, pauseGate),
+          onEvent: (event) => {
+            if (event.type === 'FIELD_FINISHED' && event.result.status === 'VERIFIED') {
+              this.refreshSnapshots(binding.instanceInputs, this.instancesFor(this.stepObserver.stepId()));
+            }
+            this.emit(event);
+          },
+        }),
+      });
+      waves.push(outcome.summary);
+      cycles.push(...outcome.cycles);
+      for (const result of outcome.results) results.set(result.fieldKey, result);
+      if (signal.aborted) break;
+      if (outcome.delta.mutated || outcome.results.some((result) => result.reason === 'IDENTITY_LOST')) {
+        if (replans >= maxReplans) {
+          for (const field of await pendingFields()) results.set(field.signature.fieldKey, {
+            fieldKey: field.signature.fieldKey, label: field.signature.label, controlKind: field.signature.controlKind,
+            sectionType: field.signature.sectionType, targetPath: field.targetPath, status: 'NEEDS_MANUAL',
+            attempts: attempts.get(field.signature.fieldKey) ?? 0, reason: 'REPLAN_BUDGET_EXHAUSTED',
+          });
+          break;
+        }
+        this.refreshSnapshots(binding.instanceInputs, this.instancesFor(this.stepObserver.stepId()));
+        const rebuilt = this.rebuildPlan(context.compiled);
+        for (const field of rebuilt.plan.executable) {
+          const previous = currentPlan.executable.find((candidate) => candidate.signature.fieldKey === field.signature.fieldKey);
+          if (previous?.expectedText === field.expectedText) field.expectedCommitValue = previous?.expectedCommitValue;
+        }
+        currentPlan = rebuilt.plan;
+        const previousInstances = new Map(binding.instanceReports.map((report) => [`${report.sectionType}:${report.instanceId}`, report]));
+        for (const report of rebuilt.binding.instanceReports) {
+          if (report.status === 'MATCHED' && previousInstances.get(`${report.sectionType}:${report.instanceId}`)?.status === 'NEW_INSTANCE') report.status = 'NEW_INSTANCE';
+        }
+        binding = rebuilt.binding;
+        this.lastPlan = currentPlan;
+        this.diagnostics.plan(runId, currentPlan, wave);
+        for (const mapping of currentPlan.mappings) this.diagnostics.record({
+          ...this.diagnostics.field(runId, mapping.signature, wave), actionStage: 'REANCHOR',
+          targetPath: mapping.targetPath, mappingSource: mapping.source,
+          result: mapping.status === 'AMBIGUOUS' ? 'AMBIGUOUS' : 'REBOUND', reason: mapping.reason,
+          domRevisionBefore: outcome.summary.domRevisionBefore, domRevisionAfter: outcome.summary.domRevisionAfter,
+        });
+        replans += 1;
       }
-      currentPlan = this.rebuildPlan(context.compiled, context.containerElements);
-      pending = currentPlan.executable.filter((field) => !executedKeys.has(field.signature.fieldKey));
     }
-    return { results, waves, cycles, finalPlan: currentPlan };
+    return { results: [...results.values()], waves, cycles, finalPlan: currentPlan, binding };
   }
 
   private async runDirtyCheck(
@@ -1005,6 +983,7 @@ export class ContentRuntime {
         expectedText,
         controlKind: result.controlKind,
         element,
+        expectedCommitValue: executable?.expectedCommitValue,
       };
       if (executable !== undefined) {
         candidate.refill = { ...executable, element };
@@ -1080,6 +1059,7 @@ export class ContentRuntime {
       if (!required) {
         continue;
       }
+      if (readFieldValueText(element).trim() !== '') continue;
       const fieldKey = this.resolveFieldKey(element);
       if (fieldKey === undefined || handledKeys.has(fieldKey)) {
         continue;
@@ -1128,7 +1108,7 @@ export class ContentRuntime {
         label: result.label,
         status: result.status,
         elementConnected: connected,
-        valueMatchesExpected: connected && expectedText !== '' ? observedValueMatches(element, result.controlKind, expectedText) : false,
+        valueMatchesExpected: connected && expectedText !== '' ? observedValueMatches(element, result.controlKind, expectedText, executable?.expectedCommitValue) : false,
         validationError: connected && detectValidationError(element).hasError,
         expectedText,
         refillable: executable !== undefined,
@@ -1145,6 +1125,9 @@ export class ContentRuntime {
     const stats = { reverified: 0, refilled: 0, manual: 0 };
     const refillFields: ExecutableField[] = [];
     for (const decision of decisions) {
+      const signature = this.signatures.get(decision.fieldKey);
+      if (signature) this.diagnostics.record({ ...this.diagnostics.field(runId, signature, 'RECOVER'),
+        actionStage: 'RECOVER', result: decision.action, reason: decision.reason });
       const result = results.find((candidate) => candidate.fieldKey === decision.fieldKey);
       if (result === undefined) {
         continue;
@@ -1177,6 +1160,7 @@ export class ContentRuntime {
       const refillResults = await this.engine.executeRun(refillFields, {
         runId,
         signal,
+        wave: 'RECOVER',
         checkpoint: (checkpointSignal) => this.checkpointRun(runId, checkpointSignal, pauseGate),
         onEvent: (event) => this.emit(event),
       });
@@ -1433,7 +1417,14 @@ export class ContentRuntime {
   }
 
   private refreshSummary(summary: RunSummary): void {
+    if (summary.dirty) {
+      const verified = new Map(summary.fields.filter((field) => field.status === 'VERIFIED').map((field) => [field.fieldKey, field]));
+      summary.dirty.newRequired = this.sweepPageResults(verified, summary.fields).newRequired;
+    }
     summary.counts = { ...summary.counts, ...this.computeStatusCounts(summary.fields, summary.mappingIssues) };
+    summary.status = completionStatus(summary);
+    summary.diagnostics = this.diagnostics.snapshot();
+    summary.diagnosticsDropped = this.diagnostics.dropped;
     summary.counts.mapped = Math.max(summary.counts.mapped, summary.fields.filter((field) => field.targetPath !== undefined).length);
     summary.finishedAt = Date.now();
     this.emit({ type: 'REPORT_UPDATED', runId: summary.runId, summary });
@@ -1679,17 +1670,151 @@ export class ContentRuntime {
     return routed.size;
   }
 
-  private rebuildPlan(compiled: CompiledResume, containerElements: Set<HTMLElement>): ExecutionPlan {
+  private bindSections(compiled: CompiledResume, elements: HTMLElement[], stepId: string) {
+    const instanceInputs: ScopedInstanceInput[] = [];
+    const instanceReports: InstanceReport[] = [];
+    const containerElements = new Set<HTMLElement>();
+    const now = Date.now();
+    const instanceRegistry = this.instancesFor(stepId);
+    const sections = this.collectScopedSections(elements);
+
+    // One allocation pass owns all same-type containers in this step. Separate
+    // passes could claim the same snapshot twice or misreport other scopes as missing.
+    for (const [sectionType, peers] of this.groupScopedSections(sections)) {
+      const records = [...new Set(peers.flatMap((section) => section.containers))].map((container) => {
+        const owner = peers.filter((section) => section.containers.includes(container))
+          .sort((a, b) => a.scope.contains(b.scope) ? 1 : b.scope.contains(a.scope) ? -1 : 0)[0]!;
+        const distilled = distillScopedElements(container, { formId: this.formId, stepId, sectionType, instanceId: 'instance_pending' })
+          .filter((item) => owner.scope.contains(item.element) && !sections.some((other) => other !== owner &&
+            owner.scope.contains(other.scope) && other.scope.contains(item.element)));
+        return { container, distilled };
+      }).filter((record) => record.distilled.length > 0);
+      const containers = records.map((record) => record.container);
+      const availableEntryIds = entryIdsOf(compiled, sectionType);
+      const distilledPerContainer = records.map((record) => record.distilled);
+      const observations = distilledPerContainer.map((items, index) => {
+        const observation = toObservation(sectionType, items);
+        const role = this.containerRoles.get(containers[index]!);
+        if (role?.stepId === stepId && role.sectionType === sectionType && role.runId === this.activeRun?.runId) {
+          const previous = instanceRegistry.get(sectionType, role.instanceId)?.witness.primary?.value;
+          const current = extractWitness(sectionType, observation.fields).primary?.value;
+          const userEdited = items.some((item) => {
+            const key = this.keyByElement.get(item.element);
+            return key !== undefined && this.registry.isUserProtected(key);
+          });
+          if (!previous || !current || previous === current || userEdited) observation.continuityInstanceId = role.instanceId;
+        }
+        return observation;
+      });
+      const snapshots = instanceRegistry.bySection(sectionType);
+      const scopeAmbiguous = new Set(peers.map((section) => section.scope.closest('form'))).size > 1 ||
+        peers.some((section) => sections.some((other) => other !== section && section.scope.contains(other.scope)));
+      const output: ReturnType<ReanchorManager['reanchorSection']> = scopeAmbiguous ? { results: observations.map(() => ({ status: 'AMBIGUOUS' as const, reason: 'SECTION_SCOPE_REQUIRES_CONFIRMATION',
+        evidence: { stableIdMatched: false, witnessMatched: false, topologyMatched: false, contextMatched: false } })), missingSnapshots: [] } : this.reanchorManager.reanchorSection({
+        sectionType,
+        observations,
+        snapshots,
+        availableEntryIds,
+        claimedEntryIds: instanceRegistry.entryIdsOwnedBy(sectionType),
+        allocateInstanceId: () => instanceRegistry.allocateInstanceId(sectionType),
+      });
+
+      output.results.forEach((result, index) => {
+        const container = containers[index];
+        const items = distilledPerContainer[index] ?? [];
+        const observation = observations[index];
+        if (container === undefined || observation === undefined) {
+          return;
+        }
+        let instanceId = result.instanceId;
+        if (instanceId === undefined) {
+          const previousRole = this.containerRoles.get(container);
+          instanceId = previousRole?.stepId === stepId && previousRole.sectionType === sectionType
+            ? previousRole.instanceId : instanceRegistry.allocateInstanceId(sectionType);
+        }
+        for (const item of items) {
+          item.field.instanceId = instanceId;
+          item.field.descriptor.instanceId = instanceId;
+        }
+        containerElements.add(container);
+        this.containerRoles.set(container, { sectionType, instanceId, stepId, runId: this.activeRun?.runId });
+
+        const witness = extractWitness(sectionType, observation.fields);
+        const topology = buildTopology(observation.fields);
+        if (result.status === 'MATCHED' || result.status === 'NEW_INSTANCE') {
+          instanceRegistry.upsert(instanceId, {
+            sectionType,
+            resumeEntryId: result.resumeEntryId,
+            witness,
+            topology,
+            observedAt: now,
+          });
+        } else {
+          instanceRegistry.reserveInstanceId(sectionType, instanceId);
+        }
+
+        instanceInputs.push({
+          sectionType,
+          instanceId,
+          resumeEntryId: result.status === 'AMBIGUOUS' ? undefined : result.resumeEntryId,
+          reanchorStatus: result.status,
+          distilled: items,
+          reason: result.reason,
+        });
+        const report: InstanceReport = {
+          stepId,
+          sectionType,
+          containerIndex: index,
+          instanceId,
+          status: reportStatusOf(result.status),
+        };
+        if (result.resumeEntryId !== undefined && result.status !== 'AMBIGUOUS') {
+          report.resumeEntryId = result.resumeEntryId;
+        }
+        if (witness.primary !== undefined) {
+          report.witnessPrimary = witness.primary.value;
+        }
+        if (result.reason !== undefined) {
+          report.reason = result.reason;
+        }
+        instanceReports.push(report);
+      });
+
+      for (const snapshot of output.missingSnapshots) {
+        if (instanceReports.some((report) => report.sectionType === sectionType && report.instanceId === snapshot.instanceId && report.containerIndex >= 0)) continue;
+        const report: InstanceReport = {
+          stepId,
+          sectionType,
+          containerIndex: -1,
+          instanceId: snapshot.instanceId,
+          status: 'MISSING',
+        };
+        if (snapshot.resumeEntryId !== undefined) {
+          report.resumeEntryId = snapshot.resumeEntryId;
+        }
+        if (snapshot.witness.primary !== undefined) {
+          report.witnessPrimary = snapshot.witness.primary.value;
+        }
+        instanceReports.push(report);
+      }
+    }
+
+    return { instanceInputs, instanceReports, containerElements };
+  }
+
+  private rebuildPlan(compiled: CompiledResume): { plan: ExecutionPlan; binding: ReturnType<ContentRuntime['bindSections']> } {
     const elements = scanFormElements(document);
-    const flat = elements.filter((element) => !isInsideAny(element, containerElements));
-    const rebuilt = buildExecutionPlan(compiled, distillElements(flat, { ...this.fieldContext }), {
+    const binding = this.bindSections(compiled, elements, this.stepObserver.stepId());
+    const flat = elements.filter((element) => !isInsideAny(element, binding.containerElements));
+    const plan = buildExecutionPlan(compiled, distillElements(flat, { ...this.fieldContext }), {
+      instances: binding.instanceInputs,
       cache: this.fingerprintCache,
       memory: this.mappingMemory,
       host: location.host,
       ...(this.llmProposals.size > 0 ? { llmProposals: this.llmProposals } : {}),
     });
-    this.rememberPlan(rebuilt);
-    return rebuilt;
+    this.rememberPlan(plan);
+    return { plan, binding };
   }
 
   private collectScopedSections(elements: HTMLElement[]): ScannedSection[] {
@@ -1711,7 +1836,7 @@ export class ContentRuntime {
   private refreshSnapshots(instanceInputs: ScopedInstanceInput[], instanceRegistry: FormInstanceRegistry): void {
     const now = Date.now();
     for (const input of instanceInputs) {
-      if (input.reanchorStatus === 'AMBIGUOUS') {
+      if (input.reanchorStatus === 'AMBIGUOUS' || input.distilled.some((item) => !item.element.isConnected)) {
         continue;
       }
       const observation = toObservation(input.sectionType, input.distilled);
@@ -1774,6 +1899,15 @@ export class ContentRuntime {
   }
 
   private resolveFieldKey(target: Element): string | undefined {
+    // Trusted interaction with a portal option/search box belongs to its owning field.
+    // The portal itself is not a new applicant field.
+    const overlay = findVisibleOverlays(target.ownerDocument).find((candidate) => candidate.contains(target));
+    if (overlay) {
+      const owners = [...this.elementByKey].filter(([key, element]) => this.keyByElement.get(element) === key && this.isCurrentField(key) &&
+        (this.signatures.get(key)?.controlKind === 'combobox' || this.signatures.get(key)?.controlKind === 'date') &&
+        element.isConnected && isOverlayRelatedToTrigger(overlay, element));
+      if (owners.length === 1) return owners[0]![0];
+    }
     const direct = this.keyByElement.get(target);
     if (direct !== undefined && this.isCurrentField(direct) && this.resolveElement(direct) === target) {
       return direct;
@@ -1820,6 +1954,11 @@ export class ContentRuntime {
   }
 
   private handleUserEdit(fieldKey: string, event: Event, target: Element): void {
+    if (event.type === 'pointerdown' && !this.engine.isWriting(fieldKey) &&
+      !target.closest('[role="option"], [role="menuitem"], [role="treeitem"], [class*="sd-Select-common-item-"]')) {
+      this.lastUserInteractions.set(target, Date.now());
+      return;
+    }
     const activationEvent = event.type === 'input' || event.type === 'change';
     if (activationEvent) {
       const lastInteraction = this.lastUserInteractions.get(target);

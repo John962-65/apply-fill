@@ -135,7 +135,7 @@ describe('TabCoordinator', () => {
     });
     const summary = await coordinator.run(3);
     expect(calls).toEqual([0, 4]);
-    expect(summary.status).toBe('COMPLETED');
+    expect(summary.status).toBe('PARTIAL');
     expect(summary.counts.verified).toBe(2);
     expect(summary.counts.needsManual).toBe(1);
     expect(summary.fields.map((field) => field.label)).toEqual(['姓名', '学校名称', '专业']);

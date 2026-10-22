@@ -49,7 +49,7 @@ export type BackgroundMessage =
   | { type: 'ASSIGN_JOB_CONTEXT'; id: string; tabId: number }
   | { type: 'FLUSH_ROUTING'; runId: string; batchId: string; cache: CacheMutation[]; memory: MemoryMutation[] }
   | { type: 'ACQUIRE_FRAME_TASK'; runId: string; kind: 'field' | 'upload' }
-  | { type: 'RELEASE_FRAME_TASK'; runId: string; status: 'COMPLETED' | 'CANCELLED' | 'FAILED'; summary?: RunSummary }
+  | { type: 'RELEASE_FRAME_TASK'; runId: string; status: 'COMPLETED' | 'PARTIAL' | 'CANCELLED' | 'FAILED'; summary?: RunSummary }
   | { type: 'GET_ATTACHMENT'; runId?: string }
   | { type: 'UPLOAD_ATTACHMENT'; tabId?: number }
   | { type: 'INJECT_CONTENT_SCRIPT'; tabId?: number }

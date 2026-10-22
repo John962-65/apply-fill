@@ -23,7 +23,7 @@ test('最终验收场景：五步 SPA 表单全链路填写、人工接管与人
     expect(summary).toBeDefined();
     if (summary === undefined) return;
 
-    expect(summary.status).toBe('COMPLETED');
+    expect(summary.status).toBe('PARTIAL');
     expect((summary.stepTransitions ?? []).length).toBeGreaterThanOrEqual(3);
     await expect(page.getByTestId('final-step')).toHaveText('当前步骤：4');
 

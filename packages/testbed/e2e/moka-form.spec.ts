@@ -17,7 +17,7 @@ test('Moka 实际结构：双语字段、重复学校、年月拆分和七个项
     await importFacts(workbench, facts);
     const response = await runAutofill(workbench);
     expect(response.ok, JSON.stringify(response)).toBe(true);
-    expect(response.summary?.status).toBe('COMPLETED');
+    expect(response.summary?.status).toBe('PARTIAL');
     expect(response.summary?.counts.verified).toBe(43);
     expect(response.summary?.counts.needsManual).toBe(5);
     expect(response.summary?.mappingIssues.filter((issue) => issue.attention === 'optional').length).toBe(43);

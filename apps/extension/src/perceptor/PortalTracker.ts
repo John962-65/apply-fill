@@ -66,6 +66,11 @@ export function isOverlayRelatedToTrigger(overlay: HTMLElement, trigger: HTMLEle
       return true;
     }
   }
+  const explicitIds = `${controls ?? ''} ${owns ?? ''}`.split(/\s+/).filter(Boolean);
+  if (explicitIds.length > 0) return explicitIds.some((id) => {
+    const referenced = overlay.ownerDocument.getElementById(id);
+    return referenced !== null && overlay.contains(referenced);
+  });
   const active = overlay.ownerDocument.activeElement;
   if (active !== null && overlay.contains(active)) {
     return true;
@@ -111,6 +116,16 @@ export class PortalTracker {
     return trigger.getAttribute('aria-expanded') === 'true';
   }
 
+  relatedOverlay(trigger: HTMLElement): HTMLElement | null {
+    const overlays = this.snapshot(trigger.ownerDocument);
+    const ids = `${trigger.getAttribute('aria-controls') ?? ''} ${trigger.getAttribute('aria-owns') ?? ''}`.split(/\s+/).filter(Boolean);
+    const owned = trigger.closest('[class*="sd-Dropdown-container-"]');
+    const explicit = overlays.filter((overlay) => ids.includes(overlay.id) || owned?.contains(overlay));
+    const related = explicit.length ? explicit : overlays.filter((overlay) => isOverlayRelatedToTrigger(overlay, trigger));
+    const roots = related.filter((overlay) => !related.some((other) => other !== overlay && other.contains(overlay)));
+    return roots.length === 1 ? roots[0]! : null;
+  }
+
   async waitForOverlay(
     trigger: HTMLElement,
     before: HTMLElement[],
@@ -123,6 +138,8 @@ export class PortalTracker {
       if (options.signal?.aborted === true) {
         return null;
       }
+      const existing = this.relatedOverlay(trigger);
+      if (existing) return existing;
       const overlays = findVisibleOverlays(trigger.ownerDocument);
       for (const overlay of overlays) {
         if (beforeSet.has(overlay)) {

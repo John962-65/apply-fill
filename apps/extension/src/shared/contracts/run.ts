@@ -1,8 +1,9 @@
 import type { FieldExecutionResult, MappingIssue } from './field';
 import type { InstanceReport } from './reanchor';
 import type { DirtyReport, RuntimeDependency, WaveExecutionSummary } from './scheduler';
+import type { FieldDiagnostic } from './diagnostic';
 
-export type RunStatus = 'IDLE' | 'RUNNING' | 'PAUSED' | 'COMPLETED' | 'CANCELLED' | 'FAILED' | 'INTERRUPTED';
+export type RunStatus = 'IDLE' | 'RUNNING' | 'PAUSED' | 'COMPLETED' | 'PARTIAL' | 'CANCELLED' | 'FAILED' | 'INTERRUPTED';
 
 export interface RunContext {
   runId: string;
@@ -22,7 +23,7 @@ export interface RunCounts {
   cancelled: number;
 }
 
-export type FrameRunStatus = 'COMPLETED' | 'NEEDS_MANUAL' | 'CANCELLED' | 'FAILED' | 'UNREACHABLE' | 'BUSY';
+export type FrameRunStatus = 'COMPLETED' | 'PARTIAL' | 'NEEDS_MANUAL' | 'CANCELLED' | 'FAILED' | 'UNREACHABLE' | 'BUSY';
 
 export interface FrameRunRecord {
   frameId: number;
@@ -59,6 +60,8 @@ export interface RunSummary {
   frames?: FrameRunRecord[];
   stepTransitions?: StepTransitionRecord[];
   llm?: { requested: number; proposed: number; failed: boolean };
+  diagnostics?: FieldDiagnostic[];
+  diagnosticsDropped?: number;
 }
 
 export type RunEvent =

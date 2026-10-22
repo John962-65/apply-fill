@@ -76,4 +76,16 @@ describe('FieldVerifier', () => {
     expect(result.status).toBe('REJECTED');
     expect(result.evidence.some((item) => item.kind === 'STABILITY_CHECK')).toBe(true);
   });
+
+  it('瞬时匹配但未通过稳定检查时，不能报告已确认提交', async () => {
+    document.body.innerHTML = '<input id="name" />';
+    const input = mustQuery<HTMLInputElement>('#name');
+    let reads = 0;
+    Object.defineProperty(input, 'value', { get: () => `v${++reads}`, configurable: true });
+    const verifier = new FieldVerifier({ verify: async () => ({ status: 'CONFIRMED', evidence: [] }) }, FAST_STABILITY);
+    const result = await verifier.verify(contextOf(input, 'transient'));
+    expect(result.status).toBe('UNKNOWN');
+    expect(result.failureReason).toBe('UNSTABLE_VALUE');
+    expect(result.evidence).toContainEqual(expect.objectContaining({ kind: 'STABILITY_CHECK', matched: false }));
+  });
 });

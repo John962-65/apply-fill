@@ -24,6 +24,7 @@ export interface WaveSchedulerDeps {
   mutex?: ExecutionMutex;
   waveOrder?: ExecutionWave[];
   now?: () => number;
+  getDomRevision?: () => number;
 }
 
 export interface RunWaveOptions {
@@ -46,6 +47,7 @@ export class WaveScheduler {
   private readonly registry: RuntimeDependencyRegistry | undefined;
   private readonly waveOrder: ExecutionWave[];
   private readonly now: () => number;
+  private readonly getDomRevision: (() => number) | undefined;
   readonly mutex: ExecutionMutex | undefined;
 
   constructor(deps: WaveSchedulerDeps = {}) {
@@ -55,6 +57,7 @@ export class WaveScheduler {
     this.mutex = deps.mutex;
     this.waveOrder = deps.waveOrder ?? DEFAULT_WAVE_ORDER;
     this.now = deps.now ?? (() => Date.now());
+    this.getDomRevision = deps.getDomRevision;
   }
 
   get order(): ExecutionWave[] {
@@ -91,10 +94,13 @@ export class WaveScheduler {
 
   async runWave(wave: ExecutionWave, fields: ExecutableField[], options: RunWaveOptions): Promise<WaveRunOutcome> {
     const before = this.barrier.snapshotFields();
+    const domRevisionBefore = this.getDomRevision?.();
     const results = await options.executor(fields, wave, options.signal);
     const quiet = await this.barrier.waitForQuiet(options.signal);
     const after = this.barrier.snapshotFields();
+    const domRevisionAfter = this.getDomRevision?.();
     const delta = WaveBarrier.diff(before, after, quiet.mutated);
+    if (domRevisionBefore !== domRevisionAfter) delta.mutated = true;
 
     const executedFieldKeys = results.filter((result) => result.attempts > 0).map((result) => result.fieldKey);
     const cycles = options.signal.aborted ? [] : this.recordDependencies(executedFieldKeys, delta);
@@ -111,6 +117,12 @@ export class WaveScheduler {
       domChanged: delta.mutated,
       addedFields: delta.added.length,
       removedFields: delta.removed.length,
+      redrawnFields: delta.replaced.length,
+      valueChanges: delta.valueChanges.length,
+      optionChanges: delta.optionChanges.length,
+      domRevisionBefore,
+      domRevisionAfter,
+      quiet: quiet.quiet,
     };
     return { wave, summary, results, delta, executedFieldKeys, cycles };
   }

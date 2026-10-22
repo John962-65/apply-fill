@@ -85,6 +85,7 @@ export interface ExecutableField {
   expectedValue: unknown;
   expectedText?: string;
   targetPath: string;
+  expectedCommitValue?: string;
 }
 
 export type MappingStatus =

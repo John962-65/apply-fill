@@ -44,6 +44,6 @@ test('伪造其他任务的事件不会污染侧栏状态，合法填写与来�
     expect(await sendFromContent(workbench, page.url(), { type: 'RUN_EVENT', event })).toMatchObject({ ok: false });
     const panel = await session.context.newPage(); await panel.goto(`chrome-extension://${session.extensionId}/sidepanel.html`);
     await expect(panel.getByTestId('report-verified')).toHaveText('11');
-    expect(first.summary?.status).toBe('COMPLETED');
+    expect(first.summary?.status).toBe('PARTIAL');
   } finally { await session.close(); }
 });

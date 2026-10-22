@@ -31,6 +31,7 @@ export interface FieldExecutionContext {
   element: Element;
   expectedValue: unknown;
   expectedText?: string;
+  expectedCommitValue?: string;
   signal: AbortSignal;
 }
 

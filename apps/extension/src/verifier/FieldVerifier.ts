@@ -70,6 +70,10 @@ export class FieldVerifier {
       matched: stability.stable,
       detail: `reads=${stability.reads}`,
     });
+    if (result.status === 'CONFIRMED' && !stability.stable) {
+      result.status = 'UNKNOWN';
+      result.failureReason = 'UNSTABLE_VALUE';
+    }
     return result;
   }
 }

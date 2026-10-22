@@ -1,6 +1,7 @@
 import type { CommitResult, FieldExecutionContext } from '@/shared/contracts/commit';
 import type { ExecutableField, FieldExecutionResult, FieldStatus } from '@/shared/contracts/field';
 import type { RunEvent } from '@/shared/contracts/run';
+import type { ActionDiagnostic, ActionReporter } from '@/shared/contracts/diagnostic';
 import { ApplyFillError, classifyExecutionError, throwIfAborted } from '@/shared/errors';
 import type { GuardRegistry } from '@/guard/GuardRegistry';
 import { withAbort } from '@/shared/utils/timing';
@@ -11,7 +12,7 @@ import { nativeDateValue } from './DateAgent';
 import { BudgetTracker, DATE_PICKER_FIELD_BUDGET, DEFAULT_FIELD_BUDGET, SEARCH_SELECT_FIELD_BUDGET } from './ExecutionBudget';
 import type { ExecutionBudget } from './ExecutionBudget';
 import { findSelectOption, selectRadioByText, setChecked, setSelectValue, setTextValue } from './Primitives';
-import type { SelectAgent, SelectOutcomeStatus } from './SelectAgent';
+import type { SelectAgent, SelectOutcome, SelectOutcomeStatus } from './SelectAgent';
 
 export type { ExecutableField } from '@/shared/contracts/field';
 
@@ -23,6 +24,7 @@ export interface FieldEngineDeps {
   dateAgent?: DateAgent;
   getDomRevision?(): number;
   isIdentityValid?(element: HTMLElement, field: ExecutableField): boolean;
+  onDiagnostic?(field: ExecutableField, diagnostic: ActionDiagnostic & { runId: string; wave: string }): void;
 }
 
 export interface ExecuteRunOptions {
@@ -31,6 +33,7 @@ export interface ExecuteRunOptions {
   onEvent?: (event: RunEvent) => void;
   checkpoint?: (signal: AbortSignal) => Promise<void>;
   budget?: ExecutionBudget;
+  wave?: string;
 }
 
 const TEXT_LIKE_KINDS = new Set(['text', 'textarea', 'number', 'email', 'tel', 'url', 'password', 'search']);
@@ -66,6 +69,8 @@ export class FieldExecutionEngine {
         continue;
       }
       if (this.registry.isUserProtected(field.signature.fieldKey)) {
+        this.deps.onDiagnostic?.(field, { runId: options.runId, wave: options.wave ?? 'MANUAL',
+          actionStage: 'LOCATE', result: 'USER_OVERRIDDEN', reason: 'USER_PROTECTED', elapsedMs: 0 });
         const result = this.baseResult(field, 'USER_OVERRIDDEN', 0, 'USER_PROTECTED');
         results.push(result);
         options.onEvent?.({ type: 'FIELD_FINISHED', runId: options.runId, result });
@@ -144,6 +149,17 @@ export class FieldExecutionEngine {
     remainingMs: number,
   ): Promise<FieldExecutionResult> {
     const fieldKey = field.signature.fieldKey;
+    let stage: ActionDiagnostic['actionStage'] = 'LOCATE';
+    let stageStartedAt = Date.now();
+    let lastRevision = this.deps.getDomRevision?.();
+    const report: ActionReporter = (diagnostic) => {
+      const after = this.deps.getDomRevision?.();
+      this.deps.onDiagnostic?.(field, { ...diagnostic, runId: options.runId, wave: options.wave ?? 'MANUAL',
+        domRevisionBefore: lastRevision, domRevisionAfter: after });
+      lastRevision = after;
+      stage = diagnostic.actionStage;
+      stageStartedAt = Date.now();
+    };
     let lease;
     try {
       lease = this.registry.acquire({
@@ -155,6 +171,7 @@ export class FieldExecutionEngine {
       });
     } catch (error) {
       const kind = classifyExecutionError(error);
+      report({ actionStage: 'LOCATE', result: 'FAILED', reason: kind, elapsedMs: Date.now() - stageStartedAt });
       if (kind === 'PROTECTED') {
         return this.baseResult(field, 'USER_OVERRIDDEN', attempts, 'USER_PROTECTED');
       }
@@ -203,11 +220,15 @@ export class FieldExecutionEngine {
         }
       };
       assertActive();
-      await withAbort(this.executeAction(element, field, combined, assertActive, onProgress), combined);
+      report({ actionStage: 'LOCATE', result: 'LOCATED', elapsedMs: Date.now() - stageStartedAt });
+      const action = await withAbort(this.executeAction(element, field, combined, assertActive, onProgress, report), combined);
+      if (action?.commitValue !== undefined) field.expectedCommitValue = action.commitValue;
       (field as { element: HTMLElement }).element = element;
 
       assertActive();
 
+      report({ actionStage: 'WAIT_COMMIT', result: 'VERIFYING', elapsedMs: 0 });
+      stage = 'VERIFY'; stageStartedAt = Date.now();
       const commit = await withAbort(this.deps.verifyField({
         fieldKey,
         controlKind: field.signature.controlKind,
@@ -215,10 +236,12 @@ export class FieldExecutionEngine {
         element,
         expectedValue: field.expectedValue,
         expectedText: field.expectedText,
+        expectedCommitValue: field.expectedCommitValue,
         signal: combined,
       }), combined);
 
       assertActive();
+      report({ actionStage: 'VERIFY', result: commit.status, reason: commit.failureReason, elapsedMs: Date.now() - stageStartedAt });
 
       if (commit.status === 'CONFIRMED') {
         this.registry.markVerified(lease);
@@ -227,7 +250,8 @@ export class FieldExecutionEngine {
         return result;
       }
       if (commit.status === 'REJECTED') {
-        const result = this.baseResult(field, 'RETRYABLE', attempts, 'COMMIT_NOT_CONFIRMED');
+        const result = this.baseResult(field, action?.status === 'UNKNOWN' ? 'NEEDS_MANUAL' : 'RETRYABLE', attempts,
+          action?.status === 'UNKNOWN' ? 'COMMIT_UNKNOWN' : 'COMMIT_NOT_CONFIRMED');
         result.commit = commit;
         return result;
       }
@@ -236,6 +260,8 @@ export class FieldExecutionEngine {
       return unknown;
     } catch (error) {
       const kind = classifyExecutionError(error);
+      report({ actionStage: stage, result: this.registry.isUserProtected(fieldKey) ? 'USER_OVERRIDDEN' : 'FAILED',
+        reason: fieldController.signal.reason === 'IDENTITY_LOST' ? 'IDENTITY_LOST' : kind, elapsedMs: Date.now() - stageStartedAt });
       if (this.registry.isUserProtected(fieldKey)) {
         return this.baseResult(field, 'USER_OVERRIDDEN', attempts, 'USER_INTERRUPTED');
       }
@@ -270,24 +296,27 @@ export class FieldExecutionEngine {
     signal: AbortSignal,
     assertActive: () => void,
     onProgress: () => void,
-  ): Promise<void> {
+    onAction: ActionReporter,
+  ): Promise<SelectOutcome | void> {
     const controlKind = field.signature.controlKind;
+    if (controlKind !== 'combobox' && controlKind !== 'date') onAction({ actionStage: 'SELECT', result: 'STARTED', elapsedMs: 0 });
     if (controlKind === 'combobox') {
       const expectedText = field.expectedText ?? String(field.expectedValue);
-      await this.executeCombobox(element, expectedText, signal, assertActive, onProgress);
-      return;
+      return this.executeCombobox(element, expectedText, signal, assertActive, onProgress, onAction);
     }
     if (controlKind === 'date') {
       if (element instanceof HTMLInputElement && (element.type === 'date' || element.type === 'month')) {
+        onAction({ actionStage: 'SELECT', result: 'STARTED', elapsedMs: 0 });
         const expectedText = field.expectedText ?? String(field.expectedValue);
         const nativeValue = element.type === 'month' ? /^\d{4}-\d{2}$/.test(expectedText) ? expectedText : undefined : nativeDateValue(expectedText);
         if (nativeValue === undefined) throw new ApplyFillError('INSUFFICIENT_DATE_PRECISION', 'ACTUATOR_ERROR');
         await setTextValue(element, nativeValue, signal, assertActive);
+        onAction({ actionStage: 'SELECT', result: 'VALUE_WRITTEN', elapsedMs: 0 });
         return;
       }
       if (this.deps.dateAgent !== undefined) {
         const expectedText = field.expectedText ?? String(field.expectedValue);
-        const outcome = await this.deps.dateAgent.fill(element, expectedText, { signal, assertActive, onProgress });
+        const outcome = await this.deps.dateAgent.fill(element, expectedText, { signal, assertActive, onProgress, onAction });
         if (outcome.status === 'SELECTED') {
           return;
         }
@@ -307,32 +336,36 @@ export class FieldExecutionEngine {
         throw new ApplyFillError(`no select option matches "${expectedText}"`, 'ACTUATOR_ERROR');
       }
       await setSelectValue(select, expectedText, signal, assertActive);
+      onAction({ actionStage: 'SELECT', result: 'VALUE_WRITTEN', elapsedMs: 0 });
       return;
     }
     if (controlKind === 'checkbox') {
       await setChecked(element as HTMLInputElement, Boolean(field.expectedValue), signal, assertActive);
+      onAction({ actionStage: 'SELECT', result: 'VALUE_WRITTEN', elapsedMs: 0 });
       return;
     }
     if (controlKind === 'radio') {
       const expectedText = field.expectedText ?? String(field.expectedValue);
       await selectRadioByText(element as HTMLInputElement, expectedText, signal, assertActive);
+      onAction({ actionStage: 'SELECT', result: 'VALUE_WRITTEN', elapsedMs: 0 });
       return;
     }
     if (TEXT_LIKE_KINDS.has(controlKind)) {
       const expectedText = field.expectedText ?? String(field.expectedValue);
       await setTextValue(element as HTMLInputElement | HTMLTextAreaElement, expectedText, signal, assertActive);
+      onAction({ actionStage: 'SELECT', result: 'VALUE_WRITTEN', elapsedMs: 0 });
       return;
     }
     throw new ApplyFillError(`unsupported control kind ${controlKind}`, 'ACTUATOR_ERROR');
   }
 
-  private async executeCombobox(element: HTMLElement, expectedText: string, signal: AbortSignal, assertActive: () => void, onProgress: () => void): Promise<void> {
+  private async executeCombobox(element: HTMLElement, expectedText: string, signal: AbortSignal, assertActive: () => void, onProgress: () => void, onAction: ActionReporter): Promise<SelectOutcome | void> {
     if (this.deps.dateAgent !== undefined) {
       const kind = this.deps.dateAgent.textKind(expectedText);
       if (kind !== 'none') {
         const hinted = kind === 'present' || this.deps.dateAgent.elementHinted(element);
         if (hinted) {
-          const outcome = await this.deps.dateAgent.fill(element, expectedText, { signal, assertActive, onProgress });
+          const outcome = await this.deps.dateAgent.fill(element, expectedText, { signal, assertActive, onProgress, onAction });
           if (outcome.status === 'SELECTED') {
             return;
           }
@@ -359,9 +392,9 @@ export class FieldExecutionEngine {
     if (this.deps.selectAgent === undefined) {
       throw new ApplyFillError('no select agent available for combobox', 'ACTUATOR_ERROR');
     }
-    const outcome = await this.deps.selectAgent.select(element, expectedText, { signal, assertActive });
-    if (outcome.status === 'SELECTED') {
-      return;
+    const outcome = await this.deps.selectAgent.select(element, expectedText, { signal, assertActive, onAction });
+    if (outcome.status === 'SELECTED' || outcome.status === 'UNKNOWN') {
+      return outcome;
     }
     throw new ApplyFillError(
       `combobox select failed: ${outcome.status}${outcome.reason !== undefined ? ` (${outcome.reason})` : ''}`,

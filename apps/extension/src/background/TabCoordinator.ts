@@ -1,6 +1,7 @@
 import type { DirtyReport } from '@/shared/contracts/scheduler';
 import type { FrameRunRecord, RunCounts, RunSummary } from '@/shared/contracts/run';
 import type { SimpleAck, TabMessage } from '@/shared/messages/protocol';
+import { completionStatus } from '@/shared/utils/runReport';
 import { createId } from '@/shared/utils/id';
 import { withAbort } from '@/shared/utils/timing';
 
@@ -242,6 +243,8 @@ export class TabCoordinator {
     const waves: NonNullable<RunSummary['waves']> = [];
     const dependencies: NonNullable<RunSummary['dependencies']> = [];
     const cycles: NonNullable<RunSummary['cycles']> = [];
+    const diagnostics: NonNullable<RunSummary['diagnostics']> = [];
+    let diagnosticsDropped = 0;
     const stepTransitions: NonNullable<RunSummary['stepTransitions']> = [];
     const dirtyParts: DirtyReport[] = [];
     const recoveryParts: NonNullable<RunSummary['recovery']>[] = [];
@@ -295,7 +298,7 @@ export class TabCoordinator {
         const summary = response.summary;
         if (response.ok && summary !== undefined) {
           anyExecutedFrame = true;
-          base.status = summary.status === 'CANCELLED' ? 'CANCELLED' : summary.status === 'FAILED' ? 'FAILED' : 'COMPLETED';
+          base.status = summary.status;
           if (summary.error) base.error = summary.error;
           if (summary.status === 'FAILED') failed = true;
           base.counts = summary.counts;
@@ -304,6 +307,10 @@ export class TabCoordinator {
           fields.push(...summary.fields.map((field) => ({ ...field, frameId: frame.frameId })));
           issues.push(...summary.mappingIssues.map((issue) => ({ ...issue, frameId: frame.frameId })));
           if (summary.instances !== undefined) instances.push(...summary.instances);
+          const frameDiagnostics = summary.diagnostics ?? [];
+          const remaining = 4000 - diagnostics.length;
+          diagnostics.push(...frameDiagnostics.slice(0, remaining).map((item) => ({ ...item, frameId: frame.frameId })));
+          diagnosticsDropped += Math.max(0, frameDiagnostics.length - remaining) + (summary.diagnosticsDropped ?? 0);
           if (summary.waves !== undefined) waves.push(...summary.waves);
           if (summary.dependencies !== undefined) dependencies.push(...summary.dependencies);
           if (summary.cycles !== undefined) cycles.push(...summary.cycles);
@@ -350,6 +357,9 @@ export class TabCoordinator {
       mappingIssues: issues,
       frames: records,
     };
+    summary.status = completionStatus(summary);
+    summary.diagnostics = diagnostics;
+    summary.diagnosticsDropped = diagnosticsDropped;
     const frameError = records.find((record) => record.status === 'FAILED' && record.error)?.error;
     if (frameError) summary.error = frameError;
     if (instances.length > 0) summary.instances = instances;

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { issueNeedsAttention, mappingIssueText } from '@/shared/utils/runReport';
+import { diagnosticReport } from '@/shared/utils/diagnosticReport';
 
 import type { FieldExecutionResult, FieldStatus } from '@/shared/contracts/field';
 import type { SessionRunState } from '@/shared/contracts/run';
@@ -8,7 +9,7 @@ import { hostPermissionPattern, requestPermissionWithTimeout } from '@/shared/ut
 import { createId } from '@/shared/utils/id';
 
 const STATUS_TEXT: Record<string, string> = {
-  IDLE: '未开始', RUNNING: '填写中', PAUSED: '已暂停', COMPLETED: '已完成', FAILED: '失败', INTERRUPTED: '已中断',
+  IDLE: '未开始', RUNNING: '填写中', PAUSED: '已暂停', COMPLETED: '已完成', PARTIAL: '部分完成，仍需处理', FAILED: '失败', INTERRUPTED: '已中断',
   VERIFIED: '已填写',
   USER_OVERRIDDEN: '用户接管',
   NEEDS_MANUAL: '需人工',
@@ -338,6 +339,10 @@ export function App() {
           <div className="meta">暂无执行记录</div>
         ) : (
           <>
+            <button type="button" data-testid="copy-diagnostics" onClick={() => {
+              void navigator.clipboard.writeText(diagnosticReport(summary)).then(() => setNotice('脱敏诊断报告已复制'))
+                .catch(() => setNotice('复制失败：浏览器剪贴板不可用'));
+            }}>复制脱敏诊断报告</button>
             <div className="meta" data-testid="final-report">
               <div>本次操作：{runState?.operation === 'upload' ? '附件上传' : runState?.operation === 'field' ? '单字段修正' : '整页填写'}</div>
               <div>

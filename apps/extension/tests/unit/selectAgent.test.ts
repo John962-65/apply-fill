@@ -67,7 +67,7 @@ describe('SelectAgent', () => {
     const fixture = setupPortalSelect(['大专', '本科', '硕士']);
     const agent = new SelectAgent(new PortalTracker(), FAST_SELECT);
     const outcome = await agent.select(fixture.trigger, '本科');
-    expect(outcome.status).toBe('SELECTED');
+    expect(outcome.status, outcome.reason).toBe('SELECTED');
     expect(outcome.matchedText).toBe('本科');
     expect(outcome.usedSearch).toBe(false);
     expect(fixture.committed()).toBe('本科');
@@ -78,7 +78,7 @@ describe('SelectAgent', () => {
     const fixture = setupPortalSelect(['1', '10', '11', '12']);
     const agent = new SelectAgent(new PortalTracker(), FAST_SELECT);
     const outcome = await agent.select(fixture.trigger, '1');
-    expect(outcome.status).toBe('SELECTED');
+    expect(outcome.status, outcome.reason).toBe('SELECTED');
     expect(fixture.committed()).toBe('1');
   });
 
@@ -125,7 +125,7 @@ describe('SelectAgent', () => {
     });
     const agent = new SelectAgent(new PortalTracker(), FAST_SELECT);
     const outcome = await agent.select(trigger, '1');
-    expect(outcome.status).toBe('SELECTED');
+    expect(outcome.status, outcome.reason).toBe('SELECTED');
     expect(outcome.usedSearch).toBe(true);
     expect(trigger.getAttribute('data-committed')).toBe('1');
   });
@@ -181,7 +181,7 @@ describe('SelectAgent', () => {
     });
     const agent = new SelectAgent(new PortalTracker(), FAST_SELECT);
     const outcome = await agent.select(trigger, '专业11');
-    expect(outcome.status).toBe('SELECTED');
+    expect(outcome.status, outcome.reason).toBe('SELECTED');
     expect(trigger.getAttribute('data-committed')).toBe('专业11');
   });
 
@@ -189,7 +189,7 @@ describe('SelectAgent', () => {
     const fixture = setupPortalSelect(['本科', '本科']);
     const agent = new SelectAgent(new PortalTracker(), FAST_SELECT);
     const outcome = await agent.select(fixture.trigger, '本科');
-    expect(outcome.status).toBe('AMBIGUOUS_OPTION');
+    expect(outcome.status, outcome.reason).toBe('AMBIGUOUS_OPTION');
     expect(fixture.optionClicks()).toBe(0);
   });
 
@@ -216,14 +216,14 @@ describe('SelectAgent', () => {
       trigger2.setAttribute('aria-expanded', 'true');
     });
     const outcome = await agent.select(trigger2, '本科');
-    expect(outcome.status).toBe('NO_PROGRESS');
+    expect(outcome.status, outcome.reason).toBe('NO_PROGRESS');
   });
 
   it('无匹配选项 → NO_OPTION', async () => {
     const fixture = setupPortalSelect(['大专', '本科', '硕士']);
     const agent = new SelectAgent(new PortalTracker(), FAST_SELECT);
     const outcome = await agent.select(fixture.trigger, '博士');
-    expect(outcome.status).toBe('NO_OPTION');
+    expect(outcome.status, outcome.reason).toBe('NO_OPTION');
     expect(fixture.optionClicks()).toBe(0);
   });
 });
@@ -285,7 +285,7 @@ describe('CascaderWalker', () => {
     expect(CascaderWalker.splitLevels('广东省/深圳市/南山区')).toEqual(['广东省', '深圳市', '南山区']);
     expect(CascaderWalker.splitLevels('广东省 深圳市、南山区')).toEqual(['广东省', '深圳市', '南山区']);
     const outcome = await walker.walk(trigger, '广东省/深圳市/南山区');
-    expect(outcome.status).toBe('SELECTED');
+    expect(outcome.status, outcome.reason).toBe('SELECTED');
     expect(trigger.getAttribute('data-committed')).toBe('广东省 / 深圳市 / 南山区');
   });
 

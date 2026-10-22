@@ -40,6 +40,8 @@ export class WaveBarrier {
         label: item.field.label,
         controlKind: item.field.controlKind,
         valueText: readFieldValueText(item.element),
+        element: item.element,
+        stateKey: JSON.stringify([item.field.disabled, item.field.readonly, item.field.required, item.field.constraints]),
       };
       if (item.field.options !== undefined) {
         entry.optionsKey = item.field.options.join('|');
@@ -109,6 +111,8 @@ export class WaveBarrier {
     const removed: string[] = [];
     const valueChanges: FieldSetDelta['valueChanges'] = [];
     const optionChanges: string[] = [];
+    const replaced: string[] = [];
+    const stateChanges: string[] = [];
     for (const [fieldKey, afterEntry] of after) {
       const beforeEntry = before.get(fieldKey);
       if (beforeEntry === undefined) {
@@ -121,13 +125,16 @@ export class WaveBarrier {
       if (beforeEntry.optionsKey !== afterEntry.optionsKey) {
         optionChanges.push(fieldKey);
       }
+      if (beforeEntry.element !== afterEntry.element) replaced.push(fieldKey);
+      if (beforeEntry.stateKey !== afterEntry.stateKey) stateChanges.push(fieldKey);
     }
     for (const fieldKey of before.keys()) {
       if (!after.has(fieldKey)) {
         removed.push(fieldKey);
       }
     }
-    return { mutated: mutated || added.length > 0 || removed.length > 0, added, removed, valueChanges, optionChanges };
+    return { mutated: mutated || [added, removed, replaced, stateChanges, valueChanges, optionChanges].some((items) => items.length > 0),
+      added, removed, valueChanges, optionChanges, replaced, stateChanges };
   }
 }
 

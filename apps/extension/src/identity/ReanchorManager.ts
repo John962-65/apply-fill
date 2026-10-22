@@ -69,7 +69,7 @@ export class ReanchorManager {
     this.config = config;
   }
 
-  scoreCandidate(observation: InstanceObservation, snapshot: FormInstanceSnapshot): CandidateScore {
+  scoreCandidate(observation: InstanceObservation, snapshot: FormInstanceSnapshot, uniqueStableId = false): CandidateScore {
     const observationWitness = extractWitness(observation.sectionType, observation.fields);
     const observationTopology = buildTopology(observation.fields);
 
@@ -94,9 +94,11 @@ export class ReanchorManager {
       weights.context * contextScore +
       weights.topology * topologyScore;
 
-    if (!witnessHasEvidence(observationWitness) || !witnessHasEvidence(snapshot.witness)) {
+    if ((!witnessHasEvidence(observationWitness) || !witnessHasEvidence(snapshot.witness)) && !(uniqueStableId && stableScore === 1)) {
       score = Math.min(score, this.config.unknownEvidenceCap);
     }
+    // A connected container retains its logical identity; DOM position never supplies identity.
+    if (observation.continuityInstanceId === snapshot.instanceId && topologyScore >= 0.9) score = 1;
 
     return { snapshotIndex: -1, score, evidence };
   }
@@ -122,7 +124,15 @@ export class ReanchorManager {
     const candidateLists: CandidateScore[][] = observations.map((observation) =>
       snapshots
         .map((snapshot, snapshotIndex) => {
-          const scored = this.scoreCandidate(observation, snapshot);
+          const uniqueStableId = snapshot.witness.stableIds.some((id) =>
+            observation.fields.some((field) => field.fieldName === id || field.stableAttribute === id) &&
+            !snapshots.some((other) => other !== snapshot && other.witness.stableIds.includes(id)));
+          const scored = this.scoreCandidate(observation, snapshot, uniqueStableId);
+          const primary = extractWitness(observation.sectionType, observation.fields).primary?.value;
+          const owners = primary ? snapshots.filter((candidate) => candidate.witness.primary?.value === primary) : [];
+          if (owners.length === 1 && owners[0] !== snapshot && observation.continuityInstanceId !== snapshot.instanceId) {
+            scored.score = Math.min(scored.score, this.config.unknownEvidenceCap);
+          }
           return { ...scored, snapshotIndex };
         })
         .sort((a, b) => b.score - a.score),

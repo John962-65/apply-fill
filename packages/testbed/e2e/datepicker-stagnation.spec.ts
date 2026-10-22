@@ -21,7 +21,7 @@ test('日期组件无进展熔断：有界尝试后转人工且不误标成功',
     expect(summary).toBeDefined();
     if (summary === undefined) return;
 
-    expect(summary.status).toBe('COMPLETED');
+    expect(summary.status).toBe('PARTIAL');
     const graduation = summary.fields.find((field) => field.label === '毕业日期');
     expect(graduation?.status, JSON.stringify(graduation)).toBe('NEEDS_MANUAL');
     expect(graduation?.reason).toBeTruthy();

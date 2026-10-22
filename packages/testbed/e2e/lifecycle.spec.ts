@@ -32,12 +32,12 @@ test('权限检查等待中取消及时结束，新任务不受旧启动回调�
     await panel.getByRole('button', { name: '取消', exact: true }).click();
     await expect(panel.getByRole('heading', { name: '执行结果 · 已取消' })).toBeVisible();
     await expect(page.getByTestId('name')).toHaveValue(''); await expect(page.getByTestId('phone')).toHaveValue('');
-    const fresh = await runAutofill(workbench); expect(fresh.summary?.status).toBe('COMPLETED');
+    const fresh = await runAutofill(workbench); expect(fresh.summary?.status).toBe('PARTIAL');
     await worker.evaluate(() => (globalThis as unknown as { releaseStartup: () => void }).releaseStartup());
     await expect.poll(() => workbench.evaluate(async () => {
       const api = (globalThis as unknown as { chrome: { storage: { session: { get(key: null): Promise<Record<string, { runId?: string; status: string }>> } } } }).chrome;
       return Object.entries(await api.storage.session.get(null)).find(([key]) => key.startsWith('applyfill.run.'))?.[1];
-    })).toMatchObject({ runId: fresh.summary!.runId, status: 'COMPLETED' });
+    })).toMatchObject({ runId: fresh.summary!.runId, status: 'PARTIAL' });
   } finally { await session.close(); }
 });
 

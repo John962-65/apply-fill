@@ -1,9 +1,10 @@
-import { isElementVisible, isOverlayRelatedToTrigger, readComboboxCommitted } from '@/perceptor';
+import { isElementVisible, readComboboxCommitted } from '@/perceptor';
 import type { PortalTracker } from '@/perceptor';
 import { classifyExecutionError, throwIfAborted } from '@/shared/errors';
 import { choiceTextMatches } from '@/shared/utils/text';
 import { assertActionAllowed } from '@/shared/utils/action';
 import { delay } from '@/shared/utils/timing';
+import type { ActionReporter } from '@/shared/contracts/diagnostic';
 
 import { BudgetTracker, SEARCH_SELECT_FIELD_BUDGET } from './ExecutionBudget';
 import type { ExecutionBudget } from './ExecutionBudget';
@@ -15,7 +16,7 @@ import {
   matchOption,
 } from './OverlayOptions';
 import type { OptionMatch } from './OverlayOptions';
-import { dispatchClickSequence, setTextValue } from './Primitives';
+import { clickWithProgress, setTextValue } from './Primitives';
 
 export type SelectOutcomeStatus =
   | 'SELECTED'
@@ -25,6 +26,7 @@ export type SelectOutcomeStatus =
   | 'NO_PROGRESS'
   | 'TIMEOUT'
   | 'ABORTED'
+  | 'UNKNOWN'
   | 'FAILED';
 
 export interface SelectOutcome {
@@ -33,6 +35,7 @@ export interface SelectOutcome {
   usedSearch: boolean;
   actions: number;
   reason?: string;
+  commitValue?: string;
 }
 
 export interface SelectAgentConfig {
@@ -63,6 +66,7 @@ export interface SelectOptions {
   assertActive?: () => void;
   signal?: AbortSignal;
   now?: () => number;
+  onAction?: ActionReporter;
 }
 
 export class SelectAgent {
@@ -90,16 +94,17 @@ export class SelectAgent {
     try {
       throwIfAborted(signal);
       check();
-      const expanded = this.isExpanded(trigger);
-      const before = expanded ? [] : this.tracker.snapshot(trigger.ownerDocument);
-      if (!expanded) {
-        dispatchClickSequence(trigger, signal, options.assertActive);
-        record();
+      options.onAction?.({ actionStage: 'OPEN', result: 'STARTED', elapsedMs: 0 });
+      let overlay = this.tracker.relatedOverlay(trigger);
+      if (overlay) options.onAction?.({ actionStage: 'OPEN', result: 'ALREADY_OPEN', elapsedMs: 0 });
+      else {
+        const opened = await clickWithProgress(trigger, { ...options, stage: 'OPEN',
+          timeoutMs: this.config.popupTimeoutMs / 2, pollMs: this.config.commitPollMs,
+          changed: () => this.tracker.relatedOverlay(trigger) !== null,
+          onAction: (action) => { record(); options.onAction?.(action); },
+        });
+        if (opened) overlay = this.tracker.relatedOverlay(trigger);
       }
-      let overlay = await this.tracker.waitForOverlay(trigger, before, {
-        timeoutMs: this.config.popupTimeoutMs,
-        signal,
-      });
       if (overlay === null) {
         return this.outcome('NO_POPUP', usedSearch, actions, 'popup did not appear');
       }
@@ -107,17 +112,26 @@ export class SelectAgent {
       const searchBox = findSearchBox(overlay);
       if (searchBox !== null && expectedText.trim() !== '') {
         usedSearch = true;
+        const startedAt = Date.now();
+        const beforeSearch = hashOptionsKey(collectOptions(overlay));
+        options.onAction?.({ actionStage: 'SEARCH', result: 'STARTED', elapsedMs: 0 });
         await setTextValue(searchBox, expectedText, signal, options.assertActive);
         record();
-        try {
-          await delay(this.config.searchSettleMs, signal);
-        } catch {
-          return this.outcome('ABORTED', usedSearch, actions, 'aborted during search settle');
+        const deadline = Date.now() + this.config.popupTimeoutMs;
+        while (Date.now() < deadline && !overBudget()) {
+          check();
+          const refreshed = this.findRelatedOverlay(trigger);
+          if (refreshed) overlay = refreshed;
+          const candidates = collectOptions(overlay);
+          if (overlay.getAttribute('aria-busy') !== 'true' &&
+            (matchOption(candidates, expectedText).status === 'MATCH' || hashOptionsKey(candidates) !== beforeSearch)) break;
+          await delay(this.config.commitPollMs, signal);
         }
-        const refreshed = this.findRelatedOverlay(trigger);
-        if (refreshed !== null) {
-          overlay = refreshed;
+        if (searchBox.isConnected && searchBox.value !== expectedText) {
+          options.onAction?.({ actionStage: 'SEARCH', result: 'NO_PROGRESS', reason: 'SEARCH_NOT_ACCEPTED', elapsedMs: Date.now() - startedAt });
+          return this.outcome('NO_PROGRESS', usedSearch, actions, 'SEARCH_NOT_ACCEPTED');
         }
+        options.onAction?.({ actionStage: 'SEARCH', result: 'INPUT_ACCEPTED', elapsedMs: Date.now() - startedAt });
         await this.waitForCandidates(overlay, signal, budget, false);
       }
 
@@ -177,18 +191,33 @@ export class SelectAgent {
       const optionElement = match.element;
       check();
       optionElement.scrollIntoView?.({ block: 'nearest' });
-      dispatchClickSequence(optionElement, signal, options.assertActive);
-      record();
-      const committed = await this.waitForCommit(trigger, expectedText, overlay, signal, budget);
+      const beforeCommit = readComboboxCommitted(trigger);
+      const commitValue = optionElement.getAttribute('data-value') ?? undefined;
+      options.onAction?.({ actionStage: 'SELECT', result: 'STARTED', elapsedMs: 0 });
+      const changed = await clickWithProgress(optionElement, { ...options, stage: 'SELECT',
+        timeoutMs: Math.min(300, this.config.commitTimeoutMs / 2), pollMs: this.config.commitPollMs,
+        changed: () => {
+          const read = readComboboxCommitted(trigger);
+          return read.source !== beforeCommit.source || read.value !== beforeCommit.value ||
+            !overlay.isConnected || !isElementVisible(overlay) || optionElement.getAttribute('aria-selected') === 'true';
+        }, onAction: (action) => { record(); options.onAction?.(action); },
+      });
+      if (!changed) return this.outcome('NO_PROGRESS', usedSearch, actions, 'CLICK_NO_STATE_CHANGE');
+      const commitStartedAt = Date.now();
+      options.onAction?.({ actionStage: 'WAIT_COMMIT', result: 'STARTED', elapsedMs: 0 });
+      const committed = await this.waitForCommit(trigger, expectedText, commitValue, signal, budget, check);
+      options.onAction?.({ actionStage: 'WAIT_COMMIT', result: committed ? 'CONFIRMED' : 'UNKNOWN',
+        reason: committed ? undefined : 'COMMIT_NOT_CONFIRMED', elapsedMs: Date.now() - commitStartedAt });
       if (aborted()) {
         return this.outcome('ABORTED', usedSearch, actions, 'aborted during commit wait');
       }
       if (committed) {
         const selected = this.outcome('SELECTED', usedSearch, actions);
         selected.matchedText = match.text;
+        selected.commitValue = commitValue;
         return selected;
       }
-      return this.outcome('TIMEOUT', usedSearch, actions, 'COMMIT_TIMEOUT');
+      return { ...this.outcome('UNKNOWN', usedSearch, actions, 'COMMIT_NOT_CONFIRMED'), commitValue };
     } catch (error) {
       if (aborted()) {
         return this.outcome('ABORTED', usedSearch, actions, 'aborted');
@@ -200,10 +229,6 @@ export class SelectAgent {
       }
       return this.outcome('FAILED', usedSearch, actions, `${kind}: ${message}`);
     }
-  }
-
-  private isExpanded(trigger: HTMLElement): boolean {
-    return trigger.getAttribute('aria-expanded') === 'true';
   }
 
   private async waitForCandidates(overlay: HTMLElement, signal: AbortSignal | undefined, budget: BudgetTracker, allowSearch: boolean): Promise<void> {
@@ -219,20 +244,16 @@ export class SelectAgent {
   }
 
   private findRelatedOverlay(trigger: HTMLElement): HTMLElement | null {
-    for (const overlay of this.tracker.snapshot(trigger.ownerDocument)) {
-      if (isOverlayRelatedToTrigger(overlay, trigger)) {
-        return overlay;
-      }
-    }
-    return null;
+    return this.tracker.relatedOverlay(trigger);
   }
 
   private async waitForCommit(
     trigger: HTMLElement,
     expectedText: string,
-    overlay: HTMLElement,
+    commitValue: string | undefined,
     signal: AbortSignal | undefined,
     budget: BudgetTracker,
+    check: () => void,
   ): Promise<boolean> {
     const startedAt = Date.now();
     while (Date.now() - startedAt <= this.config.commitTimeoutMs) {
@@ -242,12 +263,10 @@ export class SelectAgent {
       if (budget.exceeded()) {
         return false;
       }
+      check();
       const read = readComboboxCommitted(trigger);
-      if (read.source !== 'NONE' && choiceTextMatches(read.value, expectedText)) {
-        return true;
-      }
-      const overlayVisible = overlay.isConnected && isElementVisible(overlay);
-      if (!overlayVisible && read.source !== 'NONE') {
+      const target = read.source === 'FORM_VALUE' && commitValue !== undefined ? commitValue : expectedText;
+      if ((read.source === 'COMPONENT_STATE' || read.source === 'FORM_VALUE') && choiceTextMatches(read.value, target)) {
         return true;
       }
       try {

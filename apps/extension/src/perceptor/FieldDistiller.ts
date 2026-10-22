@@ -8,7 +8,8 @@ import type {
 import { normalizeLabel } from '@/shared/utils/text';
 import { canonicalFieldLabel } from '@/shared/utils/fieldText';
 import { hasNearbyRequiredMarker, nearbyFieldLabel } from './FieldLabel';
-import { isAuxiliaryControl, mokaRequirement, mokaSectionHeading, mokaSelectedText, mokaTitle } from './MokaFields';
+import { isAuxiliaryControl, mokaRequirement, mokaSectionHeading, mokaTitle } from './MokaFields';
+import { readComboboxCommitted } from './ComboboxState';
 
 import {
   detectSectionType,
@@ -501,17 +502,8 @@ function isFormElementContainer(element: HTMLElement): boolean {
 
 export function readFieldValueText(element: HTMLElement): string {
   if (isComboboxTrigger(element)) {
-    const selected = mokaSelectedText(element);
-    if (selected) return selected;
-    const committed = element.getAttribute('data-committed');
-    if (committed !== null && committed !== '') {
-      return committed;
-    }
-    if (element instanceof HTMLInputElement) {
-      return element.value;
-    }
-    const text = cleanLabelText(element.textContent ?? '');
-    return /^请(选择|输入|填写)/.test(text) ? '' : text;
+    const read = readComboboxCommitted(element);
+    return read.source === 'VISIBLE' || read.source === 'NONE' ? '' : read.value;
   }
   if (element instanceof HTMLSelectElement) {
     const option = element.selectedOptions[0];

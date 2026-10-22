@@ -52,8 +52,10 @@ test('波次调度：联动字段按 STRUCTURAL→COMPLEX→LEAF 执行并处理
 
     const dirty = summary.dirty;
     expect(dirty).toBeDefined();
-    expect(dirty?.refilled).toBeGreaterThanOrEqual(1);
-    expect(dirty?.dirty.length).toBeGreaterThanOrEqual(1);
+    // The reset is now reconciled between waves, before the final dirty sweep.
+    expect(summary.diagnostics?.filter((item) => item.label === '城市' && item.actionStage === 'SELECT' && item.result === 'VALUE_WRITTEN').length).toBeGreaterThanOrEqual(2);
+    expect(dirty?.refilled).toBe(0);
+    expect(dirty?.dirty).toEqual([]);
   } finally {
     await session.close();
   }

@@ -9,6 +9,7 @@ export interface DirtyCandidate {
   controlKind: ControlKind;
   element: HTMLElement;
   refill?: ExecutableField;
+  expectedCommitValue?: string;
 }
 
 export interface DirtyCheckOptions {
@@ -42,11 +43,12 @@ export function observedValueMatches(
   element: HTMLElement,
   controlKind: ControlKind,
   expectedText: string,
+  expectedCommitValue?: string,
 ): boolean {
   if (controlKind === 'combobox') {
     const read = readComboboxCommitted(element);
     if (read.source === 'COMPONENT_STATE' || read.source === 'FORM_VALUE') {
-      return choiceTextMatches(read.value, expectedText);
+      return choiceTextMatches(read.value, read.source === 'FORM_VALUE' ? expectedCommitValue ?? expectedText : expectedText);
     }
     return false;
   }
@@ -61,15 +63,16 @@ export function observedValuePreserved(
   element: HTMLElement,
   controlKind: ControlKind,
   expectedText: string,
+  expectedCommitValue?: string,
 ): boolean {
   if (controlKind === 'combobox') {
     const read = readComboboxCommitted(element);
     if (read.value === '') {
       return false;
     }
-    return choiceTextMatches(read.value, expectedText);
+    return choiceTextMatches(read.value, read.source === 'FORM_VALUE' ? expectedCommitValue ?? expectedText : expectedText);
   }
-  return observedValueMatches(element, controlKind, expectedText);
+  return observedValueMatches(element, controlKind, expectedText, expectedCommitValue);
 }
 
 export class DirtyChecker {
@@ -87,7 +90,7 @@ export class DirtyChecker {
         lost.push(candidate.fieldKey);
         continue;
       }
-      if (!observedValuePreserved(candidate.element, candidate.controlKind, candidate.expectedText)) {
+      if (!observedValuePreserved(candidate.element, candidate.controlKind, candidate.expectedText, candidate.expectedCommitValue)) {
         dirty.push(candidate.fieldKey);
         if (candidate.refill !== undefined) {
           refillable.push(candidate.refill);

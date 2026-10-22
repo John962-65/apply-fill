@@ -160,7 +160,8 @@ function verifyCombobox(context: FieldExecutionContext, expectedText: string): C
   const read = readComboboxCommitted(element);
   if (read.source === 'COMPONENT_STATE' || read.source === 'FORM_VALUE') {
     const kind = read.source === 'COMPONENT_STATE' ? 'COMPONENT_STATE' : 'FORM_VALUE';
-    const matched = choiceTextMatches(read.value, expectedText) || dateAwareMatches(read.value, expectedText);
+    const target = read.source === 'FORM_VALUE' ? context.expectedCommitValue ?? expectedText : expectedText;
+    const matched = choiceTextMatches(read.value, target) || dateAwareMatches(read.value, target);
     const evidence: CommitEvidence[] = [{ kind, matched, detail: `${kind}=${read.value}` }];
     return matched
       ? { status: 'CONFIRMED', observedValue: read.value, evidence }

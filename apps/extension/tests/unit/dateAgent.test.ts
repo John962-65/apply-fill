@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { DateAgent } from '@/actuator/DateAgent';
 import type { DateAgentConfig } from '@/actuator/DateAgent';
@@ -266,7 +266,7 @@ describe('DateAgent', () => {
     const agent = makeAgent();
     let progress = 0;
     const outcome = await agent.fill(fixture.trigger, '2026-03-15', { onProgress: () => { progress += 1; } });
-    expect(outcome.status).toBe('SELECTED');
+    expect(outcome.status, outcome.reason).toBe('SELECTED');
     expect(fixture.committed()).toBe('2026-03-15');
     expect(fixture.dayClicks()).toBe(1);
     expect(fixture.pagerClicks()).toBeGreaterThan(0);
@@ -277,7 +277,7 @@ describe('DateAgent', () => {
     const fixture = setupCalendar({ openYear: 2026, openMonth: 3 });
     const agent = makeAgent();
     const outcome = await agent.fill(fixture.trigger, '2026-03-15');
-    expect(outcome.status).toBe('SELECTED');
+    expect(outcome.status, outcome.reason).toBe('SELECTED');
     expect(fixture.committed()).toBe('2026-03-15');
   });
 
@@ -285,7 +285,7 @@ describe('DateAgent', () => {
     const fixture = setupCalendar({ openYear: 2022, openMonth: 6 });
     const agent = makeAgent();
     const outcome = await agent.fill(fixture.trigger, '2022-06');
-    expect(outcome.status).toBe('NO_OPTION');
+    expect(outcome.status, outcome.reason).toBe('NO_OPTION');
     expect(outcome.reason).toBe('INSUFFICIENT_DATE_PRECISION');
     expect(fixture.committed()).toBe('');
     expect(fixture.dayClicks()).toBe(0);
@@ -294,7 +294,7 @@ describe('DateAgent', () => {
   it('禁用日期及其内嵌 span 不会被合成点击绕过限制', async () => {
     const fixture = setupCalendar({ openYear: 2026, openMonth: 3, disabledDay: 15 });
     const outcome = await makeAgent().fill(fixture.trigger, '2026-03-15');
-    expect(outcome.status).toBe('NO_OPTION');
+    expect(outcome.status, outcome.reason).toBe('NO_OPTION');
     expect(fixture.dayClicks()).toBe(0);
     expect(fixture.committed()).toBe('');
   });
@@ -303,7 +303,7 @@ describe('DateAgent', () => {
     const fixture = setupCalendar({ openYear: 2014, openMonth: 6, stuckPager: true });
     const agent = makeAgent();
     const outcome = await agent.fill(fixture.trigger, '2026-03-15');
-    expect(outcome.status).toBe('NO_PROGRESS');
+    expect(outcome.status, outcome.reason).toBe('NO_PROGRESS');
     expect(fixture.dayClicks()).toBe(0);
     expect(fixture.pagerClicks()).toBe(2);
   });
@@ -311,7 +311,7 @@ describe('DateAgent', () => {
   it('慢异步年面板、十年翻页和月份切换按真实进展等待，不重复点击旧视图', async () => {
     const fixture = setupCalendar({ openYear: 2014, openMonth: 6, navigationDelayMs: 220 });
     const outcome = await makeAgent({ progressTimeoutMs: 600 }).fill(fixture.trigger, '2026-03-15');
-    expect(outcome.status).toBe('SELECTED');
+    expect(outcome.status, outcome.reason).toBe('SELECTED');
     expect(fixture.committed()).toBe('2026-03-15');
     expect(fixture.pagerClicks()).toBe(1);
     expect(fixture.dayClicks()).toBe(1);
@@ -320,7 +320,7 @@ describe('DateAgent', () => {
   it('慢月份翻页在 Header 真正推进前不会发出下一次点击', async () => {
     const fixture = setupCalendar({ openYear: 2026, openMonth: 1, navigationDelayMs: 220 });
     const outcome = await makeAgent({ progressTimeoutMs: 600 }).fill(fixture.trigger, '2026-03-15');
-    expect(outcome.status).toBe('SELECTED');
+    expect(outcome.status, outcome.reason).toBe('SELECTED');
     expect(fixture.committed()).toBe('2026-03-15');
     expect(fixture.pagerClicks()).toBe(2);
   });
@@ -329,7 +329,7 @@ describe('DateAgent', () => {
     const fixture = setupCalendar({ openYear: 2014, openMonth: 6, wrongDirection: true });
     let progress = 0;
     const outcome = await makeAgent().fill(fixture.trigger, '2026-03-15', { onProgress: () => { progress += 1; } });
-    expect(outcome.status).toBe('NO_PROGRESS');
+    expect(outcome.status, outcome.reason).toBe('NO_PROGRESS');
     expect(fixture.pagerClicks()).toBe(2);
     expect(progress).toBe(1); // Only opening the year panel made useful progress.
     expect(fixture.dayClicks()).toBe(0);
@@ -341,7 +341,7 @@ describe('DateAgent', () => {
     const pending = makeAgent({ progressTimeoutMs: 600 }).fill(fixture.trigger, '2026-03-15', { signal: controller.signal });
     setTimeout(() => controller.abort(), 30);
     const outcome = await pending;
-    expect(outcome.status).toBe('ABORTED');
+    expect(outcome.status, outcome.reason).toBe('ABORTED');
     await new Promise((resolve) => setTimeout(resolve, 140));
     expect(fixture.dayClicks()).toBe(0);
     expect(fixture.pagerClicks()).toBe(1);
@@ -349,12 +349,17 @@ describe('DateAgent', () => {
   });
 
   it('单步等待被字段总预算限制，预算不足时不再重试点击', async () => {
-    const fixture = setupCalendar({ openYear: 2026, openMonth: 1, navigationDelayMs: 200 });
-    const outcome = await makeAgent({ progressTimeoutMs: 1800, budget: { ...FAST_DATE_CONFIG.budget, maxElapsedMs: 60 } })
-      .fill(fixture.trigger, '2026-03-15');
-    expect(outcome.status).toBe('TIMEOUT');
-    expect(fixture.pagerClicks()).toBe(1);
-    expect(fixture.dayClicks()).toBe(0);
+    vi.useFakeTimers();
+    try {
+      const fixture = setupCalendar({ openYear: 2026, openMonth: 1, navigationDelayMs: 200 });
+      const pending = makeAgent({ progressTimeoutMs: 1800, budget: { ...FAST_DATE_CONFIG.budget, maxElapsedMs: 60 } })
+        .fill(fixture.trigger, '2026-03-15');
+      await vi.advanceTimersByTimeAsync(80);
+      const outcome = await pending;
+      expect(outcome.status, outcome.reason).toBe('TIMEOUT');
+      expect(fixture.pagerClicks()).toBe(1);
+      expect(fixture.dayClicks()).toBe(0);
+    } finally { vi.clearAllTimers(); vi.useRealTimers(); }
   });
 
   it('列表型浮层委托 SelectAgent：年份列表仍可选中', async () => {
@@ -391,7 +396,7 @@ describe('DateAgent', () => {
     });
     const agent = makeAgent();
     const outcome = await agent.fill(trigger, '2026');
-    expect(outcome.status).toBe('SELECTED');
+    expect(outcome.status, outcome.reason).toBe('SELECTED');
     expect(trigger.getAttribute('data-committed')).toBe('2026');
   });
 
@@ -416,7 +421,7 @@ describe('DateAgent', () => {
     const checkbox = mustQuery<HTMLInputElement>('#present');
     const agent = makeAgent();
     const outcome = await agent.fill(trigger, '至今');
-    expect(outcome.status).toBe('SELECTED');
+    expect(outcome.status, outcome.reason).toBe('SELECTED');
     await new Promise((resolve) => setTimeout(resolve, 5));
     expect(checkbox.checked).toBe(true);
   });
@@ -433,7 +438,7 @@ describe('DateAgent', () => {
     const checkbox = mustQuery<HTMLInputElement>('#present');
     const agent = makeAgent();
     const outcome = await agent.fill(trigger, '至今');
-    expect(outcome.status).toBe('SELECTED');
+    expect(outcome.status, outcome.reason).toBe('SELECTED');
     await new Promise((resolve) => setTimeout(resolve, 5));
     expect(checkbox.checked).toBe(true);
   });
@@ -597,7 +602,7 @@ describe('DateAgent range', () => {
     const fixture = setupRange(2019, 6, false);
     const agent = makeAgent();
     const outcome = await agent.fill(fixture.trigger, '2020-09-01 ~ 2022-06-30');
-    expect(outcome.status).toBe('SELECTED');
+    expect(outcome.status, outcome.reason).toBe('SELECTED');
     expect(fixture.committed()).toBe('2020-09-01 ~ 2022-06-30');
   });
 
@@ -605,14 +610,14 @@ describe('DateAgent range', () => {
     const fixture = setupRange(2020, 1, true);
     const agent = makeAgent();
     const outcome = await agent.fill(fixture.trigger, '2020-09-01 ~ 至今');
-    expect(outcome.status).toBe('SELECTED');
+    expect(outcome.status, outcome.reason).toBe('SELECTED');
     expect(fixture.committed()).toBe('2020-09-01 ~ 至今');
   });
 
   it('范围：仅有年月时不编造起止日期', async () => {
     const fixture = setupRange(2020, 1, false);
     const outcome = await makeAgent().fill(fixture.trigger, '2020-09 ~ 2022-06');
-    expect(outcome.status).toBe('NO_OPTION');
+    expect(outcome.status, outcome.reason).toBe('NO_OPTION');
     expect(outcome.reason).toBe('INSUFFICIENT_DATE_PRECISION');
     expect(fixture.committed()).toBe('');
   });

@@ -57,6 +57,21 @@ describe('SessionStore', () => {
     expect(await sessionStore.load(7)).toBeNull();
   });
 
+  it('部分完成任务收到已解决的帧报告后，可恢复完成状态并保留脱敏诊断', async () => {
+    const sessions = new SessionStore();
+    const counts = { scanned: 1, mapped: 1, executed: 1, verified: 0, needsManual: 1, userOverridden: 0, cancelled: 0 };
+    const summary = { runId: 'run_partial', status: 'PARTIAL' as const, startedAt: 1, finishedAt: 2, counts, fields: [], mappingIssues: [],
+      frames: [{ frameId: 0, documentId: 'doc', runId: 'run_partial', status: 'PARTIAL' as const, counts }] };
+    await sessions.save({ tabId: 1, coordinated: true, runId: 'run_partial', status: 'PARTIAL', summary, updatedAt: 1 });
+    await sessions.applyEvent(1, { type: 'REPORT_UPDATED', runId: 'run_partial', summary: { ...summary, status: 'COMPLETED',
+      frames: [], counts: { ...counts, verified: 1, needsManual: 0 }, diagnostics: [{ runId: 'run_partial', fieldKey: 'fk2_field', label: '性别',
+        controlKind: 'combobox', sectionType: 'basic', wave: 'MANUAL', actionStage: 'VERIFY', result: 'CONFIRMED', elapsedMs: 1 }] } }, 0, 'doc');
+    const final = await sessions.load(1);
+    expect(final?.status).toBe('COMPLETED');
+    expect(final?.summary?.frames?.[0]?.status).toBe('COMPLETED');
+    expect(final?.summary?.diagnostics?.[0]).toMatchObject({ actionStage: 'VERIFY', frameId: 0 });
+  });
+
   it('Service Worker 重启后 RUNNING/PAUSED 会话标记为 INTERRUPTED，且不重放旧动作', async () => {
     const sessionStore = new SessionStore();
     await sessionStore.save({ tabId: 1, runId: 'run_a', status: 'RUNNING', startedAt: 100, updatedAt: 100 });

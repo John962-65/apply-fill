@@ -11,7 +11,7 @@ test('北森式未关联标题：通用占位符不合并字段，姓名邮箱�
     await importFacts(workbench, resumeFacts());
     const response = await runAutofill(workbench);
     expect(response.ok, JSON.stringify(response)).toBe(true);
-    expect(response.summary?.status).toBe('COMPLETED');
+    expect(response.summary?.status).toBe('PARTIAL');
     expect(response.summary?.counts.scanned).toBe(17);
     expect(response.summary?.counts.verified).toBe(7);
     for (const [testId, value] of Object.entries({ name: '张三', email: 'zhangsan@example.com', phone: '13800001111', school: '示例大学', major: '计算机科学与技术', degree: '本科' })) {

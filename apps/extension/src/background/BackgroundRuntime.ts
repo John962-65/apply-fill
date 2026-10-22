@@ -541,7 +541,7 @@ export function installBackgroundRuntime(): void {
     const input = message as { runId?: unknown; status?: unknown; summary?: RunSummary };
     const tabId = webPageTabId(sender);
     if (tabId === undefined || sender.frameId === undefined || typeof input.runId !== 'string' ||
-      (input.status !== 'COMPLETED' && input.status !== 'CANCELLED' && input.status !== 'FAILED')) return { ok: false };
+      (input.status !== 'COMPLETED' && input.status !== 'PARTIAL' && input.status !== 'CANCELLED' && input.status !== 'FAILED')) return { ok: false };
     if (input.summary !== undefined && !isRunSummary(input.summary)) return { ok: false, error: 'INVALID_RUN_SUMMARY' };
     const ok = await tabCoordinator.releaseFrameTask({ tabId, frameId: sender.frameId, runId: input.runId, kind: 'field',
       ...(sender.documentId ? { documentId: sender.documentId } : {}) }, input.status, input.summary);
@@ -676,7 +676,7 @@ export function installBackgroundRuntime(): void {
       const state = await sessionStore.load(scope.tabId);
       const frame = state?.summary?.frames?.find((entry) => entry.frameId === scope.frameId && entry.documentId === scope.documentId);
       authorized = frame?.runId === event.runId &&
-        ['COMPLETED', 'FAILED', 'CANCELLED'].includes(state?.status ?? '');
+        ['COMPLETED', 'PARTIAL', 'FAILED', 'CANCELLED'].includes(state?.status ?? '');
     }
     if (!authorized) return { ok: false };
     if (event.type === 'RUN_CANCELLED') llmGateway.cancelRun(event.runId);

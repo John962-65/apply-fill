@@ -60,8 +60,8 @@ export class RecoveryPlanner {
         }
         continue;
       }
-      if (candidate.reason !== undefined && candidate.reason.includes('COMMIT_UNKNOWN')) {
-        decisions.push({ ...base, action: 'MANUAL', reason: 'COMMIT_UNKNOWN' });
+      if (candidate.reason !== undefined && /COMMIT_UNKNOWN|CLICK_NO_STATE_CHANGE|NO_POPUP|NO_PROGRESS|REPLAN_BUDGET_EXHAUSTED/.test(candidate.reason)) {
+        decisions.push({ ...base, action: 'MANUAL', reason: candidate.reason.includes('COMMIT_UNKNOWN') ? 'COMMIT_UNKNOWN' : 'MANUAL_TAKEOVER_REQUIRED' });
         continue;
       }
       if (candidate.valueMatchesExpected) {

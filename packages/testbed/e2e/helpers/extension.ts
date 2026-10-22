@@ -29,6 +29,8 @@ export interface AutofillResponse {
     };
     fields: Array<{ fieldKey: string; stepId?: string; label: string; status: string; reason?: string; expectedValue?: unknown }>;
     mappingIssues: Array<{ fieldKey?: string; label: string; kind: string; reason: string; attention?: 'manual' | 'optional' | 'filled' | 'unavailable' }>;
+    diagnostics?: Array<{ fieldKey: string; label: string; actionStage: string; result: string; reason?: string; wave: string;
+      domRevisionBefore?: number; domRevisionAfter?: number; targetPath?: string; elapsedMs: number }>;
     instances?: Array<{
       stepId?: string;
       sectionType: string;

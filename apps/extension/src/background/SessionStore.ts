@@ -1,3 +1,4 @@
+import { completionStatus } from '@/shared/utils/runReport';
 import type { RunEvent, RunSummary, SessionRunState } from '@/shared/contracts/run';
 import type { FrameTaskLease } from './TabCoordinator';
 
@@ -34,8 +35,8 @@ export class SessionStore {
   async applyEvent(tabId: number, event: RunEvent, frameId = 0, documentId?: string): Promise<void> {
     await this.update(tabId, (current) => {
       if (current?.coordinated) {
-        const reportUpdate = event.type === 'REPORT_UPDATED' && ['COMPLETED', 'FAILED', 'CANCELLED'].includes(current.status);
-        if ((!reportUpdate && current.runId !== event.runId) || (!reportUpdate && (current.status !== 'COMPLETED' || event.type !== 'RUN_FINISHED')) || !current.summary || (event.type !== 'RUN_FINISHED' && event.type !== 'REPORT_UPDATED')) {
+        const reportUpdate = event.type === 'REPORT_UPDATED' && ['COMPLETED', 'PARTIAL', 'FAILED', 'CANCELLED'].includes(current.status);
+        if ((!reportUpdate && current.runId !== event.runId) || (!reportUpdate && (!['COMPLETED', 'PARTIAL'].includes(current.status) || event.type !== 'RUN_FINISHED')) || !current.summary || (event.type !== 'RUN_FINISHED' && event.type !== 'REPORT_UPDATED')) {
           return current;
         }
         // A manual field correction updates only its originating frame.
@@ -57,10 +58,14 @@ export class SessionStore {
             ...current.summary.mappingIssues.filter((issue) => issue.frameId !== frameId),
             ...event.summary.mappingIssues.map((issue) => ({ ...issue, frameId })),
           ],
-          frames: current.summary.frames?.map((frame) => frame.frameId === frameId ? { ...frame, counts: event.summary.counts } : frame),
+          diagnostics: [...(current.summary.diagnostics ?? []).filter((item) => item.frameId !== frameId),
+            ...(event.summary.diagnostics ?? []).map((item) => ({ ...item, frameId }))].slice(0, 4000),
+          frames: current.summary.frames?.map((frame) => frame.frameId === frameId ? { ...frame, status: event.summary.status, counts: event.summary.counts } : frame),
+          dirty: (current.summary.frames?.length ?? 0) === 1 ? event.summary.dirty : current.summary.dirty,
           finishedAt: Date.now(),
         };
-        return { ...current, summary, updatedAt: Date.now() };
+        summary.status = completionStatus(summary);
+        return { ...current, status: summary.status, summary, updatedAt: Date.now() };
       }
       if (event.type === 'RUN_STARTED') {
         if (current?.runId === event.runId && current.status !== 'RUNNING' && current.status !== 'PAUSED') return current;
@@ -109,11 +114,14 @@ export class SessionStore {
         summary = {
           ...summary, counts, status, finishedAt: Date.now(),
           fields: [...summary.fields.filter((field) => field.frameId !== lease.frameId), ...frameSummary.fields.map((field) => ({ ...field, frameId: lease.frameId }))],
+          diagnostics: [...(summary.diagnostics ?? []).filter((item) => item.frameId !== lease.frameId),
+            ...(frameSummary.diagnostics ?? []).map((item) => ({ ...item, frameId: lease.frameId }))].slice(0, 4000),
           mappingIssues: [...summary.mappingIssues.filter((issue) => issue.frameId !== lease.frameId), ...frameSummary.mappingIssues.map((issue) => ({ ...issue, frameId: lease.frameId }))],
           frames: [...(summary.frames ?? []).filter((frame) => frame.frameId !== lease.frameId),
             { frameId: lease.frameId, ...(lease.documentId ? { documentId: lease.documentId } : {}), runId: frameSummary.runId, counts: frameSummary.counts, status }],
         };
       }
+      if (summary) { summary.status = completionStatus(summary); status = summary.status; }
       const { operation: _operation, error: _error, ...rest } = state;
       return { ...rest, status, operation: lease.kind, runId: summary?.runId ?? lease.runId, ...(summary ? { summary } : {}), updatedAt: Date.now() };
     }, assertCurrent);

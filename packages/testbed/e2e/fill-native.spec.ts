@@ -17,7 +17,7 @@ test('React 原生表单：标准控件全部填写并通过 CommitPredicate', a
     expect(summary).toBeDefined();
     if (summary === undefined) return;
 
-    expect(summary.status).toBe('COMPLETED');
+    expect(summary.status).toBe('PARTIAL');
     expect(summary.counts.mapped).toBe(11);
     expect(summary.counts.verified).toBe(11);
 

@@ -1,6 +1,9 @@
 import { ApplyFillError } from '@/shared/errors';
 import { assertActionAllowed } from '@/shared/utils/action';
 import { normalizeLabel } from '@/shared/utils/text';
+import { delay } from '@/shared/utils/timing';
+import type { ActionGuard } from '@/shared/contracts/action';
+import type { ActionReporter, ActionStage } from '@/shared/contracts/diagnostic';
 
 function nativeValueSetter(
   element: HTMLElement,
@@ -71,7 +74,7 @@ export function findSelectOption(select: HTMLSelectElement, expectedText: string
     if (text === target || normalizeLabel(option.value) === target) {
       return option;
     }
-    if (loose === undefined && (text.includes(target) || target.includes(text))) {
+    if (!/^\d+$/.test(target) && loose === undefined && (text.includes(target) || target.includes(text))) {
       loose = option;
     }
   }
@@ -115,13 +118,7 @@ export async function setChecked(
   element.click();
   assertActionAllowed({ signal, assertActive });
   if (element.checked !== checked) {
-    const setter = nativeValueSetter(element, 'checked');
-    if (setter !== undefined) {
-      setter(checked);
-    } else {
-      element.checked = checked;
-    }
-    dispatchInputEvents(element, undefined, () => assertActionAllowed({ signal, assertActive }));
+    throw new ApplyFillError('CLICK_NO_STATE_CHANGE', 'ACTUATOR_ERROR');
   }
   assertActionAllowed({ signal, assertActive });
 }
@@ -177,10 +174,42 @@ export async function selectRadioByText(
 
 export function dispatchClickSequence(element: HTMLElement, signal?: AbortSignal, assertActive?: () => void): void {
   const init: MouseEventInit = { bubbles: true, cancelable: true, composed: true, button: 0 };
-  for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+  for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup']) {
     assertActionAllowed({ signal, assertActive });
-    element.dispatchEvent(new MouseEvent(type, init));
+    if (type.startsWith('pointer')) {
+      const Pointer = element.ownerDocument.defaultView?.PointerEvent;
+      element.dispatchEvent(Pointer ? new Pointer(type, { ...init, pointerId: 1, pointerType: 'mouse', isPrimary: true,
+        buttons: type === 'pointerdown' ? 1 : 0 }) : new Event(type, init));
+    } else element.dispatchEvent(new MouseEvent(type, { ...init, buttons: type === 'mousedown' ? 1 : 0 }));
   }
+  assertActionAllowed({ signal, assertActive });
+  element.click();
+  assertActionAllowed({ signal, assertActive });
+}
+
+/** Try native activation, then one pointer/mouse sequence only if no observable progress occurred. */
+export async function clickWithProgress(element: HTMLElement, options: ActionGuard & {
+  stage: ActionStage; onAction?: ActionReporter; changed: () => boolean; timeoutMs: number; pollMs: number;
+}): Promise<boolean> {
+  for (const mode of ['NATIVE', 'POINTER'] as const) {
+    assertActionAllowed(options);
+    if (!element.isConnected) return false;
+    const startedAt = Date.now();
+    if (mode === 'NATIVE') element.click();
+    else dispatchClickSequence(element, options.signal, options.assertActive);
+    let changed = false;
+    while (true) {
+      assertActionAllowed(options);
+      if (options.changed()) { changed = true; break; }
+      const remaining = options.timeoutMs - (Date.now() - startedAt);
+      if (remaining <= 0) break;
+      await delay(Math.min(options.pollMs, remaining), options.signal);
+    }
+    options.onAction?.({ actionStage: options.stage, result: changed ? 'STATE_CHANGED' : 'NO_PROGRESS',
+      reason: mode === 'NATIVE' ? 'NATIVE_CLICK' : 'POINTER_SEQUENCE', elapsedMs: Date.now() - startedAt });
+    if (changed) return true;
+  }
+  return false;
 }
 
 export async function clickSequence(element: HTMLElement, signal?: AbortSignal, assertActive?: () => void): Promise<void> {

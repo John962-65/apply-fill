@@ -31,6 +31,12 @@ export interface WaveExecutionSummary {
   domChanged: boolean;
   addedFields: number;
   removedFields: number;
+  redrawnFields?: number;
+  valueChanges?: number;
+  optionChanges?: number;
+  domRevisionBefore?: number;
+  domRevisionAfter?: number;
+  quiet?: boolean;
 }
 
 export interface FieldSnapshotEntry {
@@ -39,6 +45,8 @@ export interface FieldSnapshotEntry {
   controlKind: ControlKind;
   valueText: string;
   optionsKey?: string;
+  element?: HTMLElement;
+  stateKey?: string;
 }
 
 export interface FieldSetDelta {
@@ -47,6 +55,8 @@ export interface FieldSetDelta {
   removed: string[];
   valueChanges: Array<{ fieldKey: string; before: string; after: string }>;
   optionChanges: string[];
+  replaced: string[];
+  stateChanges: string[];
 }
 
 export interface BarrierResult extends FieldSetDelta {

@@ -275,12 +275,8 @@ export class CascaderWalker {
         return false;
       }
       const read = readComboboxCommitted(trigger);
-      if (read.source !== 'NONE') {
+      if (read.source === 'COMPONENT_STATE' || read.source === 'FORM_VALUE') {
         if (CascaderWalker.pathMatches(read.value, levels)) {
-          return true;
-        }
-        const overlayVisible = overlay.isConnected && isElementVisible(overlay);
-        if (!overlayVisible) {
           return true;
         }
       }

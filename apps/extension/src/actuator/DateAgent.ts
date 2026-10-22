@@ -4,12 +4,13 @@ import type { DateAtom } from '@/shared/contracts/resume';
 import { classifyExecutionError, throwIfAborted } from '@/shared/errors';
 import { dateAtomEquals, lastDayOfMonth, parseDateAtom, toISODate } from '@/shared/utils/date';
 import { delay } from '@/shared/utils/timing';
+import type { ActionReporter } from '@/shared/contracts/diagnostic';
 
 import { classifyDateText, classifyOverlayView, hasDateElementHints, withDefaults } from './DateViewClassifier';
 import type { DateOverlayView } from './DateViewClassifier';
 import { BudgetTracker, DATE_PICKER_FIELD_BUDGET } from './ExecutionBudget';
 import type { ExecutionBudget } from './ExecutionBudget';
-import { dispatchClickSequence, setChecked } from './Primitives';
+import { clickWithProgress, dispatchClickSequence, setChecked } from './Primitives';
 import type { SelectAgent, SelectOutcomeStatus } from './SelectAgent';
 
 export interface DateAgentConfig {
@@ -41,6 +42,7 @@ export interface DateFillOptions {
   assertActive?: () => void;
   onProgress?: () => void;
   signal?: AbortSignal;
+  onAction?: ActionReporter;
 }
 
 interface CellCandidate {
@@ -62,6 +64,7 @@ interface FillContext {
   signal?: AbortSignal;
   actions: number;
   matchedText?: string;
+  onAction?: ActionReporter;
 }
 
 const CELL_SELECTOR = 'button, td, li, [role="gridcell"], [role="option"], [role="menuitem"], div, span';
@@ -110,22 +113,26 @@ export class DateAgent {
     }
     try {
       throwIfAborted(signal);
-      if (classification.kind === 'present') return await this.fillPresent(trigger, signal, actions, options.assertActive);
-      const expanded = trigger.getAttribute('aria-expanded') === 'true';
+      options.onAction?.({ actionStage: 'OPEN', result: 'STARTED', elapsedMs: 0 });
+      if (classification.kind === 'present') return await this.fillPresent(trigger, signal, actions, options.assertActive, options.onAction);
+      const expanded = this.tracker.relatedOverlay(trigger) !== null;
       const before = expanded ? [] : this.tracker.snapshot(trigger.ownerDocument);
       if (!expanded) {
-        dispatchClickSequence(trigger, signal, options.assertActive);
-        budget.recordAction();
-        actions += 1;
+        await clickWithProgress(trigger, { ...options, stage: 'OPEN', timeoutMs: this.config.popupTimeoutMs / 2,
+          pollMs: this.config.pollMs, changed: () => this.tracker.relatedOverlay(trigger) !== null,
+          onAction: (action) => { budget.recordAction(); actions += 1; options.onAction?.(action); },
+        });
       }
       const overlay = await this.tracker.waitForOverlay(trigger, before, {
         timeoutMs: this.config.popupTimeoutMs,
         signal,
       });
       if (overlay === null) {
+        options.onAction?.({ actionStage: 'OPEN', result: 'NO_PROGRESS', reason: 'NO_POPUP', elapsedMs: this.config.popupTimeoutMs });
         return result('NO_POPUP', 'date popup did not appear');
       }
-      const context: FillContext = { trigger, overlay, budget, signal, actions, assertActive: options.assertActive, onProgress: options.onProgress };
+      options.onAction?.({ actionStage: 'OPEN', result: expanded ? 'ALREADY_OPEN' : 'STATE_CHANGED', elapsedMs: 0 });
+      const context: FillContext = { trigger, overlay, budget, signal, actions, assertActive: options.assertActive, onProgress: options.onProgress, onAction: options.onAction };
       const ready = await this.waitForState(context, () => {
         if (!this.isOverlayAlive(context.overlay) || this.isBusy(context.overlay)) return false;
         if (classification.kind === 'range') return this.collectDayGrids(context.overlay).length >= 2;
@@ -155,7 +162,7 @@ export class DateAgent {
     }
   }
 
-  private async fillPresent(trigger: HTMLElement, signal: AbortSignal | undefined, actions: number, assertActive?: () => void): Promise<DateFillResult> {
+  private async fillPresent(trigger: HTMLElement, signal: AbortSignal | undefined, actions: number, assertActive?: () => void, onAction?: ActionReporter): Promise<DateFillResult> {
     let scope: HTMLElement | null = trigger;
     let depth = 0;
     while (scope !== null && depth < 3) {
@@ -164,12 +171,18 @@ export class DateAgent {
         if (signal?.aborted === true) {
           return { status: 'ABORTED', reason: 'aborted', actions };
         }
+        onAction?.({ actionStage: 'SELECT', result: 'STARTED', elapsedMs: 0 });
         if (control instanceof HTMLInputElement && control.type === 'checkbox') {
           await setChecked(control, true, signal, assertActive);
         } else {
-          dispatchClickSequence(control, signal, assertActive);
+          assertActive?.(); control.click(); assertActive?.(); throwIfAborted(signal);
         }
-        return { status: 'SELECTED', actions: actions + 1 };
+        const checkbox = control instanceof HTMLInputElement ? control : control instanceof HTMLLabelElement ? control.control : control.querySelector('input[type="checkbox"]');
+        const read = readComboboxCommitted(trigger);
+        const confirmed = checkbox instanceof HTMLInputElement && checkbox.type === 'checkbox' && checkbox.checked ||
+          (read.source === 'COMPONENT_STATE' || read.source === 'FORM_VALUE') && /^(?:至今|present)$/i.test(read.value);
+        onAction?.({ actionStage: 'WAIT_COMMIT', result: confirmed ? 'CONFIRMED' : 'UNKNOWN', elapsedMs: 0 });
+        return { status: confirmed ? 'SELECTED' : 'UNKNOWN', actions: actions + 1, ...(confirmed ? {} : { reason: 'COMMIT_UNKNOWN' }) };
       }
       scope = scope.parentElement;
       depth += 1;
@@ -223,6 +236,7 @@ export class DateAgent {
       const delegated = await this.selectAgent.select(context.trigger, expectedText, {
         ...(context.signal !== undefined ? { signal: context.signal } : {}),
         assertActive: context.assertActive,
+        onAction: context.onAction,
       });
       return {
         status: delegated.status,
@@ -433,7 +447,7 @@ export class DateAgent {
       if (nav === null) {
         return 'NO_OPTION';
       }
-      await this.clickCell(context, { element: nav, text: '' });
+      await this.clickCell(context, { element: nav, text: '' }, noProgress > 0);
       const changed = await this.waitForState(context, () => {
         const updated = locate();
         const header = updated === null ? undefined : this.readGridMonth(updated);
@@ -486,7 +500,7 @@ export class DateAgent {
         return 'NO_OPTION';
       }
       const beforeSignature = this.panelSignature(context.overlay);
-      await this.clickCell(context, { element: nav, text: '' });
+      await this.clickCell(context, { element: nav, text: '' }, noProgress > 0);
       const changed = await this.waitForState(context, () => !this.isBusy(context.overlay) &&
         classifyOverlayView(context.overlay) === 'year-panel' && this.panelSignature(context.overlay) !== beforeSignature);
       if (!changed && context.budget.exceeded()) return 'TIMEOUT';
@@ -517,14 +531,17 @@ export class DateAgent {
     return this.selectPanelCell(context, hit, 'month-panel');
   }
 
-  private async clickCell(context: FillContext, cell: CellCandidate): Promise<void> {
+  private async clickCell(context: FillContext, cell: CellCandidate, pointerFallback = false): Promise<void> {
     throwIfAborted(context.signal);
     context.assertActive?.();
     if (!cell.element.isConnected || !context.overlay.contains(cell.element) || !this.isUsableCell(cell.element, context.overlay)) throw new Error('DATE_CELL_CHANGED');
     cell.element.scrollIntoView?.({ block: 'nearest' });
-    dispatchClickSequence(cell.element, context.signal, context.assertActive);
+    context.onAction?.({ actionStage: 'SELECT', result: 'STARTED', elapsedMs: 0 });
+    if (pointerFallback) dispatchClickSequence(cell.element, context.signal, context.assertActive);
+    else { cell.element.click(); context.assertActive?.(); throwIfAborted(context.signal); }
     context.budget.recordAction();
     context.actions += 1;
+    context.onAction?.({ actionStage: 'SELECT', result: 'DISPATCHED', reason: pointerFallback ? 'POINTER_SEQUENCE' : 'NATIVE_CLICK', elapsedMs: 0 });
   }
 
   private async navStep(context: FillContext, element: HTMLElement): Promise<'OK' | 'NO_PROGRESS' | 'TIMEOUT'> {
@@ -535,14 +552,16 @@ export class DateAgent {
     for (let attempt = 0; attempt < this.config.budget.maxNoProgress; attempt += 1) {
       if (context.budget.exceeded() || context.actions >= this.config.budget.maxActions) return 'TIMEOUT';
       if (!cell.element.isConnected) return 'NO_PROGRESS';
-      await this.clickCell(context, cell);
+      await this.clickCell(context, cell, attempt > 0);
       if (await this.waitForState(context, () => !this.isOverlayAlive(context.overlay) ||
         (!this.isBusy(context.overlay) && classifyOverlayView(context.overlay) !== previousView && classifyOverlayView(context.overlay) !== 'list'))) {
         context.onProgress?.();
+        context.onAction?.({ actionStage: 'SELECT', result: 'STATE_CHANGED', elapsedMs: 0 });
         return 'OK';
       }
       if (context.budget.exceeded()) return 'TIMEOUT';
     }
+    context.onAction?.({ actionStage: 'SELECT', result: 'NO_PROGRESS', reason: 'DATE_VIEW_UNCHANGED', elapsedMs: 0 });
     return 'NO_PROGRESS';
   }
 
@@ -552,6 +571,7 @@ export class DateAgent {
   }
 
   private async waitForState(context: FillContext, ready: () => boolean): Promise<boolean> {
+    const startedAt = Date.now();
     const deadline = Date.now() + Math.min(this.config.progressTimeoutMs,
       Math.max(0, this.config.budget.maxElapsedMs - context.budget.elapsedMs()));
     while (true) {
@@ -559,9 +579,15 @@ export class DateAgent {
       context.assertActive?.();
       if (context.budget.exceeded()) return false;
       this.refreshOverlay(context);
-      if (ready()) return true;
+      if (ready()) {
+        context.onAction?.({ actionStage: 'SELECT', result: 'STATE_CHANGED', elapsedMs: Date.now() - startedAt });
+        return true;
+      }
       const remaining = deadline - Date.now();
-      if (remaining <= 0) return false;
+      if (remaining <= 0) {
+        context.onAction?.({ actionStage: 'SELECT', result: 'NO_PROGRESS', reason: 'EXPECTED_STATE_UNCHANGED', elapsedMs: Date.now() - startedAt });
+        return false;
+      }
       await delay(Math.min(this.config.pollMs, remaining), context.signal);
     }
   }
@@ -766,6 +792,7 @@ export class DateAgent {
 
   private async waitForDateCommit(context: FillContext, atom: DateAtom): Promise<boolean> {
     const startedAt = Date.now();
+    context.onAction?.({ actionStage: 'WAIT_COMMIT', result: 'STARTED', elapsedMs: 0 });
     while (Date.now() - startedAt <= this.config.commitTimeoutMs) {
       if (context.signal?.aborted === true) {
         return false;
@@ -776,6 +803,7 @@ export class DateAgent {
       const text = this.committedTextOf(context);
       if (text !== undefined && this.dateTextMatches(text, atom)) {
         context.matchedText = text;
+        context.onAction?.({ actionStage: 'WAIT_COMMIT', result: 'CONFIRMED', elapsedMs: Date.now() - startedAt });
         return true;
       }
       try {
@@ -784,6 +812,7 @@ export class DateAgent {
         return false;
       }
     }
+    context.onAction?.({ actionStage: 'WAIT_COMMIT', result: 'UNKNOWN', reason: 'COMMIT_NOT_CONFIRMED', elapsedMs: Date.now() - startedAt });
     return false;
   }
 
@@ -810,6 +839,7 @@ export class DateAgent {
       };
     }
     const startedAt = Date.now();
+    context.onAction?.({ actionStage: 'WAIT_COMMIT', result: 'STARTED', elapsedMs: 0 });
     while (Date.now() - startedAt <= this.config.commitTimeoutMs) {
       if (context.signal?.aborted === true) {
         return false;
@@ -825,12 +855,14 @@ export class DateAgent {
           if (endExpected === undefined) {
             if (/至今|present/i.test(text)) {
               context.matchedText = text;
+              context.onAction?.({ actionStage: 'WAIT_COMMIT', result: 'CONFIRMED', elapsedMs: Date.now() - startedAt });
               return true;
             }
           } else {
             const last = atoms[atoms.length - 1];
             if (last !== undefined && atoms.length >= 2 && dateAtomEquals(last, endExpected)) {
               context.matchedText = text;
+              context.onAction?.({ actionStage: 'WAIT_COMMIT', result: 'CONFIRMED', elapsedMs: Date.now() - startedAt });
               return true;
             }
           }
@@ -842,12 +874,13 @@ export class DateAgent {
         return false;
       }
     }
+    context.onAction?.({ actionStage: 'WAIT_COMMIT', result: 'UNKNOWN', reason: 'COMMIT_NOT_CONFIRMED', elapsedMs: Date.now() - startedAt });
     return false;
   }
 
   private committedTextOf(context: FillContext): string | undefined {
     const read = readComboboxCommitted(context.trigger);
-    if (read.source === 'NONE' || read.value.trim() === '') {
+    if ((read.source !== 'COMPONENT_STATE' && read.source !== 'FORM_VALUE') || read.value.trim() === '') {
       return undefined;
     }
     return read.value;

@@ -18,7 +18,7 @@ test('隐私边界：完整运行期间扩展不产生任何外部网络请求',
 
     const response = await runAutofill(workbench);
     expect(response.ok, JSON.stringify(response)).toBe(true);
-    expect(response.summary?.status).toBe('COMPLETED');
+    expect(response.summary?.status).toBe('PARTIAL');
 
     const external = requests.filter((url) => {
       if (!/^https?:/.test(url)) {
