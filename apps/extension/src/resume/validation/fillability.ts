@@ -9,6 +9,7 @@ import type {
   ResumeFactsDocument,
 } from '@/shared/contracts/resume';
 import { RESUME_COMPILER_VERSION } from '@/shared/contracts/resume';
+import { datePartOfLabel } from '@/shared/utils/fieldText';
 
 import { getFact, listReviewFields, reviewStatusOf } from '../review/facts';
 
@@ -127,6 +128,8 @@ function statusCheck(doc: ResumeFactsDocument, factPath: string): PathFillabilit
 function typeCheck(value: unknown, field: FillabilityField): FillabilityReason | undefined {
   if (value === undefined || value === null || value === '') return 'EMPTY_VALUE';
   const kind = field.controlKind;
+  const datePart = datePartOfLabel(field.label ?? '');
+  if (datePart && isDateAtom(value)) return value[datePart] === undefined ? 'DATE_PRECISION_INSUFFICIENT' : undefined;
   if (kind === 'checkbox' && typeof value !== 'boolean') return 'TYPE_MISMATCH';
   if (kind === 'number') {
     const numeric =

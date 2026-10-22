@@ -1,4 +1,5 @@
 import { isElementVisible } from '@/perceptor';
+import { mokaOptionText } from '@/perceptor/MokaFields';
 import { normalizeLabel } from '@/shared/utils/text';
 
 export interface OptionCandidate {
@@ -36,7 +37,7 @@ export function collectOptions(scope: ParentNode): OptionCandidate[] {
   };
   const roleOptions = collectElements(scope, ROLE_OPTION_SELECTOR, register);
   if (roleOptions === 0) {
-    for (const element of scope.querySelectorAll('li, [data-option]')) {
+    for (const element of scope.querySelectorAll('li, [data-option], [class*="sd-Select-common-item-"]')) {
       const html = element as HTMLElement;
       if (html.closest(ROLE_OPTION_SELECTOR) !== null) {
         continue;
@@ -67,7 +68,8 @@ export function optionText(element: HTMLElement): string {
   if (element instanceof HTMLInputElement) {
     return element.value.trim();
   }
-  return (element.textContent ?? '').replace(/\s+/g, ' ').trim();
+  const text = (element.textContent ?? '').replace(/\s+/g, ' ').trim();
+  return mokaOptionText(element, text) ?? text;
 }
 
 export function isNumericOnly(text: string): boolean {

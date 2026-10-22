@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { mappingIssueText } from '@/shared/utils/runReport';
+import { issueNeedsAttention, mappingIssueText } from '@/shared/utils/runReport';
 
 import type { FieldExecutionResult, FieldStatus } from '@/shared/contracts/field';
 import type { SessionRunState } from '@/shared/contracts/run';
@@ -211,7 +211,12 @@ export function App() {
 
   const summary = runState?.summary;
   const fields = summary?.fields ?? [];
-  const noDataIssues = summary?.mappingIssues.filter((issue) => issue.kind === 'NO_DATA').length ?? 0;
+  const openIssues = (summary?.mappingIssues ?? []).filter((issue) => !fields.some((field) => field.fieldKey === issue.fieldKey &&
+    ['VERIFIED', 'USER_OVERRIDDEN'].includes(field.status)));
+  const manualIssues = openIssues.filter(issueNeedsAttention);
+  const optionalIssues = openIssues.filter((issue) => issue.attention === 'optional');
+  const populatedIssues = openIssues.filter((issue) => issue.attention === 'filled' || issue.attention === 'unavailable');
+  const noDataIssues = manualIssues.filter((issue) => issue.kind === 'NO_DATA').length;
   const userProtectedKeys = new Set([
     ...fields.filter((field) => field.status === 'USER_OVERRIDDEN').map((field) => field.fieldKey),
     ...(summary?.dirty?.userProtected ?? []),
@@ -347,6 +352,8 @@ export function App() {
               <div>
                 需要人工处理：<span data-testid="report-manual">{summary.counts.needsManual}</span>
               </div>
+              {optionalIssues.length > 0 ? <div>可跳过的选填项：<span data-testid="report-optional">{optionalIssues.length}</span></div> : null}
+              {populatedIssues.length > 0 ? <div>已有内容或暂不可编辑：<span data-testid="report-populated">{populatedIssues.length}</span></div> : null}
               <div>
                 缺少简历数据：<span data-testid="report-nodata">{noDataIssues}</span>
               </div>
@@ -413,14 +420,19 @@ export function App() {
               ))}
             </ul>
             <ul className="field-list" data-testid="mapping-issues">
-              {summary.mappingIssues.filter((issue) => !fields.some((field) => field.fieldKey === issue.fieldKey &&
-                ['VERIFIED', 'USER_OVERRIDDEN'].includes(field.status))).map((issue, index) => (
+              {manualIssues.map((issue, index) => (
                 <li className="field-item" key={`${issue.fieldKey ?? issue.label}:${issue.reason}:${index}`}>
                   <span className="field-label">{issue.label || '经历区块'}</span>
                   <span>{mappingIssueText(issue)}</span>
                 </li>
               ))}
             </ul>
+            {optionalIssues.length > 0 ? <details data-testid="optional-mapping-issues"><summary>选填项（{optionalIssues.length}），可按需补充</summary>
+              <ul className="field-list">{optionalIssues.map((issue, index) => <li className="field-item" key={`${issue.fieldKey}:${index}`}><span className="field-label">{issue.label}</span><span>{mappingIssueText(issue)}</span></li>)}</ul>
+            </details> : null}
+            {populatedIssues.length > 0 ? <details data-testid="populated-mapping-issues"><summary>已有内容或暂不可编辑（{populatedIssues.length}）</summary>
+              <ul className="field-list">{populatedIssues.map((issue, index) => <li className="field-item" key={`${issue.fieldKey}:${index}`}><span className="field-label">{issue.label}</span><span>{mappingIssueText(issue)}</span></li>)}</ul>
+            </details> : null}
           </>
         )}
       </div>

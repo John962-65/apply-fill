@@ -1,4 +1,5 @@
 import type { FieldStatus } from './field';
+import type { MappingIssue } from './field';
 
 export interface ResumePathOption {
   path: string;
@@ -15,6 +16,7 @@ export interface PillFieldView {
   requiresSource?: boolean;
   essay?: boolean;
   maxLength?: number;
+  attention?: MappingIssue['attention'];
 }
 
 export interface EssayDraft {

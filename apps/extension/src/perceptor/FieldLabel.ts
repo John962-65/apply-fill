@@ -1,3 +1,5 @@
+import { mokaControlLabel, mokaTitle } from './MokaFields';
+
 // Some form builders render a title beside the control without an HTML label association.
 const ROW_SELECTOR = '.form-item, .ant-form-item, .el-form-item, .MuiFormControl-root';
 const TITLE_SELECTOR = '.form-item__title, .ant-form-item-label, .el-form-item__label';
@@ -22,6 +24,11 @@ function labelText(label: Element): string | undefined {
 }
 
 export function nearbyFieldLabel(element: HTMLElement): string | undefined {
+  const moka = mokaTitle(element);
+  if (moka) {
+    const text = labelText(moka);
+    return text ? mokaControlLabel(element, text) : undefined;
+  }
   const row = element.closest(ROW_SELECTOR);
   if (row) {
     const titles = [...row.querySelectorAll(TITLE_SELECTOR)].filter((title) => title.closest(ROW_SELECTOR) === row);

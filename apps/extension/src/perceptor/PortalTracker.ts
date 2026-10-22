@@ -13,6 +13,7 @@ const OVERLAY_SELECTORS = [
   '.el-select-dropdown',
   '.el-cascader__dropdown',
   '.MuiPopover-root',
+  '[class*="sd-Dropdown-dropdown-"]',
   '[data-applyfill-overlay]',
 ];
 
@@ -51,6 +52,8 @@ export function findVisibleOverlays(root: ParentNode = document): HTMLElement[] 
 }
 
 export function isOverlayRelatedToTrigger(overlay: HTMLElement, trigger: HTMLElement): boolean {
+  const moka = trigger.closest('[class*="sd-Dropdown-container-"]');
+  if (moka?.contains(overlay) && overlay.matches('[class*="sd-Dropdown-dropdown-"]')) return true;
   const controls = trigger.getAttribute('aria-controls');
   if (controls !== null && overlay.id !== '') {
     if (controls.split(/\s+/).includes(overlay.id)) {

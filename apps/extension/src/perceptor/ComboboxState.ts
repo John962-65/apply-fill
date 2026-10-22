@@ -1,3 +1,5 @@
+import { mokaSelectedText } from './MokaFields';
+
 export type ComboboxValueSource = 'COMPONENT_STATE' | 'FORM_VALUE' | 'VISIBLE' | 'NONE';
 
 export interface ComboboxValueRead {
@@ -26,6 +28,8 @@ export function findHiddenCommitInput(element: HTMLElement): HTMLInputElement | 
 }
 
 export function readComboboxVisibleText(element: HTMLElement): string {
+  const selected = mokaSelectedText(element);
+  if (selected) return selected;
   if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
     return element.value;
   }
@@ -34,6 +38,8 @@ export function readComboboxVisibleText(element: HTMLElement): string {
 }
 
 export function readComboboxCommitted(element: HTMLElement): ComboboxValueRead {
+  const selected = mokaSelectedText(element);
+  if (selected) return { source: 'COMPONENT_STATE', value: selected };
   const committed = element.getAttribute('data-committed');
   if (committed !== null && committed.trim() !== '') {
     return { source: 'COMPONENT_STATE', value: committed.trim() };

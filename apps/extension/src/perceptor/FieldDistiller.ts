@@ -6,7 +6,9 @@ import type {
   SectionType,
 } from '@/shared/contracts/field';
 import { normalizeLabel } from '@/shared/utils/text';
+import { canonicalFieldLabel } from '@/shared/utils/fieldText';
 import { hasNearbyRequiredMarker, nearbyFieldLabel } from './FieldLabel';
+import { isAuxiliaryControl, mokaRequirement, mokaSectionHeading, mokaSelectedText, mokaTitle } from './MokaFields';
 
 import {
   detectSectionType,
@@ -102,6 +104,8 @@ function controlLabelText(label: Element): string {
 }
 
 function semanticGroupLabel(element: HTMLElement): string | undefined {
+  const moka = mokaSectionHeading(element);
+  if (moka) return canonicalFieldLabel(moka.text);
   let node = element.parentElement;
   for (let depth = 0; node && depth < 6; depth += 1, node = node.parentElement) {
     const heading = node.querySelector(':scope > legend, :scope > h2, :scope > h3, :scope > h4');
@@ -129,7 +133,7 @@ function resolveExplicitLabel(element: HTMLElement): { text: string; source: Lab
     }
   }
   const wrapping = element.closest('label');
-  if (wrapping !== null) {
+  if (wrapping !== null && !wrapping.matches('[class*="sd-Input-container-"]') && !mokaTitle(element)) {
     const text = controlLabelText(wrapping);
     if (text !== '') {
       return { text, source: 'wrapping-label' };
@@ -279,7 +283,7 @@ function collectConstraints(element: HTMLElement): FieldConstraints | undefined 
   if (min !== null) constraints.min = min;
   if (max !== null) constraints.max = max;
   if (step !== null) constraints.step = step;
-  if (maxLength !== null && Number.isFinite(Number(maxLength))) {
+  if (maxLength !== null && /^\d+$/.test(maxLength.trim()) && Number.isSafeInteger(Number(maxLength))) {
     constraints.maxLength = Number(maxLength);
   }
   if (pattern !== null) constraints.pattern = pattern;
@@ -350,14 +354,16 @@ export function distillField(element: HTMLElement, options: DistillOptions = {})
     }
   }
 
-  const descriptorLabel = normalizeLabel(label.text);
+  const descriptorLabel = canonicalFieldLabel(label.text);
+  const requirement = mokaRequirement(element);
   const constraints = collectConstraints(element);
   const distilled: DistilledField = {
     label: label.text,
     labelSource: label.source,
     controlKind,
     sectionType,
-    required: element.hasAttribute('required') || element.getAttribute('aria-required') === 'true' || hasNearbyRequiredMarker(element),
+    required: requirement === 'required' || element.hasAttribute('required') || element.getAttribute('aria-required') === 'true' || hasNearbyRequiredMarker(element),
+    ...(requirement ? { requirement } : {}),
     readonly:
       controlKind !== 'combobox' &&
       (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) &&
@@ -468,7 +474,7 @@ export function distillScopedElements(container: HTMLElement, options: ScopedDis
   }
   for (const element of container.querySelectorAll(SCOPED_FORM_SELECTOR)) {
     const html = element as HTMLElement;
-    if (isSkippedInputType(html) || isSensitiveField(html)) {
+    if (isSkippedInputType(html) || isSensitiveField(html) || isAuxiliaryControl(html)) {
       continue;
     }
     if (html.closest(PLUGIN_UI_SELECTOR) !== null) {
@@ -495,6 +501,8 @@ function isFormElementContainer(element: HTMLElement): boolean {
 
 export function readFieldValueText(element: HTMLElement): string {
   if (isComboboxTrigger(element)) {
+    const selected = mokaSelectedText(element);
+    if (selected) return selected;
     const committed = element.getAttribute('data-committed');
     if (committed !== null && committed !== '') {
       return committed;

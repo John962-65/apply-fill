@@ -22,7 +22,7 @@ export function entryPathInfo(path: string): { collection: ResumeCollection; ind
 // Bind both the collection and any concrete index before resolving its value.
 export function isRouteContextValid(path: string, section: SectionType, index: number): boolean {
   const entry = entryPathInfo(path);
-  if (!isAllowedLlmTargetPath(entry?.template ?? path) || section === 'attachment') return false;
+  if (!isAllowedLlmTargetPath(entry?.template ?? path) || section === 'attachment' || section === 'unknown' && entry) return false;
   const expected = collectionForSection(section);
   if (expected && entry?.collection !== expected) return false;
   return entry === undefined || entry.index === '{index}' || entry.index === index;

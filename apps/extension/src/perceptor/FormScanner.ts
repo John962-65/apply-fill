@@ -1,5 +1,6 @@
 import type { SectionType } from '@/shared/contracts/field';
 import { nearbyFieldLabel } from './FieldLabel';
+import { isAuxiliaryControl, isMokaSelect, mokaSectionHeading } from './MokaFields';
 
 export const NATIVE_CONTROL_SELECTOR = 'input, select, textarea';
 const COMBOBOX_TRIGGER_SELECTOR =
@@ -94,6 +95,7 @@ export function isElementVisible(element: HTMLElement): boolean {
 }
 
 export function isComboboxTrigger(element: HTMLElement): boolean {
+  if (isMokaSelect(element)) return true;
   const role = element.getAttribute('role');
   const hasPopup = element.getAttribute('aria-haspopup');
   if (role !== 'combobox') {
@@ -132,6 +134,7 @@ export function scanFormElements(root: ParentNode): HTMLElement[] {
     if (html.closest(PLUGIN_UI_SELECTOR) !== null) {
       continue;
     }
+    if (isAuxiliaryControl(html)) continue;
     if (!isElementVisible(html)) {
       continue;
     }
@@ -174,6 +177,8 @@ export interface FoundSectionHeading {
 const MAX_SECTION_CLIMB = 6;
 
 export function findSectionHeading(element: HTMLElement): FoundSectionHeading | undefined {
+  const moka = mokaSectionHeading(element);
+  if (moka) return { type: matchSectionKeyword(moka.text) ?? (/申请信息|求职意向/.test(moka.text) ? 'basic' : 'unknown'), heading: moka.heading, scope: moka.scope };
   let node: Element | null = element.parentElement;
   let depth = 0;
   while (node !== null && depth < MAX_SECTION_CLIMB) {
@@ -192,6 +197,10 @@ export function findSectionHeading(element: HTMLElement): FoundSectionHeading | 
 }
 
 export function detectSectionType(element: Element): SectionType {
+  if (element instanceof HTMLElement) {
+    const moka = mokaSectionHeading(element);
+    if (moka) return matchSectionKeyword(moka.text) ?? (/申请信息|求职意向/.test(moka.text) ? 'basic' : /上传/.test(moka.text) ? 'attachment' : 'unknown');
+  }
   let node: Element | null = element.parentElement;
   let depth = 0;
   while (node !== null && depth < 6) {

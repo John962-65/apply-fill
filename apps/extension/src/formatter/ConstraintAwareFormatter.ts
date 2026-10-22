@@ -2,6 +2,7 @@ import type { ControlKind, FieldConstraints } from '@/shared/contracts/field';
 import type { DateAtom } from '@/shared/contracts/resume';
 import { formatDateAtom } from '@/shared/utils/date';
 import { normalizeLabel } from '@/shared/utils/text';
+import { canonicalFieldLabel, datePartOfLabel } from '@/shared/utils/fieldText';
 
 export { formatDateAtom };
 
@@ -107,6 +108,24 @@ function isDateAtom(value: unknown): value is DateAtom {
 
 export function formatForField(rawValue: unknown, field: FormatTarget): FormatResult {
   const kind = field.controlKind;
+  if (['select', 'radio', 'combobox'].includes(kind) && typeof rawValue === 'string' && /^(?:最高学历|学历|学位|degree|highest degree)$/.test(canonicalFieldLabel(field.label ?? ''))) {
+    const academic = /^(?:(?:工|理|文|法|经济|教育|管理|医|农|艺术|军事|历史|哲)学|专业学位)?(学士|硕士|博士)(?:研究生|学位)?$/.exec(rawValue.trim());
+    if (academic) rawValue = academic[1] === '学士' ? '本科' : academic[1];
+  }
+  const datePart = datePartOfLabel(field.label ?? '');
+  if (datePart && isDateAtom(rawValue)) {
+    const value = rawValue[datePart];
+    if (value === undefined) return { ok: false, reason: 'INSUFFICIENT_DATE_PRECISION' };
+    const text = String(value);
+    if (kind === 'select' || kind === 'combobox') {
+      const options = field.options ?? [];
+      if (options.length > 0) {
+        const exact = options.filter((option) => /^\d+(?:年|月|日)?$/.test(option.trim()) && Number(option.replace(/[年月日]/g, '')) === value);
+        return exact.length === 1 ? { ok: true, value: exact[0]!, expectedText: exact[0]! } : { ok: false, reason: 'NO_OPTION_MATCH' };
+      }
+    }
+    return formatForField(kind === 'number' ? value : text, { ...field, label: '' });
+  }
 
   if (kind === 'checkbox') {
     if (typeof rawValue !== 'boolean') {

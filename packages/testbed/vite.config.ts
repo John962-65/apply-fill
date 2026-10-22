@@ -34,6 +34,7 @@ export default defineConfig({
         'react-waves': page('react-waves.html'),
         'beisen-month': page('beisen-month.html'),
         'beisen-form': page('beisen-form.html'),
+        'moka-form': page('moka-form.html'),
         'react-datepicker': page('react-datepicker.html'),
         'react-daterange': page('react-daterange.html'),
         'react-frames': page('react-frames.html'),

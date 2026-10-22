@@ -51,7 +51,7 @@ import { isTabMessage } from '@/shared/messages/protocol';
 import type { AttachmentInfo, AutofillRunResponse, SimpleAck, UploadAttachmentResponse } from '@/shared/messages/protocol';
 import { createId } from '@/shared/utils/id';
 import { decodeBytes } from '@/shared/utils/binary';
-import { executionCounts } from '@/shared/utils/runReport';
+import { executionCounts, mappingIssueText } from '@/shared/utils/runReport';
 import type { ApplicationContext } from '@/jd/ApplicationContext';
 import { generateEssayDraft } from '@/jd/EssayGenerator';
 import type { EssayProjection } from '@/jd/EssayGenerator';
@@ -626,6 +626,15 @@ export class ContentRuntime {
     for (const result of results) {
       if (!signal.aborted && result.status === 'CANCELLED' && !this.isCurrentField(result.fieldKey)) result.reason = 'STEP_CHANGED';
     }
+    // A repeated row may receive a new binding while the page settles.
+    // Do not repeat informational rows for obsolete bindings or already verified controls.
+    const completedElements = new Set(results.filter((result) => ['VERIFIED', 'USER_OVERRIDDEN'].includes(result.status))
+      .map((result) => this.elementByKey.get(result.fieldKey)).filter((element) => element?.isConnected));
+    summary.mappingIssues = summary.mappingIssues.filter((issue) => {
+      if (!issue.attention || issue.attention === 'manual' || !issue.fieldKey) return true;
+      const element = this.elementByKey.get(issue.fieldKey);
+      return !!element?.isConnected && this.keyByElement.get(element) === issue.fieldKey && !completedElements.has(element);
+    });
     summary.counts = { ...summary.counts, ...this.computeStatusCounts(results, summary.mappingIssues) };
     summary.status = signal.aborted ? 'CANCELLED' : summary.status;
     const finalResults = new Map(results.map((result) => [result.fieldKey, result]));
@@ -1234,14 +1243,16 @@ export class ContentRuntime {
         fieldKey: issue.fieldKey as string,
         label: issue.label,
         status: 'NEEDS_MANUAL' as const,
-        reason: issue.reason === 'LLM_SENSITIVE_REQUIRES_CONFIRMATION' ? '模型建议使用个人资料，请确认字段来源后填写' :
+        reason: issue.attention && issue.attention !== 'manual' ? mappingIssueText(issue) :
+          issue.reason === 'LLM_SENSITIVE_REQUIRES_CONFIRMATION' ? '模型建议使用个人资料，请确认字段来源后填写' :
           issue.reason === 'SOURCE_MEMORY_NOT_SAVED' ? '字段已填写，但来源偏好未保存，请重试' :
           issue.reason === 'RESUME_ENTRY_REQUIRES_CONFIRMATION' ? '简历中有多段经历，请选择此字段的来源' :
           issue.reason === 'DRAFT_REQUIRES_CONFIRMATION' ? '请审核文本或确认字段来源后填写' :
           issue.reason === 'ROUTE_CONTEXT_MISMATCH' ? '建议来源与当前字段的上下文不一致，请选择正确来源' :
-          issue.kind === 'AMBIGUOUS' ? '经历身份或字段来源存在歧义，请确认后选择来源' : issue.reason,
+          issue.kind === 'AMBIGUOUS' ? '经历身份或字段来源存在歧义，请确认后选择来源' : mappingIssueText(issue),
         targetPreview: '',
         requiresSource: true,
+        attention: issue.attention,
         maxLength: this.signatures.get(issue.fieldKey as string)?.constraints?.maxLength,
         ...(essayCapable && this.controlKindFor(issue.fieldKey as string) === 'textarea' ? { essay: true } : {}),
       }));

@@ -43,7 +43,12 @@ const STYLE_TEXT = `
 
 function PillApp(props: { actions: QuickFillPillActions; fields: PillFieldView[] }): JSX.Element | null {
   const { actions, fields } = props;
-  const [collapsed, setCollapsed] = useState(fields.length === 0);
+  const manualFields = fields.filter((field) => !field.attention || field.attention === 'manual');
+  const optionalFields = fields.filter((field) => field.attention === 'optional');
+  const populatedFields = fields.filter((field) => field.attention === 'filled' || field.attention === 'unavailable');
+  const [collapsed, setCollapsed] = useState(manualFields.length === 0);
+  const [showOptional, setShowOptional] = useState(false);
+  const [showPopulated, setShowPopulated] = useState(false);
   const [feedback, setFeedback] = useState('');
   const [alternativesFor, setAlternativesFor] = useState<string | undefined>(undefined);
   const [alternatives, setAlternatives] = useState<ResumePathOption[]>([]);
@@ -56,12 +61,13 @@ function PillApp(props: { actions: QuickFillPillActions; fields: PillFieldView[]
   const essayRevision = useRef(0);
 
   useEffect(() => {
-    if (fields.length > 0) {
+    if (manualFields.length > 0) {
       setCollapsed(false);
     }
-  }, [fields.length]);
+  }, [manualFields.length]);
 
-  const count = fields.length;
+  const count = manualFields.length;
+  const visibleFields = [...manualFields, ...(showOptional ? optionalFields : []), ...(showPopulated ? populatedFields : [])];
   const openAlternatives = useMemo(
     () => async (fieldKey: string) => {
       setAlternativesFor(fieldKey);
@@ -70,28 +76,30 @@ function PillApp(props: { actions: QuickFillPillActions; fields: PillFieldView[]
     [actions],
   );
 
-  if (count === 0) {
+  if (fields.length === 0) {
     return null;
   }
   return (
     <div className="pill" data-testid="quickfill-pill">
       <div className="pill-header">
-        <span data-testid="pill-count">需要人工处理（{count}）</span>
+        <span data-testid="pill-count">{count > 0 ? `需要人工处理（${count}）` : '填写结果'}</span>
         <button type="button" onClick={() => setCollapsed((value) => !value)} data-testid="pill-toggle">
           {collapsed ? '展开' : '收起'}
         </button>
       </div>
       {collapsed ? null : (
         <div className="pill-list">
-          {fields.map((field) => (
-            <div className="pill-row" key={field.fieldKey} data-testid="pill-row">
+          {optionalFields.length > 0 ? <button type="button" data-testid="pill-optional-toggle" onClick={() => setShowOptional((value) => !value)}>选填项（{optionalFields.length}），可按需填写</button> : null}
+          {populatedFields.length > 0 ? <button type="button" data-testid="pill-populated-toggle" onClick={() => setShowPopulated((value) => !value)}>已有内容或暂不可编辑（{populatedFields.length}）</button> : null}
+          {visibleFields.map((field) => (
+            <div className={`pill-row pill-row-${field.attention ?? 'manual'}`} key={field.fieldKey} data-testid="pill-row">
               <div className="pill-row-label">
                 <span>{field.label !== '' ? field.label : field.fieldKey}</span>
                 <button type="button" onClick={() => actions.onFocusField(field.fieldKey)}>
                   定位
                 </button>
               </div>
-              <div className="pill-reason" data-testid="pill-reason">
+              <div className="pill-reason" style={field.attention && field.attention !== 'manual' ? { color: '#6b7280' } : undefined} data-testid="pill-reason">
                 {field.reason !== '' ? field.reason : field.status}
               </div>
               {field.requiresSource === true ? null : (

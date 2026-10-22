@@ -1,5 +1,6 @@
 import type { ControlKind, SectionType } from '@/shared/contracts/field';
 import { normalizeLabel } from '@/shared/utils/text';
+import { canonicalFieldLabel, isAlternateNameLabel } from '@/shared/utils/fieldText';
 
 import { collectionForSection, entryPathInfo, isOtherPersonContext } from './RouteContext';
 
@@ -30,10 +31,10 @@ export const DEFAULT_RULES: RouteRule[] = [
       { id: `${sectionType}.scopedEndDate`, patterns: ['结束时间', '结束日期', '截止时间', '结束年月', ...(sectionType === 'work' ? ['离职时间', '离职日期'] : [])], targetPath: `${root}[{index}].endDate`, sectionTypes: [sectionType] },
     ];
   }),
-  { id: 'basic.name', patterns: ['姓名', '名字', '真实姓名', '申请人姓名'], targetPath: 'basic.name' },
+  { id: 'basic.name', patterns: ['姓名', '名字', '真实姓名', '申请人姓名', 'name', 'full name'], targetPath: 'basic.name' },
   {
     id: 'basic.phone',
-    patterns: ['手机', '手机号', '手机号码', '联系电话', '电话', '移动电话', '联系方式'],
+    patterns: ['手机', '手机号', '手机号码', '联系电话', '电话', '移动电话', '联系方式', 'mobile', 'mobile number', 'phone', 'phone number'],
     targetPath: 'basic.phone',
   },
   {
@@ -41,7 +42,7 @@ export const DEFAULT_RULES: RouteRule[] = [
     patterns: ['邮箱', '电子邮箱', '电子邮件', 'email', 'e-mail', '邮件地址'],
     targetPath: 'basic.email',
   },
-  { id: 'basic.gender', patterns: ['性别'], targetPath: 'basic.gender', controlKinds: ['radio', 'select'] },
+  { id: 'basic.gender', patterns: ['性别', 'gender'], targetPath: 'basic.gender', controlKinds: ['radio', 'select', 'combobox'] },
   {
     id: 'basic.intro',
     patterns: ['个人简介', '自我介绍', '自我评价', '个人介绍'],
@@ -62,7 +63,7 @@ export const DEFAULT_RULES: RouteRule[] = [
     id: 'basic.birthDate',
     patterns: ['出生日期', '出生年月', '出生年月日'],
     targetPath: 'basic.birthDate',
-    controlKinds: ['date'],
+    controlKinds: ['date', 'text', 'number', 'combobox', 'select'],
   },
   {
     id: 'basic.postalCode',
@@ -83,12 +84,12 @@ export const DEFAULT_RULES: RouteRule[] = [
   },
   {
     id: 'education.school',
-    patterns: ['学校', '学校名称', '毕业院校', '院校', '毕业学校'],
+    patterns: ['学校', '学校名称', '毕业院校', '院校', '毕业学校', 'school', 'university'],
     targetPath: 'education[{index}].school',
   },
   {
     id: 'education.degree',
-    patterns: ['学历', '最高学历', '学位'],
+    patterns: ['学历', '最高学历', '学位', 'degree', 'highest degree'],
     targetPath: 'education[{index}].degree',
     controlKinds: ['select', 'radio', 'text', 'combobox'],
   },
@@ -118,7 +119,7 @@ export const DEFAULT_RULES: RouteRule[] = [
   },
   {
     id: 'education.major',
-    patterns: ['专业', '所学专业', '专业名称'],
+    patterns: ['专业', '所学专业', '专业名称', 'major'],
     targetPath: 'education[{index}].major',
   },
   {
@@ -151,7 +152,7 @@ export const DEFAULT_RULES: RouteRule[] = [
   },
   {
     id: 'project.role',
-    patterns: ['项目角色', '担任角色', '角色'],
+    patterns: ['项目角色', '担任角色', '角色', '职责', 'organizational role'],
     targetPath: 'projects[{index}].role',
     controlKinds: ['text', 'select'],
   },
@@ -187,7 +188,7 @@ export const DEFAULT_RULES: RouteRule[] = [
 const LEADING_NOISE = /^(请输入|请填写|请选择|请上传|请提供|输入|填写)/;
 
 export function normalizeForMatch(raw: string): string {
-  const withoutParens = raw.replace(/[（(][^）)]*[）)]/g, ' ');
+  const withoutParens = canonicalFieldLabel(raw).replace(/[（(][^）)]*[）)]/g, ' ');
   const withoutNoise = withoutParens.replace(LEADING_NOISE, ' ');
   return normalizeLabel(withoutNoise);
 }
@@ -201,6 +202,8 @@ export function matchRule(
 ): RouteRule | undefined {
   const label = normalizeForMatch(normalizedLabel);
   for (const rule of rules) {
+    if (rule.id === 'basic.name' && isAlternateNameLabel(normalizedLabel)) continue;
+    if (sectionType === 'unknown' && entryPathInfo(rule.targetPath)) continue;
     const collection = sectionType === undefined ? undefined : collectionForSection(sectionType);
     if (collection !== undefined && entryPathInfo(rule.targetPath)?.collection !== collection) continue;
     if (rule.targetPath.startsWith('basic.') && isOtherPersonContext(label, groupLabel)) continue;

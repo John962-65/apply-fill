@@ -1,6 +1,7 @@
 import type { SectionType } from '@/shared/contracts/field';
 import type { ObservationField, WitnessEntry, WitnessRecord } from '@/shared/contracts/reanchor';
 import { normalizeLabel } from '@/shared/utils/text';
+import { canonicalFieldLabel } from '@/shared/utils/fieldText';
 
 export const PRIMARY_WITNESS_LABELS: Partial<Record<SectionType, string[]>> = {
   education: ['学校名称', '学校', '毕业院校', '院校', '毕业学校'],
@@ -34,7 +35,7 @@ export function extractWitness(sectionType: SectionType, fields: ObservationFiel
   const stableIds: string[] = [];
 
   for (const field of fields) {
-    const label = normalizeLabel(field.normalizedLabel);
+    const label = canonicalFieldLabel(field.normalizedLabel);
     const entry = toEntry(field);
     if (primary === undefined && primaryLabels.has(label) && entry !== undefined) {
       primary = entry;

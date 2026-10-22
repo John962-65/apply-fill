@@ -70,6 +70,7 @@ export interface FieldSignature {
   sectionType: SectionType;
   instanceId?: string;
   required: boolean;
+  requirement?: 'required' | 'optional';
   readonly: boolean;
   disabled: boolean;
   options?: string[];
@@ -144,4 +145,5 @@ export interface MappingIssue {
   kind: 'UNMAPPED' | 'NO_DATA' | 'NO_OPTION' | 'READONLY' | 'DISABLED' | 'AMBIGUOUS' | 'REPEATER';
   reason: string;
   fieldKey?: string;
+  attention?: 'manual' | 'optional' | 'filled' | 'unavailable';
 }

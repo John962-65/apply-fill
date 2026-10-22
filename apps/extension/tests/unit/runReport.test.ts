@@ -19,4 +19,12 @@ describe('run report counts', () => {
     expect(executionCounts([field('a', 'NEEDS_MANUAL'), field('b', 'CANCELLED', 0)],
       [{ label: '项目', kind: 'REPEATER', reason: 'NO_ADD_CONTROL' }])).toMatchObject({ needsManual: 1, cancelled: 1 });
   });
+  it('keeps optional and existing fields out of the mandatory count without concealing execution failures', () => {
+    expect(executionCounts([field('failed', 'NEEDS_MANUAL')], [
+      { fieldKey: 'optional', label: '推荐码', kind: 'UNMAPPED', reason: 'NO_RULE_MATCH', attention: 'optional' },
+      { fieldKey: 'existing', label: '区号', kind: 'UNMAPPED', reason: 'NO_RULE_MATCH', attention: 'filled' },
+      { fieldKey: 'required', label: '民族', kind: 'UNMAPPED', reason: 'NO_RULE_MATCH', attention: 'manual' },
+      { fieldKey: 'failed', label: '失败的选填项', kind: 'NO_OPTION', reason: 'NO_OPTION_MATCH', attention: 'optional' },
+    ])).toMatchObject({ needsManual: 2 });
+  });
 });

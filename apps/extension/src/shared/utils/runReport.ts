@@ -1,12 +1,18 @@
 import type { FieldExecutionResult, MappingIssue } from '../contracts/field';
 import type { RunCounts } from '../contracts/run';
 
+export function issueNeedsAttention(issue: MappingIssue): boolean {
+  if (issue.kind === 'DISABLED' || issue.kind === 'READONLY') return false;
+  return issue.attention === undefined || issue.attention === 'manual';
+}
+
 export function executionCounts(fields: FieldExecutionResult[], issues: MappingIssue[] = []): Pick<RunCounts,
   'executed' | 'verified' | 'userOverridden' | 'needsManual' | 'cancelled'> {
   const results = new Map(fields.map((field) => [field.fieldKey, field]));
   const manual = new Set(fields.filter((field) => ['NEEDS_MANUAL', 'RETRYABLE', 'CIRCUIT_BROKEN'].includes(field.status))
     .map((field) => field.fieldKey));
   for (const issue of issues) {
+    if (!issueNeedsAttention(issue)) continue;
     if (!issue.fieldKey) continue;
     const result = results.get(issue.fieldKey);
     if (!result || !['VERIFIED', 'USER_OVERRIDDEN', 'CANCELLED'].includes(result.status)) manual.add(issue.fieldKey);
@@ -21,6 +27,11 @@ export function executionCounts(fields: FieldExecutionResult[], issues: MappingI
 }
 
 export function mappingIssueText(issue: MappingIssue): string {
+  if (issue.attention === 'filled') return '页面已有内容，未自动改动';
+  if (issue.attention === 'unavailable') return '当前不可编辑，已跳过';
+  if (issue.attention === 'optional') return '选填项，未自动填写，可按需补充';
+  if (issue.reason === 'FACT_NOT_CONFIRMED') return '请在工作台确认这项简历资料后重试';
+  if (issue.reason === 'DATE_PRECISION_INSUFFICIENT' || issue.reason === 'INSUFFICIENT_DATE_PRECISION') return '简历未提供此日期精度，请按实际情况补充';
   if (issue.reason === 'RESUME_ENTRY_REQUIRES_CONFIRMATION') return '有多段候选经历，请在页面浮层中选择来源';
   if (issue.reason === 'EXPAND_SECTION_AMBIGUOUS') return '有多个添加入口，请先手动添加所需条目';
   if (issue.reason === 'DRAFT_REQUIRES_CONFIRMATION') return '请先审核文本或选择来源';

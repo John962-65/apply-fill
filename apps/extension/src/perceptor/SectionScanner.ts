@@ -1,6 +1,7 @@
 import type { SectionType } from '@/shared/contracts/field';
 
 import { distillField } from './FieldDistiller';
+import { MOKA_BLOCK } from './MokaFields';
 import {
   findSectionHeading,
   FORM_CONTROL_SELECTOR,
@@ -95,6 +96,10 @@ function hasSharedLabel(a: Set<string>, b: Set<string>): boolean {
 }
 
 export function findInstanceContainers(scope: HTMLElement): HTMLElement[] {
+  if (scope.matches(MOKA_BLOCK)) {
+    return [...scope.children].filter((child): child is HTMLElement => child instanceof HTMLElement &&
+      child.className.includes('apply-fields-') && scanFormElements(child).length > 0);
+  }
   const controls = collectControls(scope).filter(
     (control) => !isSkippedInputType(control) && isElementVisible(control),
   );
