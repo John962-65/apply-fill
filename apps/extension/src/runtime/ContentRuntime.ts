@@ -1053,17 +1053,24 @@ export class ContentRuntime {
       if (!(element instanceof HTMLElement) || !isFormElement(element)) {
         continue;
       }
-      const required =
+      const fieldKey = this.resolveFieldKey(element);
+      if (fieldKey === undefined) continue;
+      const required = this.signatures.get(fieldKey)?.required === true ||
         (element as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement).required === true ||
         element.getAttribute('aria-required') === 'true';
       if (!required) {
         continue;
       }
-      if (readFieldValueText(element).trim() !== '') continue;
-      const fieldKey = this.resolveFieldKey(element);
-      if (fieldKey === undefined || handledKeys.has(fieldKey)) {
+      const currentValue = element instanceof HTMLSelectElement ? element.value : readFieldValueText(element);
+      if (currentValue.trim() !== '') continue;
+      if (handledKeys.has(fieldKey) && !this.registry.isUserProtected(fieldKey)) {
         continue;
       }
+      const signature = this.signatures.get(fieldKey);
+      if (signature && this.registry.isUserProtected(fieldKey)) this.diagnostics.record({
+        ...this.diagnostics.field(this.activeRun?.runId ?? this.lastSummary?.runId ?? 'run_unknown', signature, 'RECOVER'),
+        actionStage: 'VERIFY', result: 'NEEDS_MANUAL', reason: 'REQUIRED_EMPTY_AFTER_USER_EDIT',
+      });
       const role = this.findContainerRole(element);
       const distilled =
         role === undefined

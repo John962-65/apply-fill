@@ -14,7 +14,7 @@ function Choice({ label = '性别', name = 'gender', value, onChange, available 
   const [display, setDisplay] = useState('');
   const [clicks, setClicks] = useState(0);
   const [pointerEvents, setPointerEvents] = useState<string[]>([]);
-  const [ready, setReady] = useState(mode !== 'takeover' && mode !== 'repaint-user');
+  const [ready, setReady] = useState(!['takeover', 'repaint-user', 'empty-protected'].includes(mode));
   const ref = useRef<HTMLDivElement>(null);
   const items = available ?? (name.includes('major') ? ['计算机科学与技术', '软件工程'] : choices);
   const ignore = mode === 'ignore-click' || mode === 'search-only';
@@ -54,7 +54,7 @@ function Choice({ label = '性别', name = 'gender', value, onChange, available 
 
 function SelectPage() {
   const [value, setValue] = useState(mode === 'close-no-commit' ? '女' : '');
-  const [name, setName] = useState('');
+  const [name, setName] = useState(mode === 'empty-protected' ? '先前填写' : '');
   const [reset, setReset] = useState(false);
   const [degree, setDegree] = useState('');
   return <main><h1>组件提交验证</h1><form>
@@ -63,12 +63,12 @@ function SelectPage() {
     <Choice name={month ? 'birth-month' : 'gender'} label={month ? '出生日期（月）' : '性别'} value={value} onChange={(selected) => {
       setValue(selected); if (mode === 'reset-loop') setName('');
     }} available={mode === 'option-change' && !degree ? ['女'] : undefined} />
-    <label>姓名<input name="fullName" data-testid="name" value={name} onChange={(event) => {
+    <label>姓名<input required name="fullName" data-testid="name" value={name} onChange={(event) => {
       setName(event.target.value);
       if (mode === 'value-reset' && !reset) { setReset(true); setValue(''); }
       if (mode === 'reset-loop') setValue('');
     }} /></label>
-    <label>民族<input required data-testid="unmapped" /></label>
+    {mode !== 'empty-protected' ? <label>民族<input required data-testid="unmapped" /></label> : null}
     <output data-testid="reset">{String(reset)}</output>
   </form></main>;
 }

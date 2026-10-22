@@ -229,3 +229,23 @@ for (const scenario of ['missing-gender', 'missing-month']) test(`脱敏诊断�
     await expect(page.getByTestId(`${scenario === 'missing-month' ? 'birth-month' : 'gender'}-business`)).toHaveValue('');
   } finally { await session.close(); }
 });
+
+test('用户清空必填项后保持用户值，并显示部分完成和明确诊断', async () => {
+  const session = await launchExtensionContext();
+  try {
+    const page = await session.context.newPage();
+    await page.goto(`${TESTBED_URL}/engine-regression.html?mode=empty-protected`);
+    const workbench = await openWorkbench(session.context, session.extensionId);
+    await importFacts(workbench, facts());
+    await startAutofillWithoutWaiting(workbench);
+    await expect(page.getByTestId('gender-popup')).toBeVisible();
+    await page.getByTestId('name').fill('');
+    const response = await awaitAutofill(workbench);
+    await expect(page.getByTestId('name')).toHaveValue('');
+    await expect(page.getByTestId('gender-business')).toHaveValue('男');
+    expect(response.summary?.fields.find((field) => field.label === '姓名')?.status).toBe('USER_OVERRIDDEN');
+    expect(response.summary?.status).toBe('PARTIAL');
+    expect(response.summary?.dirty?.newRequired).toContain('姓名');
+    expect(response.summary?.diagnostics?.some((item) => item.reason === 'REQUIRED_EMPTY_AFTER_USER_EDIT')).toBe(true);
+  } finally { await session.close(); }
+});
