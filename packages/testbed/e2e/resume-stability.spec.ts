@@ -93,6 +93,9 @@ test('旧版不完整资料只读恢复，补录后保存仍保留原始数据',
     await page.evaluate(async (value) => {
       const db = await new Promise<IDBDatabase>((resolve, reject) => {
         const request = indexedDB.open('applyfill', 1);
+        request.onupgradeneeded = () => {
+          if (!request.result.objectStoreNames.contains('resumes')) request.result.createObjectStore('resumes');
+        };
         request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error);
       });
       try {

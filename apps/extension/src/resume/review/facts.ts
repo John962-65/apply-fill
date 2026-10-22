@@ -382,4 +382,4 @@ export function confirmAllWithEvidence(doc: ResumeFactsDocument, now: number = D
   return next;
 }
 
-export { GROUP_LABELS };
+export { BASIC_LABELS, GROUP_LABELS };

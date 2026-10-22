@@ -1,7 +1,7 @@
 import type { ResumeFact, ResumeFactsDocument } from '@/shared/contracts/resume';
 import { parseDateAtom } from '@/shared/utils/date';
 
-import { getFact, listReviewFields, updateFactValue } from './facts';
+import { BASIC_LABELS, getFact, listReviewFields, updateFactValue } from './facts';
 import type { ReviewField, ReviewGroup } from './facts';
 
 export const REVIEW_GROUPS: ReviewGroup[] = ['basic', 'education', 'work', 'projects', 'skills', 'preferences'];
@@ -117,7 +117,7 @@ export function reviewEntryTitle(group: ReviewGroup, fields: EditableReviewField
 export function formatExtractionWarning(warning: string): string {
   const groups: Record<string, string> = { basic: '个人信息', education: '教育经历', work: '工作经历', projects: '项目经历', skills: '技能 / 证书' };
   return warning.replace(/\b(basic|education|work|projects|skills)(?:\[(\d+)\])?\.([A-Za-z]+)/g, (_match, group: ReviewGroup, index: string | undefined, key: string) => {
-    const label = FIELDS[group].find(([name]) => name === key)?.[1] ?? '该项信息';
+    const label = FIELDS[group].find(([name]) => name === key)?.[1] ?? (group === 'basic' ? BASIC_LABELS[key] : undefined) ?? key;
     return `${groups[group]}${index !== undefined ? ` ${Number(index) + 1}` : ''} · ${label}`;
   });
 }

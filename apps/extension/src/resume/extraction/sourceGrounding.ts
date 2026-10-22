@@ -15,15 +15,23 @@ const HEADINGS: Array<[SourceKind, RegExp]> = [
   ['basic', /^(?:个人信息|基本信息|联系方式|个人简介|自我评价|自我介绍|求职意向|profile|summary|contact|personalinformation)$/i],
   ['education', /^(?:教育经历|教育背景|学习经历|教育|education|academicbackground)$/i],
   ['work', /^(?:工作经历|实习经历|工作与实习经历|工作及实习经历|工作经验|实习经验|experience|workexperience|employmenthistory|internship)$/i],
-  ['projects', /^(?:项目经历|项目经验|科研经历|科研项目|项目|projects?|projectexperience|researchprojects)$/i],
+  ['projects', /^(?:项目经历|项目经验|科研经历|科研项目|开源项目|项目|projects?|projectexperience|researchprojects|opensourceprojects)$/i],
   ['skills', /^(?:技能证书|技能与证书|专业技能|技能特长|技能清单|技能|证书|skills|certificates?)$/i],
   ['awards', /^(?:奖项|获奖情况|荣誉奖励|所获奖项|awards|honors)$/i],
-  ['additional', /^(?:补充信息|其他信息|additionalinformation)$/i],
+  ['additional', /^(?:补充信息|其他信息|校园经历|校园活动|社团经历|课外活动|additionalinformation|campusactivities|extracurricularactivities)$/i],
 ];
 const NARRATIVE = /^(?:负责|参与|主导|协助|完成|实现|设计|开发|搭建|推动|通过|使用|采用|基于|优化|维护|支持|服务|对接|上线|提升|降低|节省|获得|built\b|implemented\b|developed\b|responsible\b|led\b|worked\b|designed\b|improved\b|reduced\b)/i;
-const FIELD_LABEL = /^(?:项目(?:背景|描述|职责|成果|技术|内容|角色|时间)|工作(?:内容|职责)|技术栈|主要职责|职责|责任描述|担任角色|角色|职位|岗位|职务|专业|学历|学位|时间|开始时间|结束时间|入学时间|毕业时间|GPA|绩点|description|responsibilities|outcomes|role|position|degree|major|duration)\s*[:：]/i;
+const FIELD_LABEL = /^(?:项目(?:背景|描述|职责|成果|技术|内容|角色|时间)|工作(?:内容|职责)|内容概述|主要工作|主修课程|主要课程|(?:硕士|博士)?研究方向|技术栈|主要职责|职责|责任描述|担任角色|角色|职位|岗位|职务|专业|学历|学位|时间|开始时间|结束时间|入学时间|毕业时间|GPA|绩点|description|responsibilities|outcomes|role|position|degree|major|duration)\s*[:：]/i;
+const PROJECT_PREFIX = /^(?:(?:科研|横向|开源|课程|个人|研究|商业|毕业设计)?项目(?:名称)?|project(?:\s*name)?)\s*[:：]\s*/i;
+const ORGANIZATION_PREFIX = /^(?:公司名称|公司|单位名称|单位|学校名称|学校|院校|projectname|company|school)\s*[:：]\s*/i;
+const LEADERS = /[.…⋯·．]{2,}/;
 const DEGREE_OR_ROLE = /^(?:本科|硕士|博士|研究生|专科|大专|学士|Bachelor\b|Master\b|PhD\b|MSc\b|BSc\b|.*(?:工程师|实习生|助理|经理|研究员|负责人|engineer|intern|developer|manager|analyst))/i;
 const DATE_RANGE = /\d{4}(?:\s*[年./-]\s*\d{1,2}(?!\d)\s*月?)?\s*[-–~～—至到]\s*(?:\d{4}(?:\s*[年./-]\s*\d{1,2}(?!\d)\s*月?)?|至今|present)/gi;
+
+export function hasExplicitProjectDate(text: string): boolean {
+  return new RegExp(DATE_RANGE.source, 'i').test(text) ||
+    /(?:开始(?:时间|日期)?|结束(?:时间|日期)?|起止(?:时间|日期)?|项目(?:时间|日期|周期)|工期|start\s*date|end\s*date|duration)\s*[:：]/i.test(text);
+}
 
 function normalized(text: string): string { return text.replace(/\s+/g, '').toLowerCase(); }
 function bare(text: string): string { return text.replace(/^(?:[\s•●·*▪-]+|\d+[.、)]\s*)/, '').trim(); }
@@ -32,27 +40,35 @@ function headingKind(text: string): SourceKind | undefined {
     .replace(/^[一二三四五六七八九十]+[、.．]?/, '').replace(/^\d+[、.．)]/, '').replace(/\s+/g, '').split(/[|｜/]/);
   return HEADINGS.find(([, pattern]) => pieces.some((piece) => pattern.test(piece)))?.[0];
 }
+function instancePrefix(kind: SourceKind): RegExp {
+  return kind === 'projects' ? PROJECT_PREFIX : ORGANIZATION_PREFIX;
+}
 function possibleTitle(line: SourceLine, kind: SourceKind): boolean {
   const text = bare(line.text);
   if (line.heading) return true;
   if (!text || NARRATIVE.test(text) || FIELD_LABEL.test(text)) return false;
-  if (/^(?:项目名称|项目|公司名称|公司|单位名称|单位|学校|院校|projectname|company|school)\s*[:：]/i.test(text)) return true;
+  if (instancePrefix(kind).test(text)) return true;
   if (/\d\s*(?:%|％|万|亿|人|次|个|ms|秒|毫秒|倍|年经验)/i.test(text)) return false;
   if (/^(?:本科|硕士|博士|专科|大专|学士|Bachelor|Master|PhD|MSc|BSc)$/i.test(text)) return false;
   if (kind === 'work' && DEGREE_OR_ROLE.test(text) && !/[|｜\t]|公司|集团|Co\.|Inc\.|Ltd\.|\d{4}/i.test(text)) return false;
   if (kind === 'education' && /^(?:专业[:：]?)?[^|｜]*(?:科学|工程|技术|管理|文学|经济|法学|医学|数学)$/.test(text) && !/大学|学院|University|College/i.test(text)) return false;
   const remainder = text.replace(DATE_RANGE, '').replace(/[\d\s年月至今./~～—–－-]/g, '');
   if (!/[A-Za-z\u3400-\u9fff]/.test(remainder)) return false;
+  // Wrapped prose is not a new entry simply because it starts mid-sentence.
+  if (/[,，、：:]/.test(text) && !/[|｜]/.test(text) && !LEADERS.test(text)) return false;
   return text.length <= 110 && !/[。！？;；]|[.!?]\s*$/.test(text);
 }
 
 function anchorTitleMatches(line: SourceLine, field: GroundingField, kind: SourceKind): boolean {
   const value = normalized(field.value);
   if (!value || /^(?:项目|公司|学校|project|company|school)$/i.test(value)) return false;
-  const text = bare(line.text).replace(/^(?:项目名称|项目|公司名称|公司|单位名称|单位|学校|院校|projectname|company|school)\s*[:：]\s*/i, '');
-  const parts = text.split(/[|｜\t]/).map((part) => part.replace(DATE_RANGE, '').trim()).filter(Boolean);
+  const text = bare(line.text).replace(instancePrefix(kind), '');
+  const parts = text.split(/[|｜\t]|[.…⋯·．]{2,}/).map((part) => part.replace(DATE_RANGE, '').trim()).filter(Boolean);
   if (parts.some((part) => normalized(part) === value)) return true;
   return parts.some((part) => {
+    // Parenthetical clients, years and repository links qualify a title; they do not change its owner.
+    const suffix = normalized(part).slice(value.length);
+    if (normalized(part).startsWith(value) && /^[（(]/.test(suffix)) return true;
     if (!part.toLowerCase().startsWith(field.value.trim().toLowerCase() + ' ')) return false;
     const rest = part.slice(field.value.trim().length).trim();
     return /^(?:\d{4}|角色[:：]|职位[:：])/.test(rest) || (kind !== 'projects' && DEGREE_OR_ROLE.test(rest));
@@ -67,17 +83,23 @@ export class ResumeSourceIndex {
 
   constructor(readonly text: string) {
     let page = 1; let kind: SourceKind | undefined; let section: string | undefined; let offset = 0;
+    let subsection: SourceKind | undefined;
     const counts = new Map<number, number>();
     for (const raw of text.split('\n')) {
       const trimmed = raw.trim(); const marker = /^\[第\s*(\d+)\s*页\]$/.exec(trimmed);
       if (marker) { page = Number(marker[1]); offset += raw.length + 1; continue; }
       if (trimmed) {
         const nextKind = headingKind(trimmed);
-        if (nextKind) { kind = nextKind; section = trimmed; }
+        if (nextKind) { kind = nextKind; section = trimmed; subsection = undefined; }
+        if (kind === 'additional' || kind === 'basic') {
+          if (/^(?:荣誉奖项|荣誉奖励|获奖情况|所获奖项|奖项|awards|honors)\s*[:：]/i.test(trimmed)) subsection = 'awards';
+          else if (/^(?:校园活动|社团活动|个人爱好|补充信息|其他信息)\s*[:：]/.test(trimmed)) subsection = 'additional';
+        }
+        const lineKind = subsection ?? kind;
         const number = (counts.get(page) ?? 0) + 1; counts.set(page, number);
         const start = offset + raw.indexOf(trimmed);
         this.lines.push({ id: `p${page}-l${number}`, page, text: trimmed, start, end: start + trimmed.length,
-          ...(kind ? { kind } : {}), ...(section ? { section } : {}), heading: nextKind !== undefined });
+          ...(lineKind ? { kind: lineKind } : {}), ...(section ? { section } : {}), heading: nextKind !== undefined });
         const indexed = this.pages.get(page) ?? { text: '', offsets: [] };
         for (let index = 0; index < trimmed.length; index++) {
           const char = trimmed[index]!;
@@ -114,7 +136,7 @@ export class ResumeSourceIndex {
     const located = owners.flatMap((owner) => {
       if (!owner.primary) return [];
       const candidates = this.matches(owner.primary, owner.kind).filter((match) => match.first === match.last && !match.first.heading &&
-        !NARRATIVE.test(bare(match.first.text)) && anchorTitleMatches(match.first, owner.primary!, owner.kind));
+        !NARRATIVE.test(bare(match.first.text)) && !FIELD_LABEL.test(bare(match.first.text)) && anchorTitleMatches(match.first, owner.primary!, owner.kind));
       return candidates.length === 1 ? [{ ...owner, anchor: candidates[0]! }] : [];
     });
     const scopes = new Map<object, EvidenceScope>();
