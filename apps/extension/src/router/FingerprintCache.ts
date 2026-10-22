@@ -17,6 +17,8 @@ export function fingerprintInputFor(host: string, field: FieldSignature): Finger
     constraints?.min ?? '', constraints?.max ?? '', constraints?.step ?? '',
     constraints?.maxLength ?? null, constraints?.pattern ?? '',
     [...field.componentHints].sort(), field.options ?? [],
+    ...(descriptor.disambiguator?.sameLabelSiblingIndex !== undefined || descriptor.disambiguator?.stableAttribute
+      ? [descriptor.disambiguator.stableAttribute ?? '', descriptor.disambiguator.sameLabelSiblingIndex ?? null] : []),
   ]));
   return { host, sectionType: field.sectionType, normalizedLabel: descriptor.normalizedLabel, controlKind: field.controlKind, context };
 }

@@ -1,4 +1,5 @@
 import type { SectionType } from '@/shared/contracts/field';
+import { nearbyFieldLabel } from './FieldLabel';
 
 export const NATIVE_CONTROL_SELECTOR = 'input, select, textarea';
 const COMBOBOX_TRIGGER_SELECTOR =
@@ -12,6 +13,7 @@ const SENSITIVE_CONTEXT_PATTERN =
 const PLUGIN_UI_SELECTOR = '[data-applyfill-ui]';
 
 const SECTION_KEYWORDS: Array<{ type: SectionType; keywords: string[] }> = [
+  { type: 'basic', keywords: ['个人信息', '基本信息', '联系信息', '联系方式'] },
   { type: 'education', keywords: ['教育', '学历', '学校', '学习经历'] },
   { type: 'work', keywords: ['工作', '实习', '任职'] },
   { type: 'project', keywords: ['项目'] },
@@ -21,7 +23,7 @@ const SECTION_KEYWORDS: Array<{ type: SectionType; keywords: string[] }> = [
 ];
 
 const HEADING_SELECTOR =
-  ':scope > legend, :scope > h1, :scope > h2, :scope > h3, :scope > h4, :scope > h5, :scope > h6';
+  ':scope > legend, :scope > h1, :scope > h2, :scope > h3, :scope > h4, :scope > h5, :scope > h6, :scope > .form-part-head .head-title';
 
 export function isFormElement(element: Element): element is HTMLElement {
   const tag = element.tagName.toLowerCase();
@@ -58,6 +60,7 @@ export function isSensitiveField(element: HTMLElement): boolean {
     element.getAttribute('name'),
     element.getAttribute('id'),
     element.getAttribute('aria-label'),
+    nearbyFieldLabel(element),
   ];
   if (tag === 'input') {
     for (const label of Array.from((element as HTMLInputElement).labels ?? [])) {

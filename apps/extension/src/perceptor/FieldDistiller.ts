@@ -6,12 +6,14 @@ import type {
   SectionType,
 } from '@/shared/contracts/field';
 import { normalizeLabel } from '@/shared/utils/text';
+import { hasNearbyRequiredMarker, nearbyFieldLabel } from './FieldLabel';
 
 import {
   detectSectionType,
   FORM_CONTROL_SELECTOR,
   isComboboxTrigger,
   isElementVisible,
+  isSensitiveField,
   isSkippedInputType,
 } from './FormScanner';
 
@@ -163,6 +165,8 @@ function resolvePlainLabel(element: HTMLElement): { text: string; source: LabelS
   if (explicit !== undefined) {
     return explicit;
   }
+  const nearby = nearbyFieldLabel(element);
+  if (nearby) return { text: nearby, source: 'nearby-label' };
   const placeholder = element.getAttribute('placeholder');
   if (placeholder !== null && placeholder.trim() !== '') {
     return { text: cleanLabelText(placeholder), source: 'placeholder' };
@@ -180,6 +184,9 @@ export function isRadioElement(element: HTMLElement): element is HTMLInputElemen
 
 export function collectRadioGroup(element: HTMLInputElement): HTMLInputElement[] {
   if (element.name === '') {
+    const group = element.closest('[role="radiogroup"], .phoenix-radio-group, .form-item');
+    if (group) return [...group.querySelectorAll<HTMLInputElement>('input[type="radio"]')]
+      .filter((radio) => radio.closest('[role="radiogroup"], .phoenix-radio-group, .form-item') === group);
     return [element];
   }
   const scope = element.form ?? element.ownerDocument;
@@ -239,6 +246,8 @@ function resolveRadioGroupLabel(radios: HTMLInputElement[]): { text: string; sou
     }
   }
   const container = commonAncestor(radios);
+  const nearby = nearbyFieldLabel(first);
+  if (nearby) return { text: nearby, source: 'nearby-label' };
   if (container !== null) {
     for (const child of container.children) {
       const tag = child.tagName.toLowerCase();
@@ -348,7 +357,7 @@ export function distillField(element: HTMLElement, options: DistillOptions = {})
     labelSource: label.source,
     controlKind,
     sectionType,
-    required: element.hasAttribute('required') || element.getAttribute('aria-required') === 'true',
+    required: element.hasAttribute('required') || element.getAttribute('aria-required') === 'true' || hasNearbyRequiredMarker(element),
     readonly:
       controlKind !== 'combobox' &&
       (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) &&
@@ -401,20 +410,18 @@ export interface DistilledElement {
 
 export function distillElements(elements: HTMLElement[], options: DistillOptions = {}): DistilledElement[] {
   const results: DistilledElement[] = [];
-  const seenRadioGroups = new Set<string>();
+  const seenRadios = new Set<HTMLInputElement>();
   for (const element of elements) {
-    if (isRadioElement(element) && element.name !== '') {
-      const groupKey = `${element.form?.id ?? ''}::${element.name}`;
-      if (seenRadioGroups.has(groupKey)) {
-        continue;
-      }
-      seenRadioGroups.add(groupKey);
+    if (isRadioElement(element)) {
+      if (seenRadios.has(element)) continue;
+      for (const radio of collectRadioGroup(element)) seenRadios.add(radio);
     }
     const field = distillField(element, options);
     if (field !== undefined) {
       results.push({ element, field });
     }
   }
+  applySameLabelFallback(results);
   return results;
 }
 
@@ -433,13 +440,9 @@ export function applySameLabelFallback(items: DistilledElement[]): void {
   for (const item of items) {
     const descriptor = item.field.descriptor;
     const disambiguator = descriptor.disambiguator;
-    if (disambiguator?.fieldName !== undefined || disambiguator?.groupLabel !== undefined) {
-      continue;
-    }
-    if (descriptor.normalizedLabel === '') {
-      continue;
-    }
-    const key = `${descriptor.normalizedLabel}|${descriptor.controlKind}`;
+    const key = JSON.stringify([descriptor.formId, descriptor.stepId, descriptor.sectionType,
+      descriptor.instanceId ?? '', descriptor.normalizedLabel, descriptor.controlKind, descriptor.semanticRole ?? '',
+      disambiguator?.fieldName ?? '', disambiguator?.groupLabel ?? '', disambiguator?.stableAttribute ?? '']);
     const group = groups.get(key);
     if (group === undefined) {
       groups.set(key, [item]);
@@ -460,12 +463,12 @@ export function applySameLabelFallback(items: DistilledElement[]): void {
 
 export function distillScopedElements(container: HTMLElement, options: ScopedDistillOptions): DistilledElement[] {
   const elements: HTMLElement[] = [];
-  if (isFormElementContainer(container) && !isSkippedInputType(container)) {
+  if (isFormElementContainer(container) && !isSkippedInputType(container) && !isSensitiveField(container)) {
     elements.push(container);
   }
   for (const element of container.querySelectorAll(SCOPED_FORM_SELECTOR)) {
     const html = element as HTMLElement;
-    if (isSkippedInputType(html)) {
+    if (isSkippedInputType(html) || isSensitiveField(html)) {
       continue;
     }
     if (html.closest(PLUGIN_UI_SELECTOR) !== null) {
@@ -482,7 +485,6 @@ export function distillScopedElements(container: HTMLElement, options: ScopedDis
     formId: options.formId,
     stepId: options.stepId,
   });
-  applySameLabelFallback(results);
   return results;
 }
 

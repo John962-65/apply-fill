@@ -28,7 +28,7 @@ export interface AutofillResponse {
       cancelled: number;
     };
     fields: Array<{ fieldKey: string; stepId?: string; label: string; status: string; reason?: string; expectedValue?: unknown }>;
-    mappingIssues: Array<{ label: string; kind: string; reason: string }>;
+    mappingIssues: Array<{ fieldKey?: string; label: string; kind: string; reason: string }>;
     instances?: Array<{
       stepId?: string;
       sectionType: string;

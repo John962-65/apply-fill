@@ -33,6 +33,7 @@ export default defineConfig({
         'react-cascader': page('react-cascader.html'),
         'react-waves': page('react-waves.html'),
         'beisen-month': page('beisen-month.html'),
+        'beisen-form': page('beisen-form.html'),
         'react-datepicker': page('react-datepicker.html'),
         'react-daterange': page('react-daterange.html'),
         'react-frames': page('react-frames.html'),

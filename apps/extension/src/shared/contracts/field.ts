@@ -32,6 +32,7 @@ export type LabelSource =
   | 'wrapping-label'
   | 'aria-label'
   | 'aria-labelledby'
+  | 'nearby-label'
   | 'placeholder'
   | 'name';
 

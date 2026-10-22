@@ -178,7 +178,7 @@ export function scanRepeatableSections(root: ParentNode, elements?: HTMLElement[
   const scopes = new Map<HTMLElement, { type: SectionType; headingText: string }>();
   for (const element of formElements) {
     const found = findSectionHeading(element);
-    if (found === undefined) {
+    if (found === undefined || found.type === 'basic') {
       continue;
     }
     if (!scopes.has(found.scope)) {
