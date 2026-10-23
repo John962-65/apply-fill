@@ -296,16 +296,16 @@ export class FieldExecutionEngine {
               else if (this.interactionScopes.get(fieldKey)?.controller === fieldController) this.interactionScopes.delete(fieldKey);
             }, onAction: report, decide: this.deps.interaction.decide });
           assertActive();
-          if (recovered.status === 'CONFIRMED') {
-            commit = await withAbort(verify(), combined);
-            assertActive();
-            if (commit.status === 'CONFIRMED') {
-              this.registry.markVerified(lease);
-              return { ...this.baseResult(field, 'VERIFIED', attempts), commit };
-            }
+          commit = await withAbort(verify(), combined);
+          assertActive();
+          report({ actionStage: 'VERIFY', result: commit.status, reason: commit.failureReason, elapsedMs: 0 });
+          if (commit.status === 'CONFIRMED') {
+            this.registry.markVerified(lease);
+            return { ...this.baseResult(field, 'VERIFIED', attempts), commit };
           }
           report({ actionStage: 'RECOVER', result: 'NEEDS_MANUAL', reason: recovered.reason, elapsedMs: 0 });
-          return { ...this.baseResult(field, 'NEEDS_MANUAL', attempts, recovered.reason), commit };
+          const reason = !fastError && commit.status === 'UNKNOWN' ? 'COMMIT_UNKNOWN' : recovered.reason;
+          return { ...this.baseResult(field, 'NEEDS_MANUAL', attempts, reason), commit };
         }
       }
       if (fastError) throw fastError;

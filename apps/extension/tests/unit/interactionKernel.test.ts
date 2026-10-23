@@ -8,6 +8,7 @@ import { validateInteractionDecision } from '@/shared/contracts/interaction';
 import type { InteractionDecider, InteractionDecisionRequest } from '@/shared/contracts/interaction';
 import { FieldExecutionEngine } from '@/actuator/FieldExecutionEngine';
 import type { DateAgent } from '@/actuator/DateAgent';
+import type { SelectAgent } from '@/actuator/SelectAgent';
 import { GuardRegistry } from '@/guard/GuardRegistry';
 import { interactionValueMatches } from '@/shared/utils/interactionValue';
 import { makeSignature, mustQuery } from './helpers';
@@ -182,6 +183,19 @@ describe('state-driven interaction kernel', () => {
       expectedValue: '2020-09', expectedText: '2020-09', targetPath: 'education[0].startDate' }], { runId: 'run', signal: fixture.controller.signal });
     expect(result[0]?.status).toBe('NEEDS_MANUAL'); expect(result[0]?.reason).toContain('INSUFFICIENT_DATE_PRECISION');
     expect(getMode).not.toHaveBeenCalled(); expect(decide).not.toHaveBeenCalled(); expect(verify).not.toHaveBeenCalled();
+  });
+
+  it('慢路径未解决提交状态时保留 COMMIT_UNKNOWN，详细探索原因仍记录到诊断', async () => {
+    const fixture = mount(); fixture.business.remove(); fixture.target.value = '男';
+    const diagnostic = vi.fn();
+    const engine = new FieldExecutionEngine(new GuardRegistry(), { resolveElement: () => fixture.target,
+      verifyField: (context) => new NativeCommitPredicate().verify(context), onDiagnostic: diagnostic,
+      selectAgent: { select: async () => ({ status: 'UNKNOWN', usedSearch: false, actions: 1 }) } as unknown as SelectAgent,
+      interaction: { getMode: async () => 'local', decide: vi.fn<InteractionDecider>() } });
+    const result = await engine.executeRun([{ signature: makeSignature('combobox', { fieldKey: 'gender' }), element: fixture.target,
+      expectedValue: '男', expectedText: '男', targetPath: 'basic.gender' }], { runId: 'run', signal: fixture.controller.signal });
+    expect(result[0]?.reason).toBe('COMMIT_UNKNOWN'); expect(result[0]?.commit?.status).toBe('UNKNOWN');
+    expect(diagnostic.mock.calls.some(([, record]) => record.reason === 'INTERACTION_UNRESOLVED')).toBe(true);
   });
 
   it('持续重建候选且一直不提交时，最多执行八个动作', async () => {
