@@ -1,4 +1,5 @@
 import type { ControlKind, SectionType } from './field';
+import type { InteractionMode } from './interaction';
 
 export const LLM_CONFIG_STORAGE_KEY = 'applyfill.llm.config.v1';
 
@@ -11,6 +12,7 @@ export interface LlmProviderConfig {
   maxFieldsPerRequest: number;
   timeoutMs: number;
   maxRetries: number;
+  interactionMode: InteractionMode;
 }
 
 export const DEFAULT_LLM_CONFIG: LlmProviderConfig = {
@@ -22,6 +24,7 @@ export const DEFAULT_LLM_CONFIG: LlmProviderConfig = {
   maxFieldsPerRequest: 20,
   timeoutMs: 10000,
   maxRetries: 1,
+  interactionMode: 'local',
 };
 
 export interface LlmConfigView {
@@ -33,6 +36,7 @@ export interface LlmConfigView {
   timeoutMs: number;
   maxRetries: number;
   hasApiKey: boolean;
+  interactionMode: InteractionMode;
 }
 
 export interface LlmFieldRef {
@@ -121,6 +125,7 @@ export function normalizeLlmConfig(raw: unknown): LlmProviderConfig {
     ),
     timeoutMs: Math.round(clampNumber(record.timeoutMs, DEFAULT_LLM_CONFIG.timeoutMs, 1000, 60000)),
     maxRetries: Math.round(clampNumber(record.maxRetries, DEFAULT_LLM_CONFIG.maxRetries, 0, 3)),
+    interactionMode: record.interactionMode === 'off' || record.interactionMode === 'ai' ? record.interactionMode : 'local',
   };
 }
 
@@ -134,5 +139,6 @@ export function toLlmConfigView(config: LlmProviderConfig): LlmConfigView {
     timeoutMs: config.timeoutMs,
     maxRetries: config.maxRetries,
     hasApiKey: config.apiKey !== '',
+    interactionMode: config.interactionMode,
   };
 }

@@ -36,6 +36,7 @@ export default defineConfig({
         'beisen-form': page('beisen-form.html'),
         'moka-form': page('moka-form.html'),
         'engine-regression': page('engine-regression.html'),
+        'interaction-lab': page('interaction-lab.html'),
         'react-datepicker': page('react-datepicker.html'),
         'react-daterange': page('react-daterange.html'),
         'react-frames': page('react-frames.html'),

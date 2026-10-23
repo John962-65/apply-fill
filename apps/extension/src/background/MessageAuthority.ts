@@ -18,6 +18,7 @@ export const MESSAGE_POLICIES: Record<BackgroundMessage['type'], CallerPolicy> =
   UPLOAD_ATTACHMENT: 'extension', INJECT_CONTENT_SCRIPT: 'extension', BIND_TARGET_TAB: 'extension',
   CHECK_TAB_PERMISSION: 'extension', AUTHORIZE_TAB: 'extension',
   GET_LLM_CONFIG: 'extension', SET_LLM_CONFIG: 'extension', LLM_TEST_CONNECTION: 'extension', LLM_ROUTE_FIELDS: 'run',
+  GET_INTERACTION_MODE: 'run', LLM_INTERACTION_DECIDE: 'run', LLM_INTERACTION_CANCEL: 'run',
   GET_RESUME_AI_CONFIG: 'extension', SET_RESUME_AI_CONFIG: 'extension', RESUME_EXTRACT_TEXT: 'extension',
 };
 

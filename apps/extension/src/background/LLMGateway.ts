@@ -20,6 +20,9 @@ import type {
 
 import type { FetchLike } from './ModelProvider';
 import { ModelProvider } from './ModelProvider';
+import { interactionPrompt, reviewInteractionRequest } from './InteractionReview';
+import type { InteractionDecisionResponse } from '@/shared/contracts/interaction';
+import { validateInteractionDecision } from '@/shared/contracts/interaction';
 
 export interface LlmGatewayOptions {
   fetchFn?: FetchLike;
@@ -31,6 +34,8 @@ const MAX_FIELDS_PER_MESSAGE = 50;
 
 export class LLMGateway {
   private readonly inFlight = new Map<string, Set<AbortController>>();
+  private readonly interactionRequests = new Map<string, AbortController>();
+  private readonly cancelledInteractions = new Set<string>();
   private readonly fetchFn: FetchLike | undefined;
   private readonly storageArea: chrome.storage.StorageArea | undefined;
   private readonly loadResume: () => Promise<CompiledResume | null>;
@@ -55,6 +60,7 @@ export class LLMGateway {
     const merged = normalizeLlmConfig({ ...current, ...patch });
     await this.storageArea?.set?.({ [LLM_CONFIG_STORAGE_KEY]: merged });
     if (!merged.enabled) for (const runId of this.inFlight.keys()) this.cancelRun(runId);
+    if (merged.interactionMode !== 'ai') for (const controller of this.interactionRequests.values()) controller.abort();
     return merged;
   }
 
@@ -64,6 +70,41 @@ export class LLMGateway {
 
   cancelRun(runId: string): void {
     for (const controller of this.inFlight.get(runId) ?? []) controller.abort();
+  }
+
+  cancelInteraction(runId: string, requestId: string): void {
+    const key = `${runId}/${requestId}`;
+    this.cancelledInteractions.add(key);
+    if (this.cancelledInteractions.size > 1000) this.cancelledInteractions.delete(this.cancelledInteractions.values().next().value!);
+    this.interactionRequests.get(key)?.abort();
+  }
+
+  async decideInteraction(raw: unknown, runId: string): Promise<InteractionDecisionResponse> {
+    const requestId = raw && typeof raw === 'object' ? (raw as { requestId?: unknown }).requestId : undefined;
+    if (typeof requestId !== 'string' || !/^interaction_[a-zA-Z0-9]{1,40}$/.test(requestId)) return { ok: false, error: 'INVALID_INTERACTION_REQUEST' };
+    const key = `${runId}/${requestId}`;
+    if (this.cancelledInteractions.has(key)) return { ok: false, error: 'LLM_CANCELLED' };
+    if (this.interactionRequests.has(key)) return { ok: false, error: 'INTERACTION_REQUEST_IN_PROGRESS' };
+    const controller = new AbortController();
+    const controllers = this.inFlight.get(runId) ?? new Set<AbortController>();
+    this.inFlight.set(runId, controllers); controllers.add(controller);
+    this.interactionRequests.set(key, controller);
+    try {
+      const config = await this.loadConfig();
+      if (!config.enabled || config.interactionMode !== 'ai') return { ok: false, error: 'INTERACTION_AI_DISABLED' };
+      let request;
+      try { request = reviewInteractionRequest(raw, privateFactStrings(await this.loadResume())); }
+      catch { return { ok: false, error: 'INTERACTION_PRIVACY_UNAVAILABLE' }; }
+      if (controller.signal.aborted) return { ok: false, error: 'LLM_CANCELLED' };
+      if (!request) return { ok: false, error: 'INVALID_INTERACTION_REQUEST' };
+      const result = await this.providerFor({ ...config, timeoutMs: Math.min(config.timeoutMs, 3000), maxRetries: 0 })
+        .complete(interactionPrompt(request), controller.signal);
+      if (!result.ok || controller.signal.aborted) return { ok: false, error: 'INTERACTION_MODEL_UNAVAILABLE' };
+      return validateInteractionDecision(extractJsonObject(result.content), request);
+    } finally {
+      this.interactionRequests.delete(key); controllers.delete(controller);
+      if (controllers.size === 0 && this.inFlight.get(runId) === controllers) this.inFlight.delete(runId);
+    }
   }
 
   async routeFields(rawFields: LlmFieldRef[], runId = 'standalone'): Promise<LlmRouteResponse> {

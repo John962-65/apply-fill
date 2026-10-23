@@ -772,6 +772,19 @@ export function installBackgroundRuntime(): void {
     return { ok: true, config: toLlmConfigView(config) };
   });
 
+  router.register('GET_INTERACTION_MODE', async () => ({ mode: (await llmGateway.loadConfig()).interactionMode }));
+  router.register('LLM_INTERACTION_DECIDE', async (message, sender) => {
+    const data = message as { runId?: unknown; request?: unknown };
+    if (typeof data.runId !== 'string' || !await authorizedContext(sender, data.runId)) return { ok: false, error: 'LLM_CANCELLED' };
+    return llmGateway.decideInteraction(data.request, data.runId);
+  });
+  router.register('LLM_INTERACTION_CANCEL', async (message) => {
+    const data = message as { runId?: unknown; requestId?: unknown };
+    if (typeof data.runId !== 'string' || typeof data.requestId !== 'string') return { ok: false };
+    llmGateway.cancelInteraction(data.runId, data.requestId);
+    return { ok: true };
+  });
+
   router.register('SET_LLM_CONFIG', async (message, sender) => {
     if (!isExtensionPage(sender)) return { ok: false, error: 'TRUSTED_CONTEXT_REQUIRED' };
     const patch = (message as { config?: unknown }).config;

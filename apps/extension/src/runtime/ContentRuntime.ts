@@ -47,6 +47,7 @@ import type { InstanceObservation, InstanceReport, ObservationField, ReanchorSta
 import type { RunEvent, RunSummary } from '@/shared/contracts/run';
 import type { WaveExecutionSummary } from '@/shared/contracts/scheduler';
 import { LLM_DISABLED_ERROR, LLM_NOT_CONFIGURED_ERROR } from '@/shared/contracts/llm';
+import type { InteractionDecisionResponse, InteractionMode } from '@/shared/contracts/interaction';
 import type { LlmRouteResponse } from '@/shared/contracts/llm';
 import { sendToBackground } from '@/shared/messages/client';
 import { isTabMessage } from '@/shared/messages/protocol';
@@ -235,6 +236,21 @@ export class ContentRuntime {
       selectAgent,
       cascaderWalker: new CascaderWalker(portalTracker),
       dateAgent: new DateAgent(portalTracker, selectAgent),
+      interaction: {
+        getMode: async (runId, signal) => {
+          const response = await withAbort(sendToBackground<{ mode?: InteractionMode }>({ type: 'GET_INTERACTION_MODE', runId }), signal);
+          return response?.mode === 'local' || response?.mode === 'ai' ? response.mode : 'off';
+        },
+        decide: async (request, signal) => {
+          const runId = this.activeRun?.runId;
+          if (!runId || signal.aborted) return { ok: false, error: 'LLM_CANCELLED' };
+          const cancel = () => { void sendToBackground({ type: 'LLM_INTERACTION_CANCEL', requestId: request.requestId, runId }).catch(() => undefined); };
+          signal.addEventListener('abort', cancel, { once: true });
+          try {
+            return await withAbort(sendToBackground<InteractionDecisionResponse>({ type: 'LLM_INTERACTION_DECIDE', request, runId }), signal);
+          } finally { signal.removeEventListener('abort', cancel); }
+        },
+      },
     });
     this.waveScheduler = new WaveScheduler({
       barrier: new WaveBarrier(document, undefined, (element) => this.resolveFieldKey(element)),
@@ -1902,6 +1918,8 @@ export class ContentRuntime {
   }
 
   private resolveFieldKey(target: Element): string | undefined {
+    const interactionOwner = this.engine.interactionOwner(target);
+    if (interactionOwner !== undefined) return interactionOwner;
     // Trusted interaction with a portal option/search box belongs to its owning field.
     // The portal itself is not a new applicant field.
     const overlay = findVisibleOverlays(target.ownerDocument).find((candidate) => candidate.contains(target));

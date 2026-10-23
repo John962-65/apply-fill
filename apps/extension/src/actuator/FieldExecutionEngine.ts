@@ -5,6 +5,9 @@ import type { ActionDiagnostic, ActionReporter } from '@/shared/contracts/diagno
 import { ApplyFillError, classifyExecutionError, throwIfAborted } from '@/shared/errors';
 import type { GuardRegistry } from '@/guard/GuardRegistry';
 import { withAbort } from '@/shared/utils/timing';
+import type { InteractionDecider, InteractionMode } from '@/shared/contracts/interaction';
+import type { InteractionObserver } from '@/perceptor/InteractionObserver';
+import { runInteractionLoop } from './InteractionLoop';
 
 import { CascaderWalker } from './CascaderWalker';
 import type { DateAgent } from './DateAgent';
@@ -25,6 +28,10 @@ export interface FieldEngineDeps {
   getDomRevision?(): number;
   isIdentityValid?(element: HTMLElement, field: ExecutableField): boolean;
   onDiagnostic?(field: ExecutableField, diagnostic: ActionDiagnostic & { runId: string; wave: string }): void;
+  interaction?: {
+    getMode(runId: string, signal: AbortSignal): Promise<InteractionMode>;
+    decide: InteractionDecider;
+  };
 }
 
 export interface ExecuteRunOptions {
@@ -55,6 +62,7 @@ export class FieldExecutionEngine {
   private readonly registry: GuardRegistry;
   private readonly deps: FieldEngineDeps;
   private readonly fieldControllers = new Map<string, AbortController>();
+  private readonly interactionScopes = new Map<string, { observer: InteractionObserver; controller: AbortController }>();
 
   constructor(registry: GuardRegistry, deps: FieldEngineDeps) {
     this.registry = registry;
@@ -107,6 +115,13 @@ export class FieldExecutionEngine {
 
   isWriting(fieldKey: string): boolean {
     return this.fieldControllers.has(fieldKey);
+  }
+
+  interactionOwner(target: Element): string | undefined {
+    for (const [key, scope] of this.interactionScopes) {
+      if (!scope.controller.signal.aborted && scope.observer.owns(target)) return key;
+    }
+    return undefined;
   }
 
   private async executeFieldWithRetry(
@@ -221,7 +236,23 @@ export class FieldExecutionEngine {
       };
       assertActive();
       report({ actionStage: 'LOCATE', result: 'LOCATED', elapsedMs: Date.now() - stageStartedAt });
-      const action = await withAbort(this.executeAction(element, field, combined, assertActive, onProgress, report), combined);
+      let action: SelectOutcome | void = undefined;
+      let fastError: unknown;
+      const previousClicks = new Set<Element>();
+      const rememberClick = (event: Event) => {
+        const clicked = event.composedPath()[0] ?? event.target;
+        if (!event.isTrusted && clicked instanceof Element) previousClicks.add(clicked);
+      };
+      const supportsInteraction = ['combobox', 'date', 'unknown'].includes(field.signature.controlKind) && this.deps.interaction !== undefined;
+      if (supportsInteraction) element.ownerDocument.addEventListener('click', rememberClick, true);
+      try {
+        action = await withAbort(this.executeAction(element, field, combined, assertActive, onProgress, report), combined);
+      } catch (error) {
+        assertActive();
+        if (!supportsInteraction || !['ACTUATOR_ERROR', 'COMMIT_NOT_CONFIRMED'].includes(classifyExecutionError(error))) throw error;
+        fastError = error;
+        report({ actionStage: stage, result: 'FAST_PATH_FAILED', reason: classifyExecutionError(error), elapsedMs: Date.now() - stageStartedAt });
+      } finally { element.ownerDocument.removeEventListener('click', rememberClick, true); }
       if (action?.commitValue !== undefined) field.expectedCommitValue = action.commitValue;
       (field as { element: HTMLElement }).element = element;
 
@@ -229,7 +260,7 @@ export class FieldExecutionEngine {
 
       report({ actionStage: 'WAIT_COMMIT', result: 'VERIFYING', elapsedMs: 0 });
       stage = 'VERIFY'; stageStartedAt = Date.now();
-      const commit = await withAbort(this.deps.verifyField({
+      const verify = () => this.deps.verifyField({
         fieldKey,
         controlKind: field.signature.controlKind,
         signature: field.signature,
@@ -238,7 +269,8 @@ export class FieldExecutionEngine {
         expectedText: field.expectedText,
         expectedCommitValue: field.expectedCommitValue,
         signal: combined,
-      }), combined);
+      });
+      let commit = await withAbort(verify(), combined);
 
       assertActive();
       report({ actionStage: 'VERIFY', result: commit.status, reason: commit.failureReason, elapsedMs: Date.now() - stageStartedAt });
@@ -249,6 +281,31 @@ export class FieldExecutionEngine {
         result.commit = commit;
         return result;
       }
+      if (supportsInteraction && this.deps.interaction) {
+        const mode = await withAbort(this.deps.interaction.getMode(options.runId, combined), combined);
+        assertActive();
+        if (mode !== 'off') {
+          const recovered = await runInteractionLoop({ target: element, goal: field.expectedText ?? String(field.expectedValue), label: field.signature.label,
+            mode, signal: combined, assertActive, onProgress, previousClicks, getRevision: () => this.deps.getDomRevision?.() ?? 0,
+            verify, onCommitValue: (value) => { field.expectedCommitValue = value; },
+            onScope: (observer) => {
+              if (observer) this.interactionScopes.set(fieldKey, { observer, controller: fieldController });
+              else if (this.interactionScopes.get(fieldKey)?.controller === fieldController) this.interactionScopes.delete(fieldKey);
+            }, onAction: report, decide: this.deps.interaction.decide });
+          assertActive();
+          if (recovered.status === 'CONFIRMED') {
+            commit = await withAbort(verify(), combined);
+            assertActive();
+            if (commit.status === 'CONFIRMED') {
+              this.registry.markVerified(lease);
+              return { ...this.baseResult(field, 'VERIFIED', attempts), commit };
+            }
+          }
+          report({ actionStage: 'RECOVER', result: 'NEEDS_MANUAL', reason: recovered.reason, elapsedMs: 0 });
+          return { ...this.baseResult(field, 'NEEDS_MANUAL', attempts, recovered.reason), commit };
+        }
+      }
+      if (fastError) throw fastError;
       if (commit.status === 'REJECTED') {
         const result = this.baseResult(field, action?.status === 'UNKNOWN' ? 'NEEDS_MANUAL' : 'RETRYABLE', attempts,
           action?.status === 'UNKNOWN' ? 'COMMIT_UNKNOWN' : 'COMMIT_NOT_CONFIRMED');

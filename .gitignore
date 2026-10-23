@@ -6,6 +6,7 @@ coverage/
 test-results/
 playwright-report/
 playwright/.cache/
+evaluation-results/
 *.zip
 *.log
 .env

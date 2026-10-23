@@ -1,4 +1,4 @@
-export const ACTION_STAGES = ['SCAN', 'MAP', 'FORMAT', 'LOCATE', 'OPEN', 'SEARCH', 'SELECT', 'WAIT_COMMIT', 'VERIFY', 'REANCHOR', 'RECOVER'] as const;
+export const ACTION_STAGES = ['SCAN', 'MAP', 'FORMAT', 'LOCATE', 'OPEN', 'SEARCH', 'SELECT', 'WAIT_COMMIT', 'VERIFY', 'REANCHOR', 'RECOVER', 'OBSERVE', 'DECIDE', 'ACT'] as const;
 export type ActionStage = typeof ACTION_STAGES[number];
 
 export interface ActionDiagnostic {

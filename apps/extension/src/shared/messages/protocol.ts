@@ -4,6 +4,7 @@ import type { ResumeFactsDocument } from '../contracts/resume';
 import type { RunEvent, RunSummary, SessionRunState } from '../contracts/run';
 import type { CacheMutation, MemoryMutation } from '../contracts/routing';
 import type { JobContextCandidate, UserCorrectionRecord } from '../contracts/context';
+import type { InteractionDecisionRequest } from '../contracts/interaction';
 
 export type TabMessage =
   | { type: 'PING' }
@@ -60,6 +61,9 @@ export type BackgroundMessage =
   | { type: 'SET_LLM_CONFIG'; config: Partial<LlmProviderConfig> }
   | { type: 'LLM_TEST_CONNECTION' }
   | { type: 'LLM_ROUTE_FIELDS'; fields: LlmFieldRef[]; runId?: string }
+  | { type: 'GET_INTERACTION_MODE'; runId: string }
+  | { type: 'LLM_INTERACTION_DECIDE'; request: InteractionDecisionRequest; runId: string }
+  | { type: 'LLM_INTERACTION_CANCEL'; requestId: string; runId: string }
   | { type: 'GET_RESUME_AI_CONFIG' }
   | { type: 'SET_RESUME_AI_CONFIG'; config: Partial<ResumeAiConfig> }
   | { type: 'RESUME_EXTRACT_TEXT'; text: string; pageCount?: number; layout?: 'single-column' | 'two-column' | 'table' | 'mixed' };
@@ -195,6 +199,7 @@ const BACKGROUND_MESSAGE_TYPES = new Set<string>([
   'SET_LLM_CONFIG',
   'LLM_TEST_CONNECTION',
   'LLM_ROUTE_FIELDS',
+  'GET_INTERACTION_MODE', 'LLM_INTERACTION_DECIDE', 'LLM_INTERACTION_CANCEL',
   'GET_RESUME_AI_CONFIG',
   'SET_RESUME_AI_CONFIG',
   'RESUME_EXTRACT_TEXT',

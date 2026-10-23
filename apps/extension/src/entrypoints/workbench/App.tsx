@@ -210,6 +210,7 @@ export function App() {
       maxFieldsPerRequest: llmConfig.maxFieldsPerRequest,
       timeoutMs: llmConfig.timeoutMs,
       maxRetries: llmConfig.maxRetries,
+      interactionMode: llmConfig.interactionMode,
     };
     if (llmApiKey !== '') {
       patch.apiKey = llmApiKey;
@@ -902,6 +903,19 @@ export function App() {
           />{' '}
           启用云端语义辅助（默认关闭）
         </label>
+        <label style={{ display: 'block', fontSize: 13, marginTop: 8 }}>
+          未知控件的交互回退{' '}
+          <select data-testid="interaction-mode" value={llmConfig?.interactionMode ?? 'local'}
+            onChange={(event) => patchLlmConfig({ interactionMode: event.target.value as LlmProviderConfig['interactionMode'] })}>
+            <option value="off">关闭（仅使用快路径）</option>
+            <option value="local">本地状态反馈（默认，不调用模型）</option>
+            <option value="ai">本地优先，歧义时请求 AI 动作建议</option>
+          </select>
+        </label>
+        <p style={{ fontSize: 12 }}>
+          AI 动作建议还需启用上方云端辅助并保存配置。只发送脱敏后的控件角色、候选标签、动作结果和目标候选标记，
+          不发送目标值、输入框内容、简历原文或整页 HTML。操作不会自动点击下一步或提交；无法确认网站已接受时转人工。
+        </p>
         <div style={{ marginTop: 8 }}>
           <input
             data-testid="llm-baseurl"
