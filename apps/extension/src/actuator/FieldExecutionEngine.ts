@@ -304,7 +304,7 @@ export class FieldExecutionEngine {
             return { ...this.baseResult(field, 'VERIFIED', attempts), commit };
           }
           report({ actionStage: 'RECOVER', result: 'NEEDS_MANUAL', reason: recovered.reason, elapsedMs: 0 });
-          const reason = !fastError && commit.status === 'UNKNOWN' ? 'COMMIT_UNKNOWN' : recovered.reason;
+          const reason = !fastError && (commit.status === 'UNKNOWN' || action?.status === 'UNKNOWN') ? 'COMMIT_UNKNOWN' : recovered.reason;
           return { ...this.baseResult(field, 'NEEDS_MANUAL', attempts, reason), commit };
         }
       }

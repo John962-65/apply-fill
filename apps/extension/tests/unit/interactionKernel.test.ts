@@ -185,8 +185,8 @@ describe('state-driven interaction kernel', () => {
     expect(getMode).not.toHaveBeenCalled(); expect(decide).not.toHaveBeenCalled(); expect(verify).not.toHaveBeenCalled();
   });
 
-  it('慢路径未解决提交状态时保留 COMMIT_UNKNOWN，详细探索原因仍记录到诊断', async () => {
-    const fixture = mount(); fixture.business.remove(); fixture.target.value = '男';
+  for (const hasBusinessInput of [true, false]) it(`慢路径保留 COMMIT_UNKNOWN 与详细诊断，业务输入存在=${hasBusinessInput}`, async () => {
+    const fixture = mount(); if (!hasBusinessInput) fixture.business.remove(); fixture.target.value = '男';
     const diagnostic = vi.fn();
     const engine = new FieldExecutionEngine(new GuardRegistry(), { resolveElement: () => fixture.target,
       verifyField: (context) => new NativeCommitPredicate().verify(context), onDiagnostic: diagnostic,
@@ -194,7 +194,7 @@ describe('state-driven interaction kernel', () => {
       interaction: { getMode: async () => 'local', decide: vi.fn<InteractionDecider>() } });
     const result = await engine.executeRun([{ signature: makeSignature('combobox', { fieldKey: 'gender' }), element: fixture.target,
       expectedValue: '男', expectedText: '男', targetPath: 'basic.gender' }], { runId: 'run', signal: fixture.controller.signal });
-    expect(result[0]?.reason).toBe('COMMIT_UNKNOWN'); expect(result[0]?.commit?.status).toBe('UNKNOWN');
+    expect(result[0]?.reason).toBe('COMMIT_UNKNOWN'); expect(result[0]?.commit?.status).toBe(hasBusinessInput ? 'REJECTED' : 'UNKNOWN');
     expect(diagnostic.mock.calls.some(([, record]) => record.reason === 'INTERACTION_UNRESOLVED')).toBe(true);
   });
 
