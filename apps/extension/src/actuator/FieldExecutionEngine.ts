@@ -249,6 +249,9 @@ export class FieldExecutionEngine {
         action = await withAbort(this.executeAction(element, field, combined, assertActive, onProgress, report), combined);
       } catch (error) {
         assertActive();
+        // Missing goal precision is a prerequisite failure, not an interaction strategy failure.
+        // Neither a state machine nor a model may invent the missing date components.
+        if (error instanceof Error && error.message.includes('INSUFFICIENT_DATE_PRECISION')) throw error;
         if (!supportsInteraction || !['ACTUATOR_ERROR', 'COMMIT_NOT_CONFIRMED'].includes(classifyExecutionError(error))) throw error;
         fastError = error;
         report({ actionStage: stage, result: 'FAST_PATH_FAILED', reason: classifyExecutionError(error), elapsedMs: Date.now() - stageStartedAt });

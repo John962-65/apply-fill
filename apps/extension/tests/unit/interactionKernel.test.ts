@@ -7,6 +7,7 @@ import { NativeCommitPredicate } from '@/verifier/CommitPredicate';
 import { validateInteractionDecision } from '@/shared/contracts/interaction';
 import type { InteractionDecider, InteractionDecisionRequest } from '@/shared/contracts/interaction';
 import { FieldExecutionEngine } from '@/actuator/FieldExecutionEngine';
+import type { DateAgent } from '@/actuator/DateAgent';
 import { GuardRegistry } from '@/guard/GuardRegistry';
 import { interactionValueMatches } from '@/shared/utils/interactionValue';
 import { makeSignature, mustQuery } from './helpers';
@@ -167,6 +168,20 @@ describe('state-driven interaction kernel', () => {
     expect(result[0]?.status).toBe('VERIFIED');
     expect(fixture.business.value).toBe('M'); expect(decide).not.toHaveBeenCalled();
     expect(guard.getGuard('gender').lockState).toBe('unlocked');
+  });
+
+  it('目标日期精度不足属于资料前置条件失败，不进入交互探索或询问模型', async () => {
+    const fixture = mount();
+    const getMode = vi.fn(async () => 'ai' as const);
+    const decide = vi.fn<InteractionDecider>();
+    const verify = vi.fn();
+    const engine = new FieldExecutionEngine(new GuardRegistry(), { resolveElement: () => fixture.target, verifyField: verify,
+      dateAgent: { fill: async () => ({ status: 'NO_OPTION', reason: 'INSUFFICIENT_DATE_PRECISION', actions: 0 }) } as unknown as DateAgent,
+      interaction: { getMode, decide } });
+    const result = await engine.executeRun([{ signature: makeSignature('date', { fieldKey: 'date' }), element: fixture.target,
+      expectedValue: '2020-09', expectedText: '2020-09', targetPath: 'education[0].startDate' }], { runId: 'run', signal: fixture.controller.signal });
+    expect(result[0]?.status).toBe('NEEDS_MANUAL'); expect(result[0]?.reason).toContain('INSUFFICIENT_DATE_PRECISION');
+    expect(getMode).not.toHaveBeenCalled(); expect(decide).not.toHaveBeenCalled(); expect(verify).not.toHaveBeenCalled();
   });
 
   it('持续重建候选且一直不提交时，最多执行八个动作', async () => {
