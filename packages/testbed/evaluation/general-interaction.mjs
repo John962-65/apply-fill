@@ -6,6 +6,7 @@ import { importFacts, launchExtensionContext, openWorkbench, runAutofill } from 
 
 const root = fileURLToPath(new URL('../../../', import.meta.url));
 const sha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim();
+const engineTree = execFileSync('git', ['rev-parse', 'HEAD:apps/extension/src'], { cwd: root, encoding: 'utf8' }).trim();
 const dirty = execFileSync('git', ['status', '--porcelain'], { cwd: root, encoding: 'utf8' }).trim();
 if (dirty) throw new Error('Commit the implementation before evaluation. Never change engine code to fit a new evaluation target.');
 const args = process.argv.slice(2);
@@ -61,15 +62,15 @@ try {
           await globalThis.chrome.runtime.sendMessage({ type: 'SET_LLM_CONFIG', config: { interactionMode,
             enabled: interactionMode === 'ai', baseUrl: 'http://localhost:5173/model', model: 'mock-interaction', maxRetries: 0 } });
         }, strategy === 'ai-mock' ? 'ai' : strategy);
-        let result = await runAutofill(workbench);
+        let result = await runAutofill(workbench, `${new URL(page.url()).origin}/*`);
         if (external && entry.fieldLabel) {
           const row = page.getByTestId('pill-row').filter({ hasText: entry.fieldLabel });
           if (await row.count() === 1) {
             await row.getByTestId('pill-source').click(); await row.getByTestId('pill-source-select').selectOption(entry.factPath);
             await page.getByTestId('quickfill-pill').getAttribute('aria-busy').catch(() => undefined);
             await page.waitForFunction(() => {
-              const host = document.querySelector('[data-applyfill-ui]');
-              return host?.shadowRoot?.querySelector('[data-testid=quickfill-pill]')?.getAttribute('aria-busy') !== 'true';
+              return [...document.querySelectorAll('[data-applyfill-ui]')].every((host) =>
+                host.shadowRoot?.querySelector('[data-testid=quickfill-pill]')?.getAttribute('aria-busy') !== 'true');
             });
             result = await workbench.evaluate(async () => {
               const all = await globalThis.chrome.storage.session.get(null);
@@ -107,6 +108,6 @@ const strategies = [...new Set(records.map((record) => record.strategy))].map((s
 });
 const output = path.join(root, 'packages/testbed/evaluation-results', `interaction-${browser}-${Date.now()}.json`);
 mkdirSync(path.dirname(output), { recursive: true });
-writeFileSync(output, JSON.stringify({ engineCommit: sha, browser, cohort: external ? 'external-frozen' : 'synthetic-known',
+writeFileSync(output, JSON.stringify({ engineCommit: sha, engineTree, browser, cohort: external ? 'external-frozen' : 'synthetic-known',
   modelVerification: args.includes('--mock-ai') ? 'simulated-api-only' : 'no-model-calls', strategies, records }, null, 2));
 console.log(JSON.stringify({ output, engineCommit: sha, strategies }, null, 2));

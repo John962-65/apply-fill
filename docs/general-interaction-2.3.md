@@ -36,6 +36,8 @@
 
 运行前必须提交全部实现。评测脚本拒绝脏工作区，记录冻结的 engineCommit。同一提交通过配置切换策略，不修改网站规则。
 
+报告另记录 `apps/extension/src` 的 engineTree。只修复评测器的目标标签页选择、结果读取或报告逻辑时，可用这个代码树标识证明引擎未变；旧的评测错误报告仍保留，不能把它们补记为通过。
+
 ```sh
 pnpm evaluate:interaction
 pnpm evaluate:interaction -- --mock-ai
